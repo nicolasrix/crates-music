@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/music-core",
+    "crates/music-subsonic",
+    "crates/music-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# internal
+music-core = { path = "crates/music-core" }
+music-subsonic = { path = "crates/music-subsonic" }
+
+# external
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+url = "2"
+md-5 = "0.10"
+hex = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+directories = "5"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# dev
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"  # fights legitimate proper nouns: Subsonic, OpenSubsonic, CLAP, etc.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
