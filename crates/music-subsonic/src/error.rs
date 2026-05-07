@@ -11,6 +11,9 @@ pub enum Error {
     #[error("malformed Subsonic response: {0}")]
     BadResponse(String),
 
+    #[error("client misconfiguration: {0}")]
+    Config(String),
+
     #[error("Subsonic error {code}: {message}")]
     Subsonic { code: i32, message: String },
 

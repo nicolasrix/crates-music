@@ -13,14 +13,7 @@ use crate::format::{albums_table, tracks_table};
 
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
-    let client = Client::new(
-        &config.server.url,
-        Credentials {
-            username: config.server.username,
-            password: config.server.password,
-        },
-    )
-    .context("constructing Subsonic client")?;
+    let client = build_client(&config).context("constructing Subsonic client")?;
 
     match cli.command {
         Command::Ping => {
@@ -58,6 +51,21 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+fn build_client(config: &Config) -> music_subsonic::Result<Client> {
+    let creds = Credentials {
+        username: config.server.username.clone(),
+        password: config.server.password.clone(),
+    };
+    if let Some(gateway) = &config.gateway {
+        // Gateway mode: target the gateway URL with a bearer token. The
+        // upstream Subsonic auth params (u/t/s/…) are still appended by
+        // `Client`, but the gateway strips them and uses its own creds.
+        Client::new(&gateway.url, creds)?.with_bearer(&gateway.bearer_token)
+    } else {
+        Client::new(&config.server.url, creds)
+    }
 }
 
 fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {

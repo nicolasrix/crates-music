@@ -4,6 +4,8 @@ members = [
     "crates/music-core",
     "crates/music-subsonic",
     "crates/music-cli",
+    "crates/music-gateway",
+    "crates/music-cache",
 ]
 
 [workspace.package]
@@ -17,6 +19,8 @@ publish = false
 # internal
 music-core = { path = "crates/music-core" }
 music-subsonic = { path = "crates/music-subsonic" }
+music-gateway = { path = "crates/music-gateway" }
+music-cache = { path = "crates/music-cache" }
 
 # external
 serde = { version = "1", features = ["derive"] }
@@ -37,8 +41,22 @@ rodio = { version = "0.20", default-features = false, features = ["symphonia-all
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 
+# persistence
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+
+# server
+axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+sha2 = "0.10"
+
 # dev
 wiremock = "0.6"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

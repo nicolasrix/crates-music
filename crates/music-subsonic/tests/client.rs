@@ -148,6 +148,26 @@ async fn http_500_surfaces_as_transport_error() {
 }
 
 #[tokio::test]
+async fn with_bearer_attaches_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/ping"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer test-token-123",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(&serde_json::json!({}))))
+        .mount(&server)
+        .await;
+
+    let client = Client::new(&server.uri(), creds())
+        .unwrap()
+        .with_bearer("test-token-123")
+        .unwrap();
+    client.ping().await.unwrap();
+}
+
+#[tokio::test]
 async fn stream_url_targets_rest_stream_with_track_id() {
     // We don't pull bytes here — just confirm the URL builder is correct.
     let client = Client::new("https://nav.example.com", creds()).unwrap();

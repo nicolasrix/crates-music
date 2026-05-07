@@ -69,6 +69,20 @@ impl Client {
         Ok(Self { base, creds, http })
     }
 
+    /// Attach a bearer token sent as `Authorization: Bearer <token>` on every
+    /// outgoing request. Used when the client targets the music-gateway
+    /// (which authenticates via a shared bearer rather than Subsonic's
+    /// token+salt scheme — though the latter is still appended and ignored
+    /// downstream, since the gateway strips client-supplied auth params).
+    pub fn with_bearer(mut self, bearer: &str) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|e| Error::Config(format!("invalid bearer token: {e}")))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        self.http = Http::builder().default_headers(headers).build()?;
+        Ok(self)
+    }
+
     fn build_url(&self, method: &str, params: &[(&str, String)]) -> Result<Url> {
         let mut url = self.base.join(&format!("rest/{method}"))?;
         let salt = auth::random_salt();

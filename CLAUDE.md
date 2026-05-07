@@ -160,4 +160,30 @@ Vertical slices, each end-to-end usable:
 
 ## Status
 
-Pre-P0. The repo is currently a `.gitignore` and this file. P0 scaffolding is the next step.
+P1 complete. Workspace has `music-core`, `music-subsonic`, `music-cache`, `music-gateway`, and `music-cli`. The gateway proxies `/rest/*` to Navidrome with auth-param injection, caches catalog browse responses in SQLite (sqlx), and supports `If-None-Match` → `304`. CLI gains a `[gateway]` config block to route through the gateway with bearer auth; direct-Navidrome mode is preserved as a fallback when no `[gateway]` block is set.
+
+P2 is next: client-side L3 audio cache + pinning + gapless playback.
+
+### Running the gateway locally
+
+```
+# 1. Generate TLS cert (one-time)
+./scripts/dev-certs.sh
+
+# 2. Write a gateway config — see crates/music-gateway/tests for shape
+
+# 3. Start the gateway
+cargo run -p music-gateway -- --config /path/to/gateway.toml
+
+# 4. Configure CLI to use it (~/.config/crates-music/config.toml):
+[server]
+url = "http://nav.lan:4533"
+username = "alice"
+password = "wonderland"
+
+[gateway]
+url = "https://gateway.local:8443"
+bearer_token = "<the same token in gateway.toml>"
+```
+
+`[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.

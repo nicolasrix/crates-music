@@ -1,0 +1,73 @@
+//! Gateway configuration loaded from TOML.
+//!
+//! The gateway is single-tenant for now (single Navidrome upstream, single
+//! shared bearer token). OAuth — and per-device tokens — arrive in a later phase.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Config {
+    pub server: ServerConfig,
+    pub upstream: UpstreamConfig,
+    pub cache: CacheConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerConfig {
+    /// Address the gateway binds to (e.g. `0.0.0.0:8443`).
+    pub listen: SocketAddr,
+    /// PEM-encoded TLS certificate path (mkcert output).
+    pub tls_cert: PathBuf,
+    /// PEM-encoded TLS key path.
+    pub tls_key: PathBuf,
+    /// Single shared bearer token. Static for P1; OAuth in a later phase.
+    pub bearer_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpstreamConfig {
+    /// Base URL of the Navidrome instance (e.g. `http://nav.lan:4533`).
+    pub navidrome_url: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// Path to the SQLite file backing the L2 metadata cache.
+    pub path: PathBuf,
+    /// TTL applied to browse-endpoint responses (in seconds).
+    pub browse_ttl_seconds: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("gateway-cache.sqlite"),
+            browse_ttl_seconds: 24 * 60 * 60,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("reading config: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("parsing config: {0}")]
+    Toml(#[from] toml::de::Error),
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let raw = std::fs::read_to_string(path)?;
+        let cfg = toml::from_str(&raw)?;
+        Ok(cfg)
+    }
+
+    pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
+        Ok(toml::from_str(s)?)
+    }
+}

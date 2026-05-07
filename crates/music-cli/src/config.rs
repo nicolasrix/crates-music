@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
+    /// When set, the CLI talks to a `music-gateway` instead of Navidrome
+    /// directly. Auth becomes a single bearer token; the `[server]`
+    /// credentials are unused in this mode but kept for clean fallback to
+    /// direct mode without rewriting the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +19,12 @@ pub struct ServerConfig {
     pub url: String,
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    pub url: String,
+    pub bearer_token: String,
 }
 
 impl Config {

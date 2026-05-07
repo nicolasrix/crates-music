@@ -1,0 +1,34 @@
+//! TOML round-trip for the gateway config.
+
+use music_gateway::Config;
+
+#[test]
+fn config_parses_a_realistic_toml() {
+    let toml = r#"
+[server]
+listen = "0.0.0.0:8443"
+tls_cert = "/etc/gateway/cert.pem"
+tls_key = "/etc/gateway/key.pem"
+bearer_token = "super-secret"
+
+[upstream]
+navidrome_url = "http://nav.lan:4533"
+username = "alice"
+password = "wonderland"
+
+[cache]
+path = "/var/lib/gateway/cache.sqlite"
+browse_ttl_seconds = 3600
+"#;
+    let cfg = Config::from_toml_str(toml).unwrap();
+    assert_eq!(cfg.server.listen.port(), 8443);
+    assert_eq!(cfg.server.bearer_token, "super-secret");
+    assert_eq!(cfg.upstream.navidrome_url, "http://nav.lan:4533");
+    assert_eq!(cfg.cache.browse_ttl_seconds, 3600);
+}
+
+#[test]
+fn config_rejects_truncated_toml() {
+    let toml = "[server]\nlisten = \"0.0.0.0:8443\"";
+    assert!(Config::from_toml_str(toml).is_err());
+}
