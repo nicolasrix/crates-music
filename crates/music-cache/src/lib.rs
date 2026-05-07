@@ -6,6 +6,10 @@
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod audio;
+
+pub use audio::{AudioCache, AudioCacheStats, AudioEntry, AudioKey, PinOutcome, UnpinOutcome};
+
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +24,8 @@ pub enum Error {
     Sqlx(#[from] sqlx::Error),
     #[error("migration: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1482,12 +1482,14 @@ name = "music-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "directories",
+ "music-cache",
  "music-core",
+ "music-player",
  "music-subsonic",
  "reqwest",
- "rodio",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1534,6 +1536,20 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "music-player"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "music-cache",
+ "music-core",
+ "rodio",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -160,9 +160,26 @@ Vertical slices, each end-to-end usable:
 
 ## Status
 
-P1 complete. Workspace has `music-core`, `music-subsonic`, `music-cache`, `music-gateway`, and `music-cli`. The gateway proxies `/rest/*` to Navidrome with auth-param injection, caches catalog browse responses in SQLite (sqlx), and supports `If-None-Match` → `304`. CLI gains a `[gateway]` config block to route through the gateway with bearer auth; direct-Navidrome mode is preserved as a fallback when no `[gateway]` block is set.
+P2 complete. New crate `music-player` (rodio + symphonia) extracted from the
+CLI. `music-cache` extended with `AudioCache`: content-addressed by
+`(track_id, bitrate, codec)`, blobs on disk under
+`$XDG_CACHE_HOME/crates-music/audio/blobs/`, metadata in SQLite. Two
+configurable budgets — regular (LRU-evicted) and pinned (never
+LRU-evicted) — with safe atomic writes (`.tmp` + `rename`).
 
-P2 is next: client-side L3 audio cache + pinning + gapless playback.
+CLI surface gains `pin <id>`, `unpin <id>`, `pinned`, `cache stats`,
+`cache evict`. `play` is now variadic — `music play t-1 t-2 t-3` plays
+gaplessly via rodio's queue source (decoders pre-built before playback,
+sample-accurate handoff). `--offline` skips the network entirely and
+plays only what's cached.
+
+P1 still holds: gateway + L2 metadata cache + ETag refresh + bearer auth.
+
+**Deferred to a later phase:** client-side L2 *metadata* cache for
+browse-while-offline (the P2 in-scope offline-capability is audio
+playback only). OAuth lands in P3 when the web client needs it.
+
+P3 is next: web UI (TS/React + WASM core, MSE playback, gateway OAuth).
 
 ### Running the gateway locally
 
@@ -187,3 +204,16 @@ bearer_token = "<the same token in gateway.toml>"
 ```
 
 `[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.
+
+### Audio cache (`[cache]` block, optional)
+
+```
+[cache]
+# path = "/var/cache/crates-music/audio"   # default: $XDG_CACHE_HOME/crates-music/audio
+regular_budget_bytes = 10737418240          # 10 GB — LRU-evicted
+pinned_budget_bytes  = 5368709120           # 5 GB  — never LRU-evicted
+```
+
+Inspect with `music cache stats`. Force a fit-to-budget eviction with
+`music cache evict`. Pin tracks with `music pin <id>` (auto-fetches if
+not yet cached); see them with `music pinned`.

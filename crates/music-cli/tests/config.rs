@@ -1,7 +1,7 @@
 //! Config is plain TOML on disk: `[server]` block with url/username/password,
 //! plus an optional `[gateway]` block to route through music-gateway.
 
-use music_cli::config::{Config, GatewayConfig, ServerConfig};
+use music_cli::config::{CacheConfig, Config, GatewayConfig, ServerConfig};
 
 #[test]
 fn config_roundtrips_toml() {
@@ -12,6 +12,7 @@ fn config_roundtrips_toml() {
             password: "sesame".into(),
         },
         gateway: None,
+        cache: CacheConfig::default(),
     };
     let serialized = toml::to_string(&original).unwrap();
     let back: Config = toml::from_str(&serialized).unwrap();
@@ -81,6 +82,42 @@ fn config_with_gateway_block_parses_gateway_url_and_bearer() {
 }
 
 #[test]
+fn config_cache_block_parses_explicit_path_and_budgets() {
+    let raw = r#"
+        [server]
+        url = "https://nav.example.com"
+        username = "alice"
+        password = "sesame"
+
+        [cache]
+        path = "/var/cache/crates-music/audio"
+        regular_budget_bytes = 21474836480
+        pinned_budget_bytes = 5368709120
+    "#;
+    let config: Config = toml::from_str(raw).unwrap();
+    assert_eq!(
+        config.cache.path,
+        Some(std::path::PathBuf::from("/var/cache/crates-music/audio"))
+    );
+    assert_eq!(config.cache.regular_budget_bytes, 20 * 1024 * 1024 * 1024);
+    assert_eq!(config.cache.pinned_budget_bytes, 5 * 1024 * 1024 * 1024);
+}
+
+#[test]
+fn config_without_cache_block_uses_defaults() {
+    let raw = r#"
+        [server]
+        url = "https://nav.example.com"
+        username = "alice"
+        password = "sesame"
+    "#;
+    let config: Config = toml::from_str(raw).unwrap();
+    assert!(config.cache.path.is_none());
+    assert_eq!(config.cache.regular_budget_bytes, 10 * 1024 * 1024 * 1024);
+    assert_eq!(config.cache.pinned_budget_bytes, 5 * 1024 * 1024 * 1024);
+}
+
+#[test]
 fn config_with_gateway_block_roundtrips() {
     let original = Config {
         server: ServerConfig {
@@ -92,6 +129,7 @@ fn config_with_gateway_block_roundtrips() {
             url: "https://gateway.local:8443".into(),
             bearer_token: "abc".into(),
         }),
+        cache: CacheConfig::default(),
     };
     let serialized = toml::to_string(&original).unwrap();
     let back: Config = toml::from_str(&serialized).unwrap();

@@ -1,14 +1,16 @@
 //! Runtime: dispatches CLI commands against a Subsonic client.
 
-use std::io::Cursor;
 use std::path::Path;
 
 use anyhow::Context;
+use bytes::Bytes;
+use music_cache::{AudioCache, AudioKey, PinOutcome, UnpinOutcome};
 use music_core::{AlbumId, TrackId};
+use music_player::{play_queue_blocking, read_cached, resolve_source};
 use music_subsonic::{Client, Credentials};
 
-use crate::cli::{Cli, Command};
-use crate::config::Config;
+use crate::cli::{CacheAction, Cli, Command};
+use crate::config::{Config, resolve_cache_root};
 use crate::format::{albums_table, tracks_table};
 
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
@@ -46,11 +48,148 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             println!();
             print!("{}", tracks_table(&result.tracks));
         }
-        Command::Play { track_id } => {
-            play_track(&client, &TrackId::from(track_id)).await?;
+        Command::Play { track_ids, offline } => {
+            let cache = open_audio_cache(&config).await?;
+            let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();
+            play_tracks(&client, &cache, &ids, offline).await?;
+        }
+        Command::Pin { track_id } => {
+            let cache = open_audio_cache(&config).await?;
+            run_pin(&client, &cache, &TrackId::from(track_id)).await?;
+        }
+        Command::Unpin { track_id } => {
+            let cache = open_audio_cache(&config).await?;
+            run_unpin(&cache, &TrackId::from(track_id)).await?;
+        }
+        Command::Pinned => {
+            let cache = open_audio_cache(&config).await?;
+            run_pinned(&cache).await?;
+        }
+        Command::Cache { action } => {
+            let cache = open_audio_cache(&config).await?;
+            match action {
+                CacheAction::Stats => run_cache_stats(&cache).await?,
+                CacheAction::Evict => run_cache_evict(&cache).await?,
+            }
         }
     }
     Ok(())
+}
+
+fn audio_key(track_id: &TrackId) -> AudioKey {
+    AudioKey {
+        track_id: track_id.as_str().to_string(),
+        bitrate: None,
+        codec: "stream".to_string(),
+    }
+}
+
+async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
+    let key = audio_key(track_id);
+    // Ensure the bytes are present (fetch if not).
+    if cache.get(&key).await?.is_none() {
+        tracing::info!(track = track_id.as_str(), "pin: track not cached, fetching");
+        fetch_into_cache(client, cache, track_id, &key).await?;
+    }
+    match cache.pin(&key).await? {
+        PinOutcome::Pinned => println!("pinned {}", track_id.as_str()),
+        PinOutcome::AlreadyPinned => println!("already pinned: {}", track_id.as_str()),
+        PinOutcome::NotInCache => {
+            anyhow::bail!(
+                "internal: track {} not in cache after fetch",
+                track_id.as_str()
+            );
+        }
+        PinOutcome::WouldExceedBudget { over_by } => {
+            anyhow::bail!(
+                "pinning {} would exceed pinned budget by {} bytes — \
+                 unpin something first or raise pinned_budget_bytes",
+                track_id.as_str(),
+                over_by
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_unpin(cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
+    let key = audio_key(track_id);
+    match cache.unpin(&key).await? {
+        UnpinOutcome::Unpinned => println!("unpinned {}", track_id.as_str()),
+        UnpinOutcome::NotPinned => println!("not pinned: {}", track_id.as_str()),
+        UnpinOutcome::NotInCache => println!("not in cache: {}", track_id.as_str()),
+    }
+    Ok(())
+}
+
+async fn run_pinned(cache: &AudioCache) -> anyhow::Result<()> {
+    let entries = cache.list_pinned().await?;
+    if entries.is_empty() {
+        println!("(no pinned tracks)");
+        return Ok(());
+    }
+    for e in entries {
+        println!("{:>10} bytes  {}", e.bytes, e.key.track_id);
+    }
+    Ok(())
+}
+
+async fn run_cache_stats(cache: &AudioCache) -> anyhow::Result<()> {
+    let s = cache.stats().await?;
+    println!(
+        "regular: {} entries, {} / {} bytes",
+        s.regular_count, s.regular_bytes, s.regular_budget_bytes
+    );
+    println!(
+        "pinned:  {} entries, {} / {} bytes",
+        s.pinned_count, s.pinned_bytes, s.pinned_budget_bytes
+    );
+    Ok(())
+}
+
+async fn run_cache_evict(cache: &AudioCache) -> anyhow::Result<()> {
+    let total = cache.evict_lru_to_fit().await?;
+    println!("regular total after eviction: {total} bytes");
+    Ok(())
+}
+
+async fn fetch_into_cache(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+    key: &AudioKey,
+) -> anyhow::Result<()> {
+    let url = client.stream_url(track_id)?;
+    let http = client.http().clone();
+    let _ = resolve_source(cache, key, || async move {
+        let response = http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("stream request failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("stream returned error status: {e}"))?;
+        let bytes: Bytes = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
+        Ok::<Bytes, anyhow::Error>(bytes)
+    })
+    .await
+    .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
+    Ok(())
+}
+
+async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
+    let root = resolve_cache_root(&config.cache)
+        .context("could not determine audio cache root (no XDG cache dir)")?;
+    AudioCache::open(
+        &root,
+        config.cache.regular_budget_bytes,
+        config.cache.pinned_budget_bytes,
+    )
+    .await
+    .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
 fn build_client(config: &Config) -> music_subsonic::Result<Client> {
@@ -77,33 +216,61 @@ fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
     Config::load(&path)
 }
 
-async fn play_track(client: &Client, track_id: &TrackId) -> anyhow::Result<()> {
-    let url = client.stream_url(track_id)?;
-    tracing::info!(%url, "fetching track");
-    let bytes = client
-        .http()
-        .get(url)
-        .send()
-        .await
-        .context("stream request failed")?
-        .error_for_status()
-        .context("stream request returned error status")?
-        .bytes()
-        .await
-        .context("reading stream body")?;
+async fn play_tracks(
+    client: &Client,
+    cache: &AudioCache,
+    track_ids: &[TrackId],
+    offline: bool,
+) -> anyhow::Result<()> {
+    // Resolve every track *before* starting playback. This is the gapless
+    // pre-roll: by the time the first track's last sample is consumed,
+    // decoder N+1's bytes are already in RAM and rodio's `Sink::append`
+    // queue is fed back-to-back.
+    let mut queue: Vec<Bytes> = Vec::with_capacity(track_ids.len());
+    for track_id in track_ids {
+        let key = audio_key(track_id);
+        let bytes = if offline {
+            match read_cached(cache, &key).await? {
+                Some(bytes) => bytes,
+                None => anyhow::bail!(
+                    "track {} is not in the local cache; remove --offline to fetch from the server",
+                    track_id.as_str()
+                ),
+            }
+        } else {
+            let url = client.stream_url(track_id)?;
+            let http = client.http().clone();
+            resolve_source(cache, &key, || async move {
+                let response = http
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("stream request failed: {e}"))?
+                    .error_for_status()
+                    .map_err(|e| anyhow::anyhow!("stream returned error status: {e}"))?;
+                let bytes: Bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
+                Ok::<Bytes, anyhow::Error>(bytes)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "could not resolve audio for track {}: server unreachable and \
+                     not in local cache (try --offline to play only what's cached)",
+                    track_id.as_str()
+                )
+            })?
+        };
+        tracing::info!(track = track_id.as_str(), bytes = bytes.len(), "queued");
+        queue.push(bytes);
+    }
 
-    tracing::info!(bytes = bytes.len(), "decoded; starting playback");
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let cursor = Cursor::new(bytes);
-        let (_stream, handle) =
-            rodio::OutputStream::try_default().context("opening default audio output")?;
-        let sink = rodio::Sink::try_new(&handle).context("creating audio sink")?;
-        let source = rodio::Decoder::new(cursor).context("decoding audio stream")?;
-        sink.append(source);
-        sink.sleep_until_end();
-        Ok(())
-    })
-    .await
-    .context("playback task panicked")??;
+    tracing::info!(queue_len = queue.len(), "starting gapless playback");
+    tokio::task::spawn_blocking(move || play_queue_blocking(queue))
+        .await
+        .context("playback task panicked")?
+        .context("playback failed")?;
     Ok(())
 }

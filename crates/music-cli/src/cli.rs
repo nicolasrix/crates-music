@@ -36,11 +36,42 @@ pub enum Command {
         id: String,
     },
 
-    /// Stream and play a single track.
+    /// Stream and play one or more tracks. Multiple IDs play gaplessly.
     Play {
-        /// Track ID (e.g. from `album <id>`).
-        track_id: String,
+        /// Track IDs (in playback order).
+        #[arg(required = true)]
+        track_ids: Vec<String>,
+
+        /// Don't reach the network. Plays only if every track is in the local
+        /// audio cache; errors otherwise.
+        #[arg(long)]
+        offline: bool,
     },
+
+    /// Pin a track to the cache so it's never LRU-evicted. Fetches first if
+    /// not yet cached.
+    Pin { track_id: String },
+
+    /// Unpin a track. The entry returns to the regular budget and may be
+    /// LRU-evicted if it pushes regular bytes over the limit.
+    Unpin { track_id: String },
+
+    /// List all currently-pinned tracks.
+    Pinned,
+
+    /// Inspect or manage the audio cache.
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheAction {
+    /// Print cache usage: regular and pinned bytes against their budgets.
+    Stats,
+    /// Force-evict regular entries until total bytes fit the budget.
+    Evict,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
