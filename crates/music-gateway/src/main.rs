@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
+use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use tracing_subscriber::EnvFilter;
 
@@ -42,7 +43,30 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("opening cache at {}", config.cache.path.display()))?;
 
-    let state = AppState::new(config, cache);
+    let oauth = OauthStore::open(&config.oauth.state_db)
+        .await
+        .with_context(|| {
+            format!(
+                "opening oauth state DB at {}",
+                config.oauth.state_db.display()
+            )
+        })?;
+
+    let setup_token = if oauth.master_password_hash().await?.is_none() {
+        let token = SetupToken::generate();
+        if let Some(value) = token.value() {
+            tracing::warn!(
+                "gateway is unconfigured — visit https://{}/oauth/setup with token: {}",
+                listen,
+                value
+            );
+        }
+        token
+    } else {
+        SetupToken::none()
+    };
+
+    let state = AppState::new(config, cache, oauth, setup_token);
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");

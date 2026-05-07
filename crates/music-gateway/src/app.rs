@@ -4,16 +4,19 @@
 use axum::{
     Json, Router,
     middleware::from_fn_with_state,
-    routing::{any, get},
+    routing::{any, get, post},
 };
 use serde_json::json;
 
 use crate::auth::require_bearer;
+use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
 use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
-    let public = Router::new().route("/healthz", get(healthz));
+    let public = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/oauth/setup", post(oauth_handlers::setup));
 
     let protected = Router::new()
         .route("/v1/whoami", get(whoami))

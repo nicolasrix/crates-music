@@ -263,7 +263,7 @@ async fn explicit_cache_expiry_triggers_refetch() {
 
     let cache = Cache::open_in_memory().await.unwrap();
     let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
-    let state = common::build_state_with_cache(cfg, cache.clone());
+    let state = common::build_state_with_cache(cfg, cache.clone()).await;
     let app = build_router(state);
 
     // Populate.

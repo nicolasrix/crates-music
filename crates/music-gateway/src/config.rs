@@ -13,6 +13,8 @@ pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub oauth: OauthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,22 @@ impl Default for CacheConfig {
         Self {
             path: PathBuf::from("gateway-cache.sqlite"),
             browse_ttl_seconds: 24 * 60 * 60,
+        }
+    }
+}
+
+/// OAuth 2.1 state DB (users, clients, codes, tokens). Deliberately a
+/// separate SQLite file from the L2 cache: the cache is throwaway, this
+/// DB holds irreplaceable refresh tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OauthConfig {
+    pub state_db: PathBuf,
+}
+
+impl Default for OauthConfig {
+    fn default() -> Self {
+        Self {
+            state_db: PathBuf::from("gateway-state.sqlite"),
         }
     }
 }

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use music_cache::Cache;
 use music_gateway::Config;
-use music_gateway::config::{CacheConfig, ServerConfig, UpstreamConfig};
+use music_gateway::config::{CacheConfig, OauthConfig, ServerConfig, UpstreamConfig};
+use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::state::AppState;
 
 pub const TEST_BEARER: &str = "test-bearer-token";
@@ -29,6 +30,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
             password: password.to_string(),
         },
         cache: CacheConfig::default(),
+        oauth: OauthConfig::default(),
     }
 }
 
@@ -36,9 +38,26 @@ pub async fn build_state(config: Config) -> AppState {
     let cache = Cache::open_in_memory()
         .await
         .expect("in-memory cache opens cleanly");
-    AppState::new(config, cache)
+    let oauth = OauthStore::open_in_memory()
+        .await
+        .expect("in-memory oauth store opens cleanly");
+    AppState::new(config, cache, oauth, SetupToken::none())
 }
 
-pub fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
-    AppState::new(config, cache)
+pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
+    let oauth = OauthStore::open_in_memory()
+        .await
+        .expect("in-memory oauth store opens cleanly");
+    AppState::new(config, cache, oauth, SetupToken::none())
+}
+
+pub async fn build_state_with_oauth(
+    config: Config,
+    oauth: OauthStore,
+    setup_token: SetupToken,
+) -> AppState {
+    let cache = Cache::open_in_memory()
+        .await
+        .expect("in-memory cache opens cleanly");
+    AppState::new(config, cache, oauth, setup_token)
 }
