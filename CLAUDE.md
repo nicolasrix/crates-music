@@ -160,6 +160,10 @@ Vertical slices, each end-to-end usable:
 
 ## Status
 
+For comprehensive onboarding documentation (architecture, getting
+started, per-component reference, API), see [`docs/`](./docs/). This
+section is the high-level "what's done, what isn't" view.
+
 **P3 in flight.** OAuth 2.1 server complete (P3.1):
 
 - Hand-rolled, single-tenant. Five tables in `gateway-state.sqlite` —
@@ -176,11 +180,12 @@ Vertical slices, each end-to-end usable:
   needed for `<audio>` and `<img>` URLs that can't set headers).
 - Pre-declared `[[oauth.clients]]` config blocks register at startup.
 
-**Web app (P3.2/P3.3) — code complete, untested visually.** Vite +
-React 19 + TanStack Query + Tailwind in `apps/web/`. Implements the
-full PKCE flow against the gateway, an albums list (newest 60), an
-album detail with track list, and a bottom-of-screen player using a
-plain `<audio>` element. Type-checks and builds (~74 KB JS gzipped).
+**Web app (P3.2/P3.3) — functionally complete, no automated UI tests
+yet.** Vite + React 19 + TanStack Query + Tailwind in `apps/web/`.
+Implements the full PKCE flow against the gateway, an albums list
+(newest 60), an album detail with track list, a bottom-of-screen
+player using a plain `<audio>` element, and the sync provider wiring
+in P5's WebSocket fan-out. Type-checks and builds (~74 KB JS gzipped).
 The dev server proxies `/oauth`, `/rest`, `/v1` to the gateway over
 HTTPS — see `apps/web/vite.config.ts`.
 
@@ -192,7 +197,34 @@ Web client uses TanStack Query for caching against the gateway.
 **Deferred to a later phase:** MSE-based gapless web playback
 (in-scope only if the basic `<audio>` boundary handoff is audibly
 gappy in real use), client-side L2 metadata cache for offline browse,
-events endpoint (lands with the recommender in P6).
+Vitest/Playwright suites for the web app.
+
+**P5 done.** WebSocket sync — `crates/music-sync` is the pure state
+machine; gateway hosts `/v1/sync/snapshot` (HTTP), `/v1/sync/ops`
+(POST), and `/v1/sync` (WS fan-out). CLI has `music sync state|push|watch`;
+web has the optimistic-update sync provider. Single-linearizer model
+(no CRDTs) — gateway sequences all ops and broadcasts.
+
+**P6 minimum viable done.** Recommender stack:
+
+- `music-recommend` crate: SQLite-backed embedding store
+  (content-addressed by `(track_id, model_version)`), ingest queue
+  (status column doubles as the queue), append-only event log.
+- `usearch` HNSW with cosine metric, persisted alongside a JSON
+  sidecar for the `(TrackId ↔ u64)` map. ANN is a derived cache —
+  rebuildable from SQLite at boot.
+- Python sidecar (`services/embedder/`): FastAPI + LAION CLAP for
+  audio + text embeddings. Stub backend for tests / dev.
+- Gateway endpoints: `GET /v1/recommend/next`, `POST /v1/recommend/enqueue`,
+  `POST /v1/events`. Boot-time embedder probe with degraded-mode
+  fallback if unreachable.
+- Storage: `gateway-state.recommend.sqlite` (separate file from OAuth
+  state — sqlx tracks migrations per pool). ANN at `gateway-state.ann`
+  + `.ann.keys` sidecar.
+
+**Deferred from P6:** behavioural index + nightly track2vec retrain
+(P6.8), text-query stations via CLAP's text encoder (P6.9). The event
+log is in place to capture signal for P6.8 when it lands.
 
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
@@ -247,6 +279,39 @@ cd apps/web && npm install && npm run dev
 On first run, the gateway logs a one-time setup URL; visit it,
 choose a master password, then the sign-in button on the web app
 will work.
+
+### Embedder sidecar (optional, for recommendations)
+
+The recommender requires the Python sidecar. Without it, the gateway
+boots in degraded mode and `/v1/recommend/next` returns 404 for every
+seed. Stub backend works for local dev — no GPU, no PyTorch:
+
+```bash
+cd services/embedder
+uv sync                # or: pip install -e '.[dev]'
+uv run uvicorn embedder.app:app --port 9000
+```
+
+For real CLAP inference (production):
+
+```bash
+uv sync --extra clap   # pulls torch + laion-clap + librosa
+EMBEDDER_BACKEND=clap CLAP_CHECKPOINT=/path/to/clap.pt \
+  uv run uvicorn embedder.app:app --port 9000
+```
+
+Then add to `gateway.toml`:
+
+```toml
+[embedder]
+url = "http://localhost:9000"
+timeout_seconds = 30        # default; CLAP on CPU can take 10+ s
+```
+
+Restart the gateway; you should see
+`embedder: probe ok model=… dim=512` in the logs. If the sidecar is
+unreachable at boot, the gateway logs a warning and continues without
+it (no auto-retry — restart the gateway after starting the sidecar).
 
 ### Audio cache (`[cache]` block, optional)
 
