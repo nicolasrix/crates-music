@@ -1606,6 +1606,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "music-recommend"
+version = "0.1.0"
+dependencies = [
+ "music-core",
+ "serde",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "music-subsonic"
 version = "0.1.0"
 dependencies = [

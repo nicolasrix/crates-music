@@ -8,6 +8,7 @@ members = [
     "crates/music-cache",
     "crates/music-player",
     "crates/music-sync",
+    "crates/music-recommend",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ music-gateway = { path = "crates/music-gateway" }
 music-cache = { path = "crates/music-cache" }
 music-player = { path = "crates/music-player" }
 music-sync = { path = "crates/music-sync" }
+music-recommend = { path = "crates/music-recommend" }
 
 # external
 serde = { version = "1", features = ["derive"] }
