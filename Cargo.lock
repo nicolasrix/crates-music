@@ -1568,6 +1568,7 @@ dependencies = [
  "http-body-util",
  "music-cache",
  "music-core",
+ "music-recommend",
  "music-subsonic",
  "music-sync",
  "rand 0.8.6",
@@ -1609,13 +1610,18 @@ dependencies = [
 name = "music-recommend"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "music-core",
+ "reqwest",
  "serde",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

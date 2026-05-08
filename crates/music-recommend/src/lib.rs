@@ -10,9 +10,11 @@
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod embedder;
 pub mod store;
 pub mod types;
 
+pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
 

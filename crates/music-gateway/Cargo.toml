@@ -18,6 +18,7 @@ music-core.workspace = true
 music-subsonic.workspace = true
 music-cache.workspace = true
 music-sync.workspace = true
+music-recommend.workspace = true
 
 axum = { workspace = true, features = ["ws"] }
 axum-server.workspace = true

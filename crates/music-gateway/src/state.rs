@@ -10,6 +10,7 @@ use std::sync::Arc;
 use music_cache::Cache;
 
 use crate::config::Config;
+use crate::embedder::EmbedderHandle;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::proxy::build_http_client;
 use crate::sync::SyncStore;
@@ -27,10 +28,17 @@ struct Inner {
     oauth: OauthStore,
     setup_token: SetupToken,
     sync: SyncStore,
+    embedder: EmbedderHandle,
 }
 
 impl AppState {
-    pub fn new(config: Config, cache: Cache, oauth: OauthStore, setup_token: SetupToken) -> Self {
+    pub fn new(
+        config: Config,
+        cache: Cache,
+        oauth: OauthStore,
+        setup_token: SetupToken,
+        embedder: EmbedderHandle,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -39,6 +47,7 @@ impl AppState {
                 oauth,
                 setup_token,
                 sync: SyncStore::new(),
+                embedder,
             }),
         }
     }
@@ -69,5 +78,9 @@ impl AppState {
 
     pub fn sync(&self) -> &SyncStore {
         &self.inner.sync
+    }
+
+    pub fn embedder(&self) -> &EmbedderHandle {
+        &self.inner.embedder
     }
 }

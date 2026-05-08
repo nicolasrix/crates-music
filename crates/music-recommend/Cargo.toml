@@ -12,10 +12,15 @@ workspace = true
 [dependencies]
 music-core = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+wiremock = { workspace = true }

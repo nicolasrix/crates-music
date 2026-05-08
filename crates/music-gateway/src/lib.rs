@@ -8,6 +8,7 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod embedder;
 pub mod oauth;
 pub mod proxy;
 pub mod state;

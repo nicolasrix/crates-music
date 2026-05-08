@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
+use music_gateway::embedder::boot_probe;
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use tracing_subscriber::EnvFilter;
@@ -88,7 +89,9 @@ async fn main() -> Result<()> {
         SetupToken::none()
     };
 
-    let state = AppState::new(config, cache, oauth, setup_token);
+    let embedder = boot_probe(config.embedder.as_ref()).await;
+
+    let state = AppState::new(config, cache, oauth, setup_token, embedder);
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");

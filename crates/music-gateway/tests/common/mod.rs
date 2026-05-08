@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use music_cache::Cache;
 use music_gateway::Config;
 use music_gateway::config::{CacheConfig, OauthConfig, ServerConfig, UpstreamConfig};
+use music_gateway::embedder::EmbedderHandle;
 use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::state::AppState;
 
@@ -31,6 +32,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         },
         cache: CacheConfig::default(),
         oauth: OauthConfig::default(),
+        embedder: None,
     }
 }
 
@@ -41,14 +43,26 @@ pub async fn build_state(config: Config) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    AppState::new(config, cache, oauth, SetupToken::none())
+    AppState::new(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        EmbedderHandle::disabled(),
+    )
 }
 
 pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    AppState::new(config, cache, oauth, SetupToken::none())
+    AppState::new(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        EmbedderHandle::disabled(),
+    )
 }
 
 pub async fn build_state_with_oauth(
@@ -59,5 +73,11 @@ pub async fn build_state_with_oauth(
     let cache = Cache::open_in_memory()
         .await
         .expect("in-memory cache opens cleanly");
-    AppState::new(config, cache, oauth, setup_token)
+    AppState::new(
+        config,
+        cache,
+        oauth,
+        setup_token,
+        EmbedderHandle::disabled(),
+    )
 }

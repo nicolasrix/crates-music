@@ -15,6 +15,9 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Optional Python embedder sidecar. Absent / unreachable = degraded mode.
+    #[serde(default)]
+    pub embedder: Option<EmbedderConfigSection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +75,23 @@ pub struct OauthClientConfig {
     pub client_id: String,
     pub name: String,
     pub redirect_uris: Vec<String>,
+}
+
+/// Embedder sidecar config. Optional: if absent, the gateway boots in
+/// degraded mode and never tries to embed. If present but unreachable
+/// at boot, same outcome — a warning is logged and recommend endpoints
+/// fall back to tag-only similarity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbedderConfigSection {
+    pub url: String,
+    /// Per-request timeout in seconds. Defaults to 30 — embedding a
+    /// 120-second audio clip on CPU can take 10+ seconds.
+    #[serde(default = "default_embedder_timeout_secs")]
+    pub timeout_seconds: u64,
+}
+
+fn default_embedder_timeout_secs() -> u64 {
+    30
 }
 
 impl Default for OauthConfig {
