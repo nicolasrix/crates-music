@@ -8,8 +8,13 @@
 
 pub mod handlers;
 pub mod password;
+pub mod session;
 pub mod setup;
 pub mod storage;
 
+pub use session::{IssuedSession, Session};
 pub use setup::SetupToken;
-pub use storage::{Error, NewClient, OauthClient, OauthStore, Result};
+pub use storage::{
+    AccessToken, AuthCode, Error, IssuedAccessToken, IssuedAuthCode, IssuedRefreshToken,
+    NewAuthCode, NewClient, NewRefreshToken, OauthClient, OauthStore, RefreshToken, Result,
+};

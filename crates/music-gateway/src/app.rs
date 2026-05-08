@@ -16,7 +16,14 @@ use crate::state::AppState;
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(healthz))
-        .route("/oauth/setup", post(oauth_handlers::setup));
+        .route("/oauth/setup", post(oauth_handlers::setup))
+        .route(
+            "/oauth/login",
+            get(oauth_handlers::login_get).post(oauth_handlers::login_post),
+        )
+        .route("/oauth/authorize", get(oauth_handlers::authorize))
+        .route("/oauth/token", post(oauth_handlers::token))
+        .route("/oauth/revoke", post(oauth_handlers::revoke));
 
     let protected = Router::new()
         .route("/v1/whoami", get(whoami))

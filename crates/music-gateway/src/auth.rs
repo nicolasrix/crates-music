@@ -1,6 +1,9 @@
 //! Bearer-token middleware for protected routes.
 //!
-//! Constant-time comparison to avoid timing oracles on the shared token.
+//! Accepts either an OAuth-issued access token (looked up by sha256 in
+//! the access_tokens table) or the legacy static bearer from config.
+//! Constant-time comparison on the static-bearer path so timing doesn't
+//! leak the token.
 
 use axum::{
     extract::{Request, State},
@@ -23,11 +26,26 @@ pub async fn require_bearer(
         .and_then(|h| h.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if !constant_time_eq(presented.as_bytes(), state.bearer_token().as_bytes()) {
-        return Err(StatusCode::UNAUTHORIZED);
+    // 1. OAuth access token? sha256 + index lookup; cheap.
+    let oauth_ok = match state.oauth().find_access_token(presented).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::error!("oauth access-token lookup failed: {e}");
+            false
+        }
+    };
+    if oauth_ok {
+        return Ok(next.run(request).await);
     }
 
-    Ok(next.run(request).await)
+    // 2. Static bearer fallback (legacy CLI; goes away when CLI moves to
+    //    OAuth in P4).
+    if constant_time_eq(presented.as_bytes(), state.bearer_token().as_bytes()) {
+        return Ok(next.run(request).await);
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
