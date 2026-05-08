@@ -11,6 +11,7 @@ use serde_json::json;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::require_bearer;
+use crate::events;
 use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
 use crate::recommend;
@@ -36,6 +37,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sync", get(crate::sync::ws::ws_handler))
         .route("/v1/recommend/next", get(recommend::next))
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
+        .route("/v1/events", post(events::submit))
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 

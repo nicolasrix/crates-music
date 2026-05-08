@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use music_cache::Cache;
+use music_recommend::EventStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
@@ -33,6 +34,7 @@ struct Inner {
     sync: SyncStore,
     embedder: EmbedderHandle,
     embedding_store: EmbeddingStore,
+    event_store: EventStore,
     ann: Arc<AnnIndex>,
     /// The model_version the recommender stamps on enqueue + ANN
     /// queries. Sourced from the embedder's last health probe; falls
@@ -55,6 +57,9 @@ impl AppState {
         ann: Arc<AnnIndex>,
         recommend_model_version: ModelVersion,
     ) -> Self {
+        // Events live in the same SQLite file as the embedding store —
+        // they're both recommender state, share migration timeline.
+        let event_store = EventStore::new(embedding_store.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -65,6 +70,7 @@ impl AppState {
                 sync: SyncStore::new(),
                 embedder,
                 embedding_store,
+                event_store,
                 ann,
                 recommend_model_version,
             }),
@@ -109,6 +115,10 @@ impl AppState {
 
     pub fn embedding_store(&self) -> &EmbeddingStore {
         &self.inner.embedding_store
+    }
+
+    pub fn event_store(&self) -> &EventStore {
+        &self.inner.event_store
     }
 
     pub fn recommend_model_version(&self) -> &ModelVersion {
