@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { completeLogin } from "../auth/oauth";
-import { navigate } from "../router";
 
 export function Callback() {
   const [error, setError] = useState<string | null>(null);
+  const ranRef = useRef(false);
   useEffect(() => {
+    if (ranRef.current) return;
+    ranRef.current = true;
     const params = new URLSearchParams(location.search);
     const code = params.get("code");
     if (!code) {
@@ -12,7 +14,8 @@ export function Callback() {
       return;
     }
     completeLogin(code)
-      .then(() => navigate("/"))
+      // Hard reload so AuthProvider re-reads tokens from localStorage.
+      .then(() => location.assign("/"))
       .catch((e: unknown) => setError(String(e)));
   }, []);
   return (
@@ -22,7 +25,7 @@ export function Callback() {
           <h1 className="text-xl font-semibold mb-2">sign-in failed</h1>
           <p className="text-stone-400">{error}</p>
           <button
-            onClick={() => navigate("/")}
+            onClick={() => location.assign("/")}
             className="mt-4 px-3 py-1 rounded bg-stone-800 hover:bg-stone-700"
           >
             back

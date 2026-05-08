@@ -12,7 +12,13 @@ export default defineConfig({
     proxy: {
       "/rest": { target: "https://gateway.local:8443", secure: false, changeOrigin: true },
       "/v1": { target: "https://gateway.local:8443", secure: false, changeOrigin: true },
-      "/oauth": { target: "https://gateway.local:8443", secure: false, changeOrigin: true },
+      // Allowlist gateway OAuth endpoints. /oauth/callback is the SPA's
+      // own route — it must NOT be proxied to the gateway.
+      "^/oauth/(setup|login|authorize|token|revoke)(\\b|/)": {
+        target: "https://gateway.local:8443",
+        secure: false,
+        changeOrigin: true,
+      },
     },
   },
 });
