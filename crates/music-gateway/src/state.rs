@@ -12,6 +12,7 @@ use music_cache::Cache;
 use crate::config::Config;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::proxy::build_http_client;
+use crate::sync::SyncStore;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -25,6 +26,7 @@ struct Inner {
     cache: Cache,
     oauth: OauthStore,
     setup_token: SetupToken,
+    sync: SyncStore,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
                 cache,
                 oauth,
                 setup_token,
+                sync: SyncStore::new(),
             }),
         }
     }
@@ -62,5 +65,9 @@ impl AppState {
 
     pub fn setup_token(&self) -> &SetupToken {
         &self.inner.setup_token
+    }
+
+    pub fn sync(&self) -> &SyncStore {
+        &self.inner.sync
     }
 }

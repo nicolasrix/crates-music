@@ -11,6 +11,7 @@ pub mod config;
 pub mod oauth;
 pub mod proxy;
 pub mod state;
+pub mod sync;
 
 pub use app::build_router;
 pub use config::Config;

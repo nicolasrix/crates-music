@@ -1546,6 +1546,7 @@ dependencies = [
  "music-cache",
  "music-core",
  "music-subsonic",
+ "music-sync",
  "rand 0.8.6",
  "reqwest",
  "rustls",

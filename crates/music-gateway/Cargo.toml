@@ -17,6 +17,7 @@ path = "src/main.rs"
 music-core.workspace = true
 music-subsonic.workspace = true
 music-cache.workspace = true
+music-sync.workspace = true
 
 axum.workspace = true
 axum-server.workspace = true
