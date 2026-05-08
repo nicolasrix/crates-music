@@ -25,6 +25,9 @@ pub enum Error {
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
 
+    #[error("migrate: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+
     #[error("vector dimension mismatch: stored {stored}, got {got}")]
     DimMismatch { stored: usize, got: usize },
 

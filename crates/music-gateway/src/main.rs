@@ -4,16 +4,30 @@
 //! TLS is wired here, not in `app.rs`, so unit/integration tests can exercise
 //! the router over plain HTTP via `tower::ServiceExt::oneshot`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
-use music_gateway::embedder::boot_probe;
+use music_gateway::embedder::{EmbedderHandle, boot_probe};
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
+use music_recommend::ann::AnnIndex;
+use music_recommend::ingest::rebuild_ann_from_store;
+use music_recommend::store::EmbeddingStore;
+use music_recommend::types::ModelVersion;
 use tracing_subscriber::EnvFilter;
+
+/// Default embedding dimension. CLAP's audio + text encoders share a
+/// 512-dim space; we hardcode this here because the ANN index has to
+/// commit to a dim at construction time. If a future model uses a
+/// different dim, this becomes a config option.
+const DEFAULT_EMBEDDING_DIM: usize = 512;
+/// HNSW connectivity. usearch's recommended default for cosine-style
+/// similarity at our scale (~10⁴ vectors).
+const ANN_CONNECTIVITY: usize = 16;
 
 #[derive(Debug, Parser)]
 #[command(name = "music-gateway", about = "Music gateway for Navidrome")]
@@ -90,8 +104,18 @@ async fn main() -> Result<()> {
     };
 
     let embedder = boot_probe(config.embedder.as_ref()).await;
+    let recommend = boot_recommender(&config.oauth.state_db, &embedder).await?;
 
-    let state = AppState::new(config, cache, oauth, setup_token, embedder);
+    let state = AppState::new(
+        config,
+        cache,
+        oauth,
+        setup_token,
+        embedder,
+        recommend.embedding_store,
+        recommend.ann,
+        recommend.model_version,
+    );
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");
@@ -101,4 +125,50 @@ async fn main() -> Result<()> {
         .context("axum-server")?;
 
     Ok(())
+}
+
+struct RecommenderState {
+    embedding_store: EmbeddingStore,
+    ann: Arc<AnnIndex>,
+    model_version: ModelVersion,
+}
+
+/// Boot the recommender: open the embedding DB, recover crashed
+/// in-progress rows, open the ANN, and rebuild the ANN from SQLite
+/// when it's empty (cold start or wiped sidecar). Extracted from
+/// `main` so the entrypoint stays readable.
+async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<RecommenderState> {
+    let recommend_db_path = state_db.with_extension("recommend.sqlite");
+    let embedding_store = EmbeddingStore::open(&recommend_db_path)
+        .await
+        .with_context(|| format!("opening recommend DB at {}", recommend_db_path.display()))?;
+
+    // Any rows still in `in_progress` belong to the previous gateway
+    // run; reset them so the worker re-attempts.
+    let reset = embedding_store.reset_in_progress().await?;
+    if reset > 0 {
+        tracing::info!(rows = reset, "recommend: reset stuck in_progress rows");
+    }
+
+    let ann_path = state_db.with_extension("ann");
+    let ann = AnnIndex::open(&ann_path, DEFAULT_EMBEDDING_DIM, ANN_CONNECTIVITY)
+        .context("opening ANN index")?;
+    let model_version = embedder
+        .last_health()
+        .map_or_else(|| ModelVersion::from("default"), |h| h.model_version);
+    if ann.len()? == 0 {
+        tracing::info!(model = %model_version, "recommend: ANN empty, rebuilding from SQLite");
+        rebuild_ann_from_store(&embedding_store, &ann, &model_version)
+            .await
+            .context("rebuilding ANN from store")?;
+        if ann.len()? > 0 {
+            ann.persist().context("persisting rebuilt ANN")?;
+        }
+    }
+
+    Ok(RecommenderState {
+        embedding_store,
+        ann: Arc::new(ann),
+        model_version,
+    })
 }

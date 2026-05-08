@@ -184,6 +184,22 @@ impl AnnIndex {
         self.query_excluding(query, k, &[])
     }
 
+    /// Retrieve the stored vector for a track id, if present. Useful
+    /// when the caller wants "find similar to X" but only has X's id —
+    /// the ANN already has the vector, so we don't need a SQLite hop.
+    pub fn get_vector(&self, track_id: &TrackId) -> Result<Option<Vec<f32>>, AnnError> {
+        let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
+        let Some(&key) = inner.forward.get(track_id) else {
+            return Ok(None);
+        };
+        let mut buf = vec![0.0_f32; self.dim];
+        let n = inner.index.get(key, &mut buf).map_err(to_usearch_err)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(buf))
+    }
+
     /// Query with an exclusion list. Common pattern: "give me 5 tracks
     /// similar to seed X, but not X itself or anything I've already
     /// queued." We over-fetch a bit and filter in-process.

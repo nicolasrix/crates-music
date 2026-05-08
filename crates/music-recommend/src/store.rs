@@ -4,17 +4,19 @@
 //! status transitions, but knows nothing about audio, models, or the
 //! ANN index. Callers compose those.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use music_core::TrackId;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use crate::types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
 use crate::{Error, Result};
 
-/// Migrations the store contributes. The gateway folds these into its
-/// existing pool so embeddings live in `gateway-state.sqlite` alongside
-/// OAuth + sync state — single transactional context.
+/// Migrations owned by the embedding store. Each crate owns its own
+/// SQLite file so migration version numbers don't collide across the
+/// workspace.
 pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone, Debug)]
@@ -25,6 +27,41 @@ pub struct EmbeddingStore {
 impl EmbeddingStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Open a file-backed store and run migrations. Creates the file
+    /// if it doesn't exist.
+    ///
+    /// We deliberately give the recommender its own SQLite file rather
+    /// than layering onto the OAuth pool — sqlx's migration runner
+    /// uses monotonic version numbers across the whole pool, which
+    /// makes "many crates contributing migrations" fragile. One file
+    /// per crate keeps each migration directory self-contained.
+    pub async fn open(path: &Path) -> Result<Self> {
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(opts)
+            .await?;
+        MIGRATIONS.run(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// In-memory store. Tests use this; the single-connection pool
+    /// is required because in-memory SQLite isn't shared across
+    /// connections.
+    pub async fn open_in_memory() -> Result<Self> {
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+        MIGRATIONS.run(&pool).await?;
+        Ok(Self { pool })
     }
 
     /// Direct pool access for adjacent code paths (rebuild_ann_from_store).

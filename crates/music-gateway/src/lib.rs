@@ -11,6 +11,7 @@ pub mod config;
 pub mod embedder;
 pub mod oauth;
 pub mod proxy;
+pub mod recommend;
 pub mod state;
 pub mod sync;
 

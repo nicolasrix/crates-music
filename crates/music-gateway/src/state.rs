@@ -8,6 +8,9 @@
 use std::sync::Arc;
 
 use music_cache::Cache;
+use music_recommend::ann::AnnIndex;
+use music_recommend::store::EmbeddingStore;
+use music_recommend::types::ModelVersion;
 
 use crate::config::Config;
 use crate::embedder::EmbedderHandle;
@@ -29,15 +32,28 @@ struct Inner {
     setup_token: SetupToken,
     sync: SyncStore,
     embedder: EmbedderHandle,
+    embedding_store: EmbeddingStore,
+    ann: Arc<AnnIndex>,
+    /// The model_version the recommender stamps on enqueue + ANN
+    /// queries. Sourced from the embedder's last health probe; falls
+    /// back to "default" when the embedder is disabled.
+    recommend_model_version: ModelVersion,
 }
 
 impl AppState {
+    /// One call site (boot in `main.rs`) and one in tests; bundling
+    /// these into a builder struct adds ceremony without reducing
+    /// real coupling, so the long arg list stays.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         cache: Cache,
         oauth: OauthStore,
         setup_token: SetupToken,
         embedder: EmbedderHandle,
+        embedding_store: EmbeddingStore,
+        ann: Arc<AnnIndex>,
+        recommend_model_version: ModelVersion,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -48,6 +64,9 @@ impl AppState {
                 setup_token,
                 sync: SyncStore::new(),
                 embedder,
+                embedding_store,
+                ann,
+                recommend_model_version,
             }),
         }
     }
@@ -82,5 +101,17 @@ impl AppState {
 
     pub fn embedder(&self) -> &EmbedderHandle {
         &self.inner.embedder
+    }
+
+    pub fn ann(&self) -> &Arc<AnnIndex> {
+        &self.inner.ann
+    }
+
+    pub fn embedding_store(&self) -> &EmbeddingStore {
+        &self.inner.embedding_store
+    }
+
+    pub fn recommend_model_version(&self) -> &ModelVersion {
+        &self.inner.recommend_model_version
     }
 }

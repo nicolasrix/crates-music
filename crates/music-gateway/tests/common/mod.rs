@@ -4,12 +4,19 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use music_cache::Cache;
 use music_gateway::Config;
 use music_gateway::config::{CacheConfig, OauthConfig, ServerConfig, UpstreamConfig};
 use music_gateway::embedder::EmbedderHandle;
 use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::state::AppState;
+use music_recommend::ann::AnnIndex;
+use music_recommend::store::EmbeddingStore;
+use music_recommend::types::ModelVersion;
+
+const TEST_DIM: usize = 8;
 
 pub const TEST_BEARER: &str = "test-bearer-token";
 
@@ -43,26 +50,14 @@ pub async fn build_state(config: Config) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    AppState::new(
-        config,
-        cache,
-        oauth,
-        SetupToken::none(),
-        EmbedderHandle::disabled(),
-    )
+    build_state_full(config, cache, oauth, SetupToken::none()).await
 }
 
 pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    AppState::new(
-        config,
-        cache,
-        oauth,
-        SetupToken::none(),
-        EmbedderHandle::disabled(),
-    )
+    build_state_full(config, cache, oauth, SetupToken::none()).await
 }
 
 pub async fn build_state_with_oauth(
@@ -73,11 +68,29 @@ pub async fn build_state_with_oauth(
     let cache = Cache::open_in_memory()
         .await
         .expect("in-memory cache opens cleanly");
+    build_state_full(config, cache, oauth, setup_token).await
+}
+
+async fn build_state_full(
+    config: Config,
+    cache: Cache,
+    oauth: OauthStore,
+    setup_token: SetupToken,
+) -> AppState {
+    // EmbeddingStore lives in its own SQLite file in production; tests
+    // use an in-memory variant so we never touch disk.
+    let embedding_store = EmbeddingStore::open_in_memory()
+        .await
+        .expect("in-memory embedding store opens");
+    let ann = Arc::new(AnnIndex::open_in_memory(TEST_DIM, 16).expect("ann opens"));
     AppState::new(
         config,
         cache,
         oauth,
         setup_token,
         EmbedderHandle::disabled(),
+        embedding_store,
+        ann,
+        ModelVersion::from("test-v1"),
     )
 }
