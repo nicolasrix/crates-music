@@ -64,6 +64,28 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
+
+    /// Interact with the gateway sync state (queue + playback) shared
+    /// across devices. Requires `[gateway]` config.
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SyncAction {
+    /// Print the current snapshot as JSON.
+    State,
+    /// Append one or more tracks to the synced queue.
+    Push {
+        /// Track IDs to push (in order).
+        #[arg(required = true)]
+        track_ids: Vec<String>,
+    },
+    /// Open the WebSocket and stream every server message to stdout
+    /// as JSON, one frame per line. Run with Ctrl-C to exit.
+    Watch,
 }
 
 #[derive(Subcommand, Debug)]

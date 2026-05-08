@@ -9,7 +9,7 @@ use music_core::{AlbumId, TrackId};
 use music_player::{play_queue_blocking, read_cached, resolve_source};
 use music_subsonic::{Client, Credentials};
 
-use crate::cli::{CacheAction, Cli, Command};
+use crate::cli::{CacheAction, Cli, Command, SyncAction};
 use crate::config::{Config, resolve_cache_root};
 use crate::format::{albums_table, tracks_table};
 
@@ -72,6 +72,11 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
                 CacheAction::Evict => run_cache_evict(&cache).await?,
             }
         }
+        Command::Sync { action } => match action {
+            SyncAction::State => crate::sync::run_state(&config).await?,
+            SyncAction::Push { track_ids } => crate::sync::run_push(&config, &track_ids).await?,
+            SyncAction::Watch => crate::sync::run_watch(&config).await?,
+        },
     }
     Ok(())
 }
