@@ -10,8 +10,21 @@ Cargo.lock.bak
 
 # Local config
 /config.toml
+/gateway.toml
 /.env
 /.env.local
+
+# Local TLS certs (mkcert-generated, contains private key)
+/certs/
+
+# Gateway runtime state (cache + auth DB with password hash)
+/gateway-cache.sqlite
+/gateway-cache.sqlite-*
+/gateway-state.sqlite
+/gateway-state.sqlite-*
+
+# Node
+node_modules/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
