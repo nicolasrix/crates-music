@@ -12,6 +12,7 @@
 
 pub mod ann;
 pub mod embedder;
+pub mod ingest;
 pub mod store;
 pub mod types;
 

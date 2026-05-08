@@ -20,8 +20,10 @@ reqwest = { workspace = true }
 url = { workspace = true }
 bytes = { workspace = true }
 usearch = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }

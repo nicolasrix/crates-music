@@ -27,6 +27,11 @@ impl EmbeddingStore {
         Self { pool }
     }
 
+    /// Direct pool access for adjacent code paths (rebuild_ann_from_store).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Enqueue a track for ingest if no row exists yet for this
     /// `(track_id, model_version)`. No-op if a row is already present
     /// in any state (`done` won't be re-queued, `failed` requires
