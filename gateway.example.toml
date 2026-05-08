@@ -1,0 +1,36 @@
+# Sample gateway config. Copy to a real path (e.g. `gateway.toml` in the
+# repo root, or `~/.config/crates-music/gateway.toml`) and edit the
+# fields marked CHANGE-ME.
+
+[server]
+listen       = "0.0.0.0:8443"
+tls_cert     = "certs/gateway.local.pem"      # produced by ./scripts/dev-certs.sh
+tls_key      = "certs/gateway.local-key.pem"
+# Static legacy bearer used by the CLI until P4 moves it to OAuth. Pick
+# anything random; `openssl rand -hex 32` works.
+bearer_token = "CHANGE-ME-to-a-32-byte-random-string"
+
+[upstream]
+# Where your Navidrome lives.
+navidrome_url = "http://nav.lan:4533"          # CHANGE-ME
+username      = "alice"                         # CHANGE-ME
+password      = "wonderland"                    # CHANGE-ME
+
+[cache]
+path                = "gateway-cache.sqlite"
+browse_ttl_seconds  = 86400                    # 24 h
+
+[oauth]
+state_db = "gateway-state.sqlite"
+
+# Pre-declared OAuth clients. Registered at startup if not already in
+# the DB. The web app expects client_id = "web". Add the localhost
+# redirect for the Vite dev server, plus the production same-origin
+# redirect for when the gateway eventually serves the SPA itself.
+[[oauth.clients]]
+client_id     = "web"
+name          = "Web"
+redirect_uris = [
+    "http://localhost:5173/oauth/callback",
+    "https://gateway.local:8443/oauth/callback",
+]
