@@ -1,0 +1,39 @@
+[project]
+name = "music-embedder"
+version = "0.1.0"
+description = "CLAP-based audio + text embedding sidecar for the crates-music gateway."
+requires-python = ">=3.11"
+license = "MIT OR Apache-2.0"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "numpy>=1.26",
+    "python-multipart>=0.0.20",
+]
+
+[project.optional-dependencies]
+# Real CLAP backend — large download, requires PyTorch + AMD ROCm wheels for
+# GPU. Kept optional so the dev/test loop doesn't pull this in.
+clap = [
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    "laion-clap>=1.1.6",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["embedder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
