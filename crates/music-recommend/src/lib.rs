@@ -10,6 +10,7 @@
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod ann;
 pub mod embedder;
 pub mod store;
 pub mod types;

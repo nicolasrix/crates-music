@@ -19,6 +19,7 @@ tracing = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 bytes = { workspace = true }
+usearch = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
