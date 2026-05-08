@@ -3,10 +3,12 @@
 
 use axum::{
     Json, Router,
+    http::StatusCode,
     middleware::from_fn_with_state,
     routing::{any, get, post},
 };
 use serde_json::json;
+use tower_http::trace::TraceLayer;
 
 use crate::auth::require_bearer;
 use crate::oauth::handlers as oauth_handlers;
@@ -30,7 +32,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 
-    public.merge(protected).with_state(state)
+    public
+        .merge(protected)
+        // Explicit 404 fallback. Without this, unmatched routes inherit the
+        // protected sub-router's `require_bearer` layer (which wraps its
+        // own fallback) and incorrectly return 401.
+        .fallback(not_found)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+async fn not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 async fn healthz() -> Json<serde_json::Value> {

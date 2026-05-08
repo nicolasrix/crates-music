@@ -243,3 +243,95 @@ async fn session_cookie_actually_authenticates_a_session_lookup() {
         "session emitted by the login flow must be findable in the store"
     );
 }
+
+/// Regression: the login form's `action` URL must percent-encode the `next`
+/// value, not just HTML-escape it. Otherwise inner `&` characters bleed
+/// into the outer query string when the browser submits the form, the
+/// `next` value is truncated at the first `&`, and the post-login redirect
+/// drops critical parameters (e.g. `client_id` from the original /oauth/authorize).
+#[tokio::test]
+async fn get_login_action_url_preserves_full_next_with_multiple_params() {
+    let oauth = OauthStore::open_in_memory().await.unwrap();
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+    let app = build_router(state);
+
+    // The realistic shape: the inner `next` URL has multiple &-separated
+    // params. This is exactly what /oauth/authorize hands us when it
+    // redirects to login.
+    let inner = "/oauth/authorize?response_type=code&client_id=web&redirect_uri=http%3A%2F%2Flocalhost%3A5173%2Foauth%2Fcallback&code_challenge=abc&code_challenge_method=S256&state=xyz";
+    let outer_uri = format!(
+        "/oauth/login?next={}",
+        // The /oauth/authorize handler does this for us; mirror it here.
+        url_percent_encode(inner)
+    );
+
+    let resp = app
+        .oneshot(Request::get(&outer_uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+
+    // Parse the form's action attribute the way a browser would. We pull
+    // the action="..." literal then re-parse the URL. The crucial
+    // assertion is that `next` re-emerges as a single, complete value —
+    // not truncated at the first inner `&`.
+    let action = extract_action_attr(html).expect("form must have action=\"...\"");
+    let parsed =
+        url::Url::parse(&format!("http://x{action}")).expect("action must parse as a relative URL");
+
+    let mut next_values: Vec<String> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k == "next")
+        .map(|(_, v)| v.to_string())
+        .collect();
+
+    assert_eq!(
+        next_values.len(),
+        1,
+        "expected exactly one `next` param, got {next_values:?}"
+    );
+    assert_eq!(
+        next_values.pop().unwrap(),
+        inner,
+        "browser must see the full inner URL as the value of `next`, not a truncated version"
+    );
+
+    // Sanity: the inner params must NOT appear as their own outer query
+    // params. If they do, the encoding leaked.
+    for leaked in [
+        "client_id",
+        "code_challenge",
+        "redirect_uri",
+        "response_type",
+    ] {
+        assert!(
+            parsed.query_pairs().all(|(k, _)| k != leaked),
+            "param {leaked} must not bleed out of `next` into the outer query string"
+        );
+    }
+}
+
+fn extract_action_attr(html: &str) -> Option<String> {
+    let needle = "action=\"";
+    let start = html.find(needle)? + needle.len();
+    let end = html[start..].find('"')? + start;
+    Some(html[start..end].to_string())
+}
+
+fn url_percent_encode(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => write!(&mut out, "%{b:02X}").expect("write to String never fails"),
+        }
+    }
+    out
+}

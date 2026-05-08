@@ -42,3 +42,26 @@ async fn healthz_body_reports_ok_status_and_service_name() {
     assert_eq!(json["service"], "music-gateway");
     assert!(json["version"].is_string());
 }
+
+/// Regression: the protected sub-router has a `require_bearer` layer.
+/// Without an explicit fallback on the merged router, that layer wraps the
+/// fallback and returns 401 for ALL unmatched paths — which conflates
+/// "this route doesn't exist" with "your token is invalid". We hit a
+/// nonsense path with no auth and expect 404.
+#[tokio::test]
+async fn unmatched_route_returns_404_not_401() {
+    let app = build_router(common::build_state(common::test_config()).await);
+    for path in ["/totally-unknown", "/oauth/callback", "/v1/", "/rest"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unmatched path {path} must return 404, got {}",
+            resp.status()
+        );
+    }
+}

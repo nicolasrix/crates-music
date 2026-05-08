@@ -202,7 +202,7 @@ fn safe_redirect_target(next: Option<&str>) -> String {
 
 fn render_login(error: Option<&str>, next: Option<&str>) -> String {
     let action_query = match next {
-        Some(n) => format!("?next={}", html_escape(n)),
+        Some(n) => format!("?next={}", urlencoding_encode(n)),
         None => String::new(),
     };
     let error_block = match error {
