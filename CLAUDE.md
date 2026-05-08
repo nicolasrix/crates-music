@@ -160,26 +160,42 @@ Vertical slices, each end-to-end usable:
 
 ## Status
 
-P2 complete. New crate `music-player` (rodio + symphonia) extracted from the
-CLI. `music-cache` extended with `AudioCache`: content-addressed by
-`(track_id, bitrate, codec)`, blobs on disk under
-`$XDG_CACHE_HOME/crates-music/audio/blobs/`, metadata in SQLite. Two
-configurable budgets — regular (LRU-evicted) and pinned (never
-LRU-evicted) — with safe atomic writes (`.tmp` + `rename`).
+**P3 in flight.** OAuth 2.1 server complete (P3.1):
 
-CLI surface gains `pin <id>`, `unpin <id>`, `pinned`, `cache stats`,
-`cache evict`. `play` is now variadic — `music play t-1 t-2 t-3` plays
-gaplessly via rodio's queue source (decoders pre-built before playback,
-sample-accurate handoff). `--offline` skips the network entirely and
-plays only what's cached.
+- Hand-rolled, single-tenant. Five tables in `gateway-state.sqlite` —
+  `users` (Argon2id master password), `oauth_clients`, `auth_codes`,
+  `refresh_tokens`, `access_tokens`. Plus a `sessions` table for the
+  browser login flow.
+- Endpoints: `POST /oauth/setup` (one-shot bootstrap), `GET/POST
+  /oauth/login`, `GET /oauth/authorize` (Authorization Code + PKCE
+  S256), `POST /oauth/token` (code grant + refresh-token rotation),
+  `POST /oauth/revoke` (RFC 7009).
+- `require_bearer` accepts OAuth-issued access tokens (sha256 lookup)
+  in addition to the legacy static config bearer. Token can come via
+  `Authorization: Bearer …` *or* `?access_token=…` (RFC 6750 §2.3 —
+  needed for `<audio>` and `<img>` URLs that can't set headers).
+- Pre-declared `[[oauth.clients]]` config blocks register at startup.
 
-P1 still holds: gateway + L2 metadata cache + ETag refresh + bearer auth.
+**Web app (P3.2/P3.3) — code complete, untested visually.** Vite +
+React 19 + TanStack Query + Tailwind in `apps/web/`. Implements the
+full PKCE flow against the gateway, an albums list (newest 60), an
+album detail with track list, and a bottom-of-screen player using a
+plain `<audio>` element. Type-checks and builds (~74 KB JS gzipped).
+The dev server proxies `/oauth`, `/rest`, `/v1` to the gateway over
+HTTPS — see `apps/web/vite.config.ts`.
 
-**Deferred to a later phase:** client-side L2 *metadata* cache for
-browse-while-offline (the P2 in-scope offline-capability is audio
-playback only). OAuth lands in P3 when the web client needs it.
+**Descoped from P3:** the WASM core. Its primary purpose was a
+client-side L2 metadata cache for browse-while-offline; that was
+already deferred at P2, so the WASM module would have nothing to do.
+Web client uses TanStack Query for caching against the gateway.
 
-P3 is next: web UI (TS/React + WASM core, MSE playback, gateway OAuth).
+**Deferred to a later phase:** MSE-based gapless web playback
+(in-scope only if the basic `<audio>` boundary handoff is audibly
+gappy in real use), client-side L2 metadata cache for offline browse,
+events endpoint (lands with the recommender in P6).
+
+P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
+cache + pinning + gapless CLI playback.
 
 ### Running the gateway locally
 
@@ -204,6 +220,33 @@ bearer_token = "<the same token in gateway.toml>"
 ```
 
 `[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.
+
+### Web client setup
+
+```toml
+# Add to gateway.toml
+[[oauth.clients]]
+client_id = "web"
+name = "Web"
+redirect_uris = [
+    "http://localhost:5173/oauth/callback",      # Vite dev
+    "https://gateway.local:8443/oauth/callback", # production same-origin
+]
+```
+
+Run the dev stack:
+
+```
+# 1. Gateway (Rust, TLS + OAuth + cache + Subsonic proxy)
+cargo run -p music-gateway -- --config /path/to/gateway.toml
+
+# 2. Web app (Vite, http://localhost:5173)
+cd apps/web && npm install && npm run dev
+```
+
+On first run, the gateway logs a one-time setup URL; visit it,
+choose a master password, then the sign-in button on the web app
+will work.
 
 ### Audio cache (`[cache]` block, optional)
 

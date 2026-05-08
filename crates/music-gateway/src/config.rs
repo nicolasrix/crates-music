@@ -60,12 +60,25 @@ impl Default for CacheConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OauthConfig {
     pub state_db: PathBuf,
+    /// Pre-declared OAuth clients, registered at startup. Keeps the
+    /// client list under config control (Git-trackable) instead of
+    /// requiring a separate admin endpoint for the simple cases.
+    #[serde(default, rename = "clients")]
+    pub clients: Vec<OauthClientConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OauthClientConfig {
+    pub client_id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
 }
 
 impl Default for OauthConfig {
     fn default() -> Self {
         Self {
             state_db: PathBuf::from("gateway-state.sqlite"),
+            clients: Vec::new(),
         }
     }
 }

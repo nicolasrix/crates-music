@@ -1,0 +1,103 @@
+// OAuth 2.1 PKCE flow against the gateway's /oauth/* endpoints.
+//
+// The Vite dev server proxies /oauth/* to the gateway, so we use
+// same-origin URLs throughout — that keeps redirect_uri and the
+// initial-load origin in sync without per-environment URL config.
+
+import { deriveChallenge, generateVerifier } from "./pkce";
+import { clearTokens, popVerifier, stashVerifier, writeTokens } from "./tokens";
+
+const CLIENT_ID = "web";
+const REDIRECT_URI = `${location.origin}/oauth/callback`;
+
+export async function startLogin() {
+  const verifier = await generateVerifier();
+  const challenge = await deriveChallenge(verifier);
+  stashVerifier(verifier);
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    state: crypto.randomUUID(),
+  });
+  // Full-page redirect — the gateway's authorize handler will bounce
+  // through /oauth/login if no session, then back to redirect_uri.
+  location.assign(`/oauth/authorize?${params.toString()}`);
+}
+
+export async function completeLogin(code: string): Promise<void> {
+  const verifier = popVerifier();
+  if (!verifier) {
+    throw new Error("missing PKCE verifier — did you reload the callback page?");
+  }
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    code_verifier: verifier,
+  });
+  const res = await fetch("/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    throw new Error(`token exchange failed: HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+  };
+  writeTokens({
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token,
+    expiresAt: Date.now() + json.expires_in * 1000,
+  });
+}
+
+export async function refreshTokens(refreshToken: string): Promise<void> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: CLIENT_ID,
+    refresh_token: refreshToken,
+  });
+  const res = await fetch("/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    clearTokens();
+    throw new Error(`refresh failed: HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+  };
+  writeTokens({
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token,
+    expiresAt: Date.now() + json.expires_in * 1000,
+  });
+}
+
+export async function logout(refreshToken: string | null) {
+  if (refreshToken) {
+    try {
+      await fetch("/oauth/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: refreshToken }).toString(),
+      });
+    } catch {
+      // best-effort; clear local state regardless
+    }
+  }
+  clearTokens();
+}

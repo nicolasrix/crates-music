@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
-use music_gateway::oauth::{OauthStore, SetupToken};
+use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +51,24 @@ async fn main() -> Result<()> {
                 config.oauth.state_db.display()
             )
         })?;
+
+    // Register pre-declared OAuth clients (idempotent: skip when the
+    // client_id is already in the DB).
+    for client in &config.oauth.clients {
+        if oauth.find_client(&client.client_id).await?.is_none() {
+            oauth
+                .register_client(NewClient {
+                    client_id: client.client_id.clone(),
+                    name: client.name.clone(),
+                    redirect_uris: client.redirect_uris.clone(),
+                })
+                .await
+                .with_context(|| {
+                    format!("registering pre-declared oauth client {}", client.client_id)
+                })?;
+            tracing::info!(client = %client.client_id, "registered oauth client");
+        }
+    }
 
     let setup_token = if oauth.master_password_hash().await?.is_none() {
         let token = SetupToken::generate();
