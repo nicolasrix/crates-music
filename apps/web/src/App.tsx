@@ -6,6 +6,7 @@ import { SignIn } from "./pages/SignIn";
 import { PlayerBar } from "./player/PlayerBar";
 import { PlayerProvider } from "./player/PlayerContext";
 import { useRoute } from "./router";
+import { SyncProvider } from "./sync/SyncContext";
 
 export function App() {
   const { path } = useRoute();
@@ -16,10 +17,12 @@ export function App() {
   if (!tokens) return <SignIn />;
 
   return (
-    <PlayerProvider>
-      <Routed path={path} />
-      <PlayerBar />
-    </PlayerProvider>
+    <SyncProvider>
+      <PlayerProvider>
+        <Routed path={path} />
+        <PlayerBar />
+      </PlayerProvider>
+    </SyncProvider>
   );
 }
 

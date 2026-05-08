@@ -1,14 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
 import { coverArtUrl, getAlbum } from "../api/client";
 import { Layout } from "../components/Layout";
-import { usePlayer } from "../player/PlayerContext";
+import { useSync } from "../sync/SyncContext";
+import type { Track } from "../api/types";
 
 export function Album({ id }: { id: string }) {
   const q = useQuery({
     queryKey: ["album", id],
     queryFn: () => getAlbum(id),
   });
-  const player = usePlayer();
+  const sync = useSync();
+
+  function playFrom(tracks: Track[], startIndex: number) {
+    // Clear → push N → set cursor → play. The gateway linearizes;
+    // local state catches up via the broadcast `applied` frames.
+    sync.submit({ type: "clear" });
+    for (const t of tracks) sync.pushTrack(t);
+    sync.submit({ type: "set_now_playing", index: startIndex });
+    sync.submit({ type: "set_playing", is_playing: true });
+  }
 
   if (q.isLoading) {
     return (
@@ -45,7 +55,7 @@ export function Album({ id }: { id: string }) {
             {album.year ? ` · ${album.year}` : ""}
           </div>
           <button
-            onClick={() => player.setQueue(tracks)}
+            onClick={() => playFrom(tracks, 0)}
             className="mt-4 px-4 py-2 rounded bg-stone-200 text-stone-900 hover:bg-white"
           >
             Play album
@@ -66,7 +76,7 @@ export function Album({ id }: { id: string }) {
           {tracks.map((t, i) => (
             <tr
               key={t.id}
-              onDoubleClick={() => player.setQueue(tracks, i)}
+              onDoubleClick={() => playFrom(tracks, i)}
               className="border-b border-stone-900 hover:bg-stone-900 cursor-pointer"
             >
               <td className="py-2 text-stone-500">{t.track ?? i + 1}</td>

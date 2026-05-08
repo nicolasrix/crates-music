@@ -11,7 +11,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/rest": { target: "https://gateway.local:8443", secure: false, changeOrigin: true },
-      "/v1": { target: "https://gateway.local:8443", secure: false, changeOrigin: true },
+      // ws: true forwards WebSocket upgrades — needed for /v1/sync.
+      "/v1": { target: "https://gateway.local:8443", secure: false, changeOrigin: true, ws: true },
       // Allowlist gateway OAuth endpoints. /oauth/callback is the SPA's
       // own route — it must NOT be proxied to the gateway.
       "^/oauth/(setup|login|authorize|token|revoke)(\\b|/)": {
