@@ -55,6 +55,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # server
 axum = "0.7"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 http = "1"
