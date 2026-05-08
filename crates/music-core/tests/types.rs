@@ -1,7 +1,9 @@
 //! Round-trip tests for the high-level domain types. The wire format is
 //! JSON because that's what every consumer (Subsonic, gateway, sync) speaks.
 
-use music_core::{Album, AlbumId, Artist, ArtistId, Track, TrackId};
+use music_core::{
+    Album, AlbumId, Artist, ArtistId, PlaybackState, Queue, QueueItem, QueueItemId, Track, TrackId,
+};
 
 #[test]
 fn artist_roundtrips() {
@@ -77,6 +79,97 @@ fn album_duration_helper_returns_std_duration() {
         cover_art_id: None,
     };
     assert_eq!(album.duration(), std::time::Duration::from_secs(90));
+}
+
+#[test]
+fn empty_queue_default_is_empty() {
+    let q = Queue::default();
+    assert!(q.items.is_empty());
+}
+
+#[test]
+fn queue_with_items_roundtrips() {
+    let queue = Queue {
+        items: vec![
+            QueueItem {
+                item_id: QueueItemId::from("qi-1"),
+                track_id: TrackId::from("t-1"),
+            },
+            QueueItem {
+                item_id: QueueItemId::from("qi-2"),
+                track_id: TrackId::from("t-2"),
+            },
+        ],
+    };
+    let json = serde_json::to_string(&queue).unwrap();
+    let back: Queue = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, queue);
+}
+
+#[test]
+fn queue_item_id_serializes_as_plain_string() {
+    let id = QueueItemId::from("qi-1");
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "\"qi-1\"");
+}
+
+#[test]
+fn playback_state_default_is_idle_empty() {
+    let s = PlaybackState::default();
+    assert!(s.queue.items.is_empty());
+    assert_eq!(s.now_playing_index, None);
+    assert_eq!(s.position_ms, 0);
+    assert!(!s.is_playing);
+}
+
+#[test]
+fn playback_state_roundtrips() {
+    let state = PlaybackState {
+        queue: Queue {
+            items: vec![QueueItem {
+                item_id: QueueItemId::from("qi-1"),
+                track_id: TrackId::from("t-1"),
+            }],
+        },
+        now_playing_index: Some(0),
+        position_ms: 12_345,
+        is_playing: true,
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let back: PlaybackState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, state);
+}
+
+#[test]
+fn playback_state_now_playing_helper_returns_track_or_none() {
+    let mut state = PlaybackState {
+        queue: Queue {
+            items: vec![
+                QueueItem {
+                    item_id: QueueItemId::from("qi-1"),
+                    track_id: TrackId::from("t-1"),
+                },
+                QueueItem {
+                    item_id: QueueItemId::from("qi-2"),
+                    track_id: TrackId::from("t-2"),
+                },
+            ],
+        },
+        now_playing_index: Some(1),
+        position_ms: 0,
+        is_playing: false,
+    };
+    assert_eq!(
+        state.now_playing().map(|i| i.track_id.clone()),
+        Some(TrackId::from("t-2"))
+    );
+    state.now_playing_index = None;
+    assert!(state.now_playing().is_none());
+    state.now_playing_index = Some(99);
+    assert!(
+        state.now_playing().is_none(),
+        "out-of-bounds index returns None, never panics"
+    );
 }
 
 #[test]

@@ -58,3 +58,12 @@ id_type!(
     /// Identifier for an artist.
     ArtistId
 );
+id_type!(
+    /// Identifier for a single item *position* in a queue.
+    ///
+    /// Distinct from [`TrackId`] because a track can legitimately appear
+    /// in the queue more than once (intentional repeats), and reorder /
+    /// remove ops need to address an item unambiguously even with
+    /// duplicate `TrackId`s.
+    QueueItemId
+);

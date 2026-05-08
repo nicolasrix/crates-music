@@ -6,9 +6,13 @@
 pub mod album;
 pub mod artist;
 pub mod ids;
+pub mod playback;
+pub mod queue;
 pub mod track;
 
 pub use album::Album;
 pub use artist::Artist;
-pub use ids::{AlbumId, ArtistId, TrackId};
+pub use ids::{AlbumId, ArtistId, QueueItemId, TrackId};
+pub use playback::PlaybackState;
+pub use queue::{Queue, QueueItem};
 pub use track::Track;
