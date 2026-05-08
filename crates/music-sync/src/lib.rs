@@ -11,6 +11,8 @@
 
 mod ops;
 mod state;
+mod wire;
 
 pub use ops::SyncOp;
 pub use state::{ApplyError, SyncState};
+pub use wire::{ClientMessage, ServerMessage};

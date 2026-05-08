@@ -4,5 +4,6 @@
 
 pub mod handlers;
 pub mod store;
+pub mod ws;
 
 pub use store::SyncStore;

@@ -32,6 +32,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/whoami", get(whoami))
         .route("/v1/sync/snapshot", get(sync_handlers::snapshot))
         .route("/v1/sync/ops", post(sync_handlers::submit_op))
+        .route("/v1/sync", get(crate::sync::ws::ws_handler))
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 

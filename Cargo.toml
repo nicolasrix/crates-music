@@ -68,6 +68,7 @@ sha2 = "0.10"
 # dev
 wiremock = "0.6"
 tempfile = "3"
+tokio-tungstenite = { version = "0.24", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
