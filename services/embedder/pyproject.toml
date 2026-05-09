@@ -30,6 +30,7 @@ clap = [
 ]
 dev = [
     "pytest>=8.3",
+    "pytest-benchmark>=4.0",
     "httpx>=0.27",
 ]
 
@@ -42,7 +43,17 @@ packages = ["embedder"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Skip benchmarks during a normal `pytest` run — they auto-calibrate
+# iteration counts and the 5MB-audio case alone takes ~2 s. Run them
+# explicitly with `pytest -m benchmark` (the last `-m` on the command
+# line wins, so this default is overridable).
+addopts = "-q -m 'not benchmark'"
+markers = [
+    "benchmark: performance benchmarks; opt-in via `pytest -m benchmark`",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pytest_benchmark.*",
+]
 
 # AMD ROCm-built PyTorch wheels.
 #

@@ -330,3 +330,88 @@ pinned_budget_bytes  = 5368709120           # 5 GB  — never LRU-evicted
 Inspect with `music cache stats`. Force a fit-to-budget eviction with
 `music cache evict`. Pin tracks with `music pin <id>` (auto-fetches if
 not yet cached); see them with `music pinned`.
+
+### Microbenchmarks (`cargo bench`)
+
+Three Criterion bench suites cover the hot paths surfaced by the
+diagnostics work. They are *regression detectors*, not load tests —
+the goal is "did this PR make X slower than the baseline?", not "what
+is our peak QPS?". For end-to-end load, use the trace store (M0) on a
+running gateway.
+
+| Bench | Crate | Measures |
+|---|---|---|
+| `server_timing` | `music-recommend` | `parse_server_timing` per-call cost across realistic header shapes |
+| `ann` | `music-recommend` | `AnnIndex::upsert` (fresh-insert curve) and `query` (top-10 latency) at N=100/1000/5000 |
+| `embedder_client` | `music-recommend` | `EmbedderClient::embed_audio`/`embed_text` against a wiremock fake — HTTP roundtrip + JSON parse + Server-Timing extraction. *Not inference cost* — that's measured Python-side (see below) |
+| `trace_store` | `music-gateway` | `insert_batch` at batch=1/50/200 with 10k pre-existing rows; `trim_to_capacity` no-op vs over-budget |
+
+Run all benches:
+
+```bash
+cargo bench --workspace
+```
+
+Run one suite (faster feedback during work on a specific module):
+
+```bash
+cargo bench --bench ann -p music-recommend
+```
+
+Quick mode (≈10× faster, less statistical confidence — useful while
+iterating, never for "is this PR a regression?" verdicts):
+
+```bash
+cargo bench --bench server_timing -p music-recommend -- --quick
+```
+
+HTML reports land at `target/criterion/<group>/report/index.html`.
+Criterion remembers the previous run automatically and prints a
+`change: [+X% -Y%] (p = …)` line on the next run — that's the
+regression signal.
+
+Approximate baselines on a Ryzen-class dev machine (for sanity
+checks; do not commit hardware-specific numbers as gates):
+
+- `parse_server_timing` (3 stages): ~115 ns
+- `ann_query_top10` at N=5000: ~100 µs
+- `ann_upsert_from_empty` at N=5000: ~1.1 s (≈225 µs/insert at the high end)
+- `embedder_client_embed_audio` 1 KB: ~27 µs; 1 MB: ~390 µs
+- `embedder_client_embed_text` 16 chars: ~26 µs; 16 KB: ~33 µs
+- `trace_store_insert_batch` at batch=50, table=10k: ~250 µs
+- `trace_store_trim` no-op: ~7 µs
+
+### Python embedder benchmarks (`pytest -m benchmark`)
+
+Two pytest-benchmark suites in `services/embedder/tests/`:
+
+- `test_benchmarks.py` — stub backend (SHA-256 + numpy PRNG). Always runs.
+- `test_benchmarks_clap.py` — real CLAP inference. Skipped unless the
+  `clap` extra is installed *and* `CLAP_CHECKPOINT` points at an
+  on-disk checkpoint.
+
+Run only the benchmarks (regular `pytest` excludes them via the
+`benchmark` mark):
+
+```bash
+cd services/embedder
+uv run --extra dev pytest -m benchmark
+```
+
+Compare against a previous run (auto-saves to `.benchmarks/`):
+
+```bash
+uv run --extra dev pytest -m benchmark --benchmark-autosave
+uv run --extra dev pytest -m benchmark --benchmark-compare
+```
+
+Approximate stub baselines (will vary by CPU):
+
+- `test_stub_embed_text[short]`: ~10 µs (SHA-256 dominates)
+- `test_stub_embed_audio[1mb]`: ~440 µs (linear in input bytes)
+- `test_stub_embed_audio[5mb]`: ~2.1 ms
+
+CLAP baselines depend on hardware and which device is active
+(check `/healthz` `device` field). Run the suite once after a fresh
+`uv sync --extra clap` to capture a baseline before changing the
+preprocessing pipeline or upgrading torch.

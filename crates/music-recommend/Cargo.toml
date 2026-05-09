@@ -27,3 +27,16 @@ futures-util = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "server_timing"
+harness = false
+
+[[bench]]
+name = "ann"
+harness = false
+
+[[bench]]
+name = "embedder_client"
+harness = false
