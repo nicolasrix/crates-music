@@ -179,6 +179,39 @@ fn rebuild_from_iter_repopulates_index() {
 }
 
 #[test]
+fn persist_if_dirty_is_noop_on_clean_index() {
+    // Fresh in-memory index has nothing to persist; persist_if_dirty
+    // must be cheap and report `false`.
+    let idx = AnnIndex::open_in_memory(DIM, 16).expect("open");
+    assert!(!idx.persist_if_dirty().expect("persist_if_dirty"));
+}
+
+#[test]
+fn persist_if_dirty_flushes_after_upsert_then_clears() {
+    // Pin the contract the periodic persister relies on:
+    //   1. upsert dirties the index;
+    //   2. persist_if_dirty writes to disk and reports `true`;
+    //   3. a subsequent tick with no new writes reports `false`
+    //      (no redundant disk I/O on idle ticks).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ann.bin");
+
+    let idx = AnnIndex::open(&path, DIM, 16).expect("open");
+    assert!(!idx.persist_if_dirty().expect("clean"));
+
+    idx.upsert(&TrackId::from("alpha"), &unit_at(0))
+        .expect("upsert");
+    assert!(idx.persist_if_dirty().expect("flush after upsert"));
+    assert!(path.exists(), "ann file should now be on disk");
+    assert!(!idx.persist_if_dirty().expect("idempotent"));
+
+    // Reopen confirms the upsert was actually durable.
+    drop(idx);
+    let reopened = AnnIndex::open(&path, DIM, 16).expect("reopen");
+    assert_eq!(reopened.len().expect("len"), 1);
+}
+
+#[test]
 fn similarity_is_cosine_for_l2_normalized_inputs() {
     // CLAP outputs are L2-normalized, so cosine == dot product.
     // We pre-normalize a non-axis vector and assert the similarity

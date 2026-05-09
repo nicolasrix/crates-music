@@ -73,6 +73,16 @@ const IDLE_TICK: Duration = Duration::from_secs(5);
 /// stop helping; lower counts leave the GPU idle most of the time.
 const INGEST_WORKER_COUNT: usize = 8;
 
+/// Cadence at which the ANN persister wakes and flushes any dirty
+/// state to disk. Tuned for single-user steady-state ingest:
+///  - ingest rates of ~1 track/few-seconds give us ~10–60 dirty
+///    upserts per tick, comfortably amortising the persist cost
+///    (one usearch::save + one JSON sidecar write).
+///  - on hard crash, the worst-case loss is ~30 seconds of new
+///    embeddings — still durable in SQLite, recovered at next
+///    boot via the safety rebuild in `boot_recommender`.
+const ANN_PERSIST_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Audio fetcher backed by the upstream Navidrome via the typed
 /// Subsonic client. Range-caps every request at `MAX_CLIP_BYTES`.
 pub struct SubsonicAudioFetcher {
@@ -202,7 +212,7 @@ pub fn spawn_ingest_worker(
     };
     let cfg = IngestWorkerConfig {
         store,
-        ann,
+        ann: Arc::clone(&ann),
         embedder,
         fetcher,
         model_version: model_version.clone(),
@@ -215,7 +225,7 @@ pub fn spawn_ingest_worker(
         "ingest: workers started"
     );
 
-    (0..INGEST_WORKER_COUNT)
+    let mut handles: Vec<JoinHandle<()>> = (0..INGEST_WORKER_COUNT)
         .map(|worker_id| {
             let worker = Arc::clone(&worker);
             tokio::spawn(async move {
@@ -244,7 +254,37 @@ pub fn spawn_ingest_worker(
                 }
             })
         })
-        .collect()
+        .collect();
+
+    handles.push(spawn_ann_persister(ann));
+    handles
+}
+
+/// Background task that flushes the ANN to disk every
+/// `ANN_PERSIST_INTERVAL`. Cheap when idle (a single relaxed-atomic
+/// load); only takes the index read lock + writes a file when there
+/// are unflushed upserts. Closes the long-standing gap where ingest
+/// upserts only landed in memory and got recovered via SQLite
+/// rebuild at restart — fine at 10² tracks, painful at 10⁴+.
+fn spawn_ann_persister(ann: Arc<AnnIndex>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ANN_PERSIST_INTERVAL);
+        // Skip the immediate first tick — the index just rebuilt at
+        // boot, no point persisting again seconds later.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            match ann.persist_if_dirty() {
+                Ok(true) => {
+                    tracing::debug!("ann: persisted dirty index to disk");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "ann: persist failed; will retry next tick");
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]

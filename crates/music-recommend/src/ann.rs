@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use music_core::TrackId;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,12 @@ pub struct AnnQueryResult {
 pub struct AnnIndex {
     inner: RwLock<Inner>,
     dim: usize,
+    /// Set by every mutating call (`upsert`, `remove`, `rebuild_from`),
+    /// cleared by `persist`. Lets a background task call
+    /// `persist_if_dirty` on a tick without taking the inner write
+    /// lock unless there's actually something to flush. Atomic so the
+    /// signal is lock-free.
+    dirty: AtomicBool,
 }
 
 impl std::fmt::Debug for AnnIndex {
@@ -91,6 +98,7 @@ impl AnnIndex {
                 persist_path: None,
             }),
             dim,
+            dirty: AtomicBool::new(false),
         })
     }
 
@@ -133,6 +141,9 @@ impl AnnIndex {
                 persist_path: Some(path.to_path_buf()),
             }),
             dim,
+            // A freshly-opened index reflects whatever's on disk. Not
+            // dirty until something mutates it.
+            dirty: AtomicBool::new(false),
         })
     }
 
@@ -169,14 +180,23 @@ impl AnnIndex {
         inner.index.add(key, vector).map_err(to_usearch_err)?;
         inner.forward.insert(track_id.clone(), key);
         inner.reverse.insert(key, track_id.clone());
+        drop(inner);
+        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 
     pub fn remove(&self, track_id: &TrackId) -> Result<(), AnnError> {
         let mut inner = self.inner.write().map_err(|_| AnnError::Poisoned)?;
-        if let Some(key) = inner.forward.remove(track_id) {
+        let removed = if let Some(key) = inner.forward.remove(track_id) {
             inner.reverse.remove(&key);
             inner.index.remove(key).map_err(to_usearch_err)?;
+            true
+        } else {
+            false
+        };
+        drop(inner);
+        if removed {
+            self.dirty.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -281,10 +301,15 @@ impl AnnIndex {
     }
 
     /// Persist the index + key sidecar to the configured path. No-op
-    /// for in-memory indices.
+    /// for in-memory indices. Always clears the dirty flag on success
+    /// — even if the index was opened in-memory and the disk write
+    /// was a no-op, "dirty" semantically means "in-memory state has
+    /// drifted from on-disk state," and the in-memory case has no
+    /// drift to track.
     pub fn persist(&self) -> Result<(), AnnError> {
         let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
         let Some(path) = &inner.persist_path else {
+            self.dirty.store(false, Ordering::Release);
             return Ok(());
         };
         let s = path.to_string_lossy();
@@ -305,7 +330,33 @@ impl AnnIndex {
         let json = serde_json::to_string(&snapshot)
             .map_err(|e| AnnError::Usearch(format!("serialize keys: {e}")))?;
         std::fs::write(&keys_path, json)?;
+        self.dirty.store(false, Ordering::Release);
         Ok(())
+    }
+
+    /// Atomically clear the dirty flag and persist if it was set.
+    /// Returns `Ok(true)` if a write happened, `Ok(false)` if the
+    /// index was already clean. Designed for periodic background
+    /// persistence — racing with concurrent upserts is benign:
+    ///
+    ///  - upsert-then-swap: we persist with the upsert included.
+    ///  - swap-then-upsert: dirty is set again, next tick catches it.
+    ///
+    /// On persist failure the dirty flag is restored so a future tick
+    /// retries.
+    pub fn persist_if_dirty(&self) -> Result<bool, AnnError> {
+        if !self.dirty.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        match self.persist() {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                // persist() already cleared dirty on the success path;
+                // on failure we re-arm so the next tick retries.
+                self.dirty.store(true, Ordering::Release);
+                Err(e)
+            }
+        }
     }
 
     /// Bulk-load (track_id, vector) pairs into an empty (or about-to-be-cleared)
@@ -335,6 +386,8 @@ impl AnnIndex {
             inner.forward.insert(id.clone(), key);
             inner.reverse.insert(key, id.clone());
         }
+        drop(inner);
+        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 }

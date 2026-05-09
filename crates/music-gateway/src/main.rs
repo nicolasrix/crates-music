@@ -205,8 +205,24 @@ async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<
     let model_version = embedder
         .last_health()
         .map_or_else(|| ModelVersion::from("default"), |h| h.model_version);
-    if ann.len()? == 0 {
-        tracing::info!(model = %model_version, "recommend: ANN empty, rebuilding from SQLite");
+
+    // Safety net for the historical persist-on-write gap: if SQLite
+    // has more `done` rows for this model than the ANN does, our
+    // on-disk index is stale (likely because the gateway crashed
+    // between an upsert and the next periodic persist). Rebuild from
+    // SQLite — it's the source of truth — and persist immediately.
+    // The "ann empty" case is the cold-start subset of this; treat
+    // both with one branch.
+    let ann_len = ann.len()?;
+    let sqlite_done = embedding_store.counts(&model_version).await?.done;
+    let ann_len_u64 = u64::try_from(ann_len).unwrap_or(u64::MAX);
+    if ann_len_u64 < sqlite_done {
+        tracing::info!(
+            model = %model_version,
+            ann_len,
+            sqlite_done,
+            "recommend: ANN behind SQLite, rebuilding"
+        );
         rebuild_ann_from_store(&embedding_store, &ann, &model_version)
             .await
             .context("rebuilding ANN from store")?;
