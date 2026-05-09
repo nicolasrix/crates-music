@@ -273,6 +273,22 @@ async fn explicit_cache_expiry_triggers_refetch() {
         .await
         .unwrap();
 
+    // The cache write is now async (fire-and-forget tokio task), so
+    // the entry may not be in SQLite yet by the time the response
+    // returns. Poll until it lands — keeps the test deterministic
+    // without baking the spawn-and-forget pattern into a test-only API.
+    let key = "getAlbumList2|type=newest";
+    for _ in 0..50 {
+        if cache.get(key).await.unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        cache.get(key).await.unwrap().is_some(),
+        "background cache write should have committed within 1s"
+    );
+
     // Force eviction of all entries (cutoff in the far future).
     let _removed = cache
         .expire_before(SystemTime::now() + Duration::from_secs(99_999))

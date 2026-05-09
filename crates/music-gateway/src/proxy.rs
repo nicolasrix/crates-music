@@ -22,7 +22,7 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use music_cache::Entry;
+use music_cache::{Entry, etag_for};
 use music_subsonic::auth;
 use url::Url;
 
@@ -53,6 +53,15 @@ pub async fn proxy(state: State<AppState>, request: Request) -> Response {
     }
 }
 
+#[tracing::instrument(
+    name = "proxy.subsonic",
+    skip_all,
+    fields(
+        method = tracing::field::Empty,
+        path = %request.uri().path(),
+        kind = tracing::field::Empty,
+    ),
+)]
 async fn proxy_inner(
     State(state): State<AppState>,
     request: Request,
@@ -64,9 +73,11 @@ async fn proxy_inner(
     if subsonic_method.is_empty() {
         return Err(StatusCode::NOT_FOUND);
     }
+    tracing::Span::current().record("method", subsonic_method);
     let client_query = request.uri().query().unwrap_or("");
 
     if BROWSE_METHODS.contains(&subsonic_method) {
+        tracing::Span::current().record("kind", "browse");
         let if_none_match = request
             .headers()
             .get(IF_NONE_MATCH)
@@ -80,10 +91,16 @@ async fn proxy_inner(
         )
         .await;
     }
+    tracing::Span::current().record("kind", "stream");
 
     pass_through(&state, subsonic_method, client_query).await
 }
 
+#[tracing::instrument(
+    name = "proxy.browse",
+    skip_all,
+    fields(method = %method, outcome = tracing::field::Empty),
+)]
 async fn browse_proxy(
     state: &AppState,
     method: &str,
@@ -104,10 +121,13 @@ async fn browse_proxy(
         if let Some(client_etag) = if_none_match
             && client_etag == entry.etag
         {
+            tracing::Span::current().record("outcome", "not_modified");
             return Ok(not_modified(&entry.etag));
         }
+        tracing::Span::current().record("outcome", "cache_hit");
         return Ok(serve_from_cache(&entry));
     }
+    tracing::Span::current().record("outcome", "upstream_fetch");
 
     // Miss or stale → fetch upstream, buffer body, store, return.
     let upstream_url = build_upstream_url(state.config(), method, client_query)
@@ -131,14 +151,41 @@ async fn browse_proxy(
         return Ok(forward_buffered(status, &upstream_headers, body_bytes));
     }
 
-    let entry = state
-        .cache()
-        .put(&key, body_bytes, ttl)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Async cache write: compute the etag inline (cheap — ~µs SHA-256
+    // over JSON bodies) and serve the response immediately. The
+    // SQLite INSERT (with WAL fsync, ~13–20 ms p99) runs on a tokio
+    // task so it doesn't block the request path. Single-user system,
+    // so the worst-case race — a second identical request landing in
+    // the ~ms window before the write commits — is benign: it just
+    // does one redundant upstream fetch.
+    let etag = etag_for(&body_bytes);
+    let entry = Entry {
+        key: key.clone(),
+        etag,
+        body: body_bytes.clone(),
+        fetched_at: now,
+        ttl,
+    };
+    let cache = state.cache().clone();
+    tokio::spawn(async move {
+        if let Err(e) = cache.put(&key, body_bytes, ttl).await {
+            tracing::warn!(error = %e, key = %key, "background cache write failed");
+        }
+    });
     Ok(serve_from_cache(&entry))
 }
 
+// Note: this span captures only the time until the upstream *headers*
+// arrive — once we wrap the body stream and return, the span closes.
+// The actual byte transfer to the client happens after, untracked.
+// Header-time is the right thing to measure for "did Navidrome
+// respond fast?"; first-byte-to-listener latency is on the client side
+// (`web-vital.TTFB` and `playback.start`).
+#[tracing::instrument(
+    name = "proxy.stream",
+    skip_all,
+    fields(method = %method, status = tracing::field::Empty),
+)]
 async fn pass_through(
     state: &AppState,
     method: &str,
@@ -154,6 +201,7 @@ async fn pass_through(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let status = upstream.status();
+    tracing::Span::current().record("status", status.as_u16());
     let mut downstream_headers = HeaderMap::new();
     if let Some(ct) = upstream.headers().get(CONTENT_TYPE).cloned() {
         downstream_headers.insert(CONTENT_TYPE, ct);

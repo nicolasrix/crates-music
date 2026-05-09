@@ -24,6 +24,8 @@ Cargo.lock.bak
 /gateway-state.sqlite-*
 /gateway-state.recommend.sqlite
 /gateway-state.recommend.sqlite-*
+/gateway-state.traces.sqlite
+/gateway-state.traces.sqlite-*
 /gateway-state.ann
 /gateway-state.ann.keys
 

@@ -98,6 +98,11 @@ impl Cache {
         Ok(Self { pool })
     }
 
+    #[tracing::instrument(
+        name = "cache.lookup",
+        skip_all,
+        fields(hit = tracing::field::Empty),
+    )]
     pub async fn get(&self, key: &str) -> Result<Option<Entry>> {
         let row = sqlx::query(
             "SELECT key, etag, body, fetched_at, ttl_seconds \
@@ -106,9 +111,16 @@ impl Cache {
         .bind(key)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.as_ref().map(row_to_entry))
+        let entry = row.as_ref().map(row_to_entry);
+        tracing::Span::current().record("hit", entry.is_some());
+        Ok(entry)
     }
 
+    #[tracing::instrument(
+        name = "cache.write",
+        skip_all,
+        fields(bytes = body.len()),
+    )]
     pub async fn put(&self, key: &str, body: Bytes, ttl: Duration) -> Result<Entry> {
         let now = SystemTime::now();
         self.put_at(key, body, now, ttl).await

@@ -109,7 +109,12 @@ impl IngestWorker {
     /// queue is empty. Errors here are *infrastructure* failures
     /// (SQLite, ANN); per-track failures are absorbed into
     /// `IngestOutcome::Failed`.
-    #[tracing::instrument(name = "ingest.process_next", skip(self))]
+    ///
+    /// Intentionally *not* instrumented as a span: this function is a
+    /// pure wrapper around `claim_next` + `embed_one` + `mark_done` +
+    /// `ann.upsert`, each already a span. Wrapping them again produces
+    /// a same-duration mirror of `store.claim_next` on every idle
+    /// poll, doubling trace-store growth without adding signal.
     pub async fn process_next(&self) -> Result<IngestOutcome, IngestError> {
         let Some(key) = self.cfg.store.claim_next(&self.cfg.model_version).await? else {
             return Ok(IngestOutcome::Idle);
