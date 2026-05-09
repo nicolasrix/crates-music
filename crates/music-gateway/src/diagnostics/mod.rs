@@ -11,10 +11,11 @@
 //! - [`TraceLayer`] (added in M0 step 2) — `tracing_subscriber::Layer`
 //!   impl that feeds spans into the store via a background drainer.
 
+pub mod handlers;
 mod layer;
 mod store;
 mod types;
 
 pub use layer::{TraceLayer, spawn_drainer};
-pub use store::TraceStore;
+pub use store::{HistogramBucket, TraceStore};
 pub use types::SpanRecord;

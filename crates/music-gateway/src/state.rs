@@ -14,6 +14,7 @@ use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 
 use crate::config::Config;
+use crate::diagnostics::TraceStore;
 use crate::embedder::EmbedderHandle;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::proxy::build_http_client;
@@ -40,6 +41,11 @@ struct Inner {
     /// queries. Sourced from the embedder's last health probe; falls
     /// back to "default" when the embedder is disabled.
     recommend_model_version: ModelVersion,
+    /// Read-only view of the diagnostics trace ring buffer. Handlers
+    /// under `/v1/diagnostics/*` query this; the drainer task in
+    /// `main.rs` is the sole writer. Cloning is cheap (wraps a sqlx
+    /// pool).
+    trace_store: TraceStore,
 }
 
 impl AppState {
@@ -56,6 +62,7 @@ impl AppState {
         embedding_store: EmbeddingStore,
         ann: Arc<AnnIndex>,
         recommend_model_version: ModelVersion,
+        trace_store: TraceStore,
     ) -> Self {
         // Events live in the same SQLite file as the embedding store —
         // they're both recommender state, share migration timeline.
@@ -73,6 +80,7 @@ impl AppState {
                 event_store,
                 ann,
                 recommend_model_version,
+                trace_store,
             }),
         }
     }
@@ -123,5 +131,9 @@ impl AppState {
 
     pub fn recommend_model_version(&self) -> &ModelVersion {
         &self.inner.recommend_model_version
+    }
+
+    pub fn trace_store(&self) -> &TraceStore {
+        &self.inner.trace_store
     }
 }

@@ -231,6 +231,24 @@ web has the optimistic-update sync provider. Single-linearizer model
 (P6.8), text-query stations via CLAP's text encoder (P6.9). The event
 log is in place to capture signal for P6.8 when it lands.
 
+**Diagnostics surface (M2.1) done.** Three authenticated endpoints
+read the M0 trace store:
+
+- `GET /v1/diagnostics/traces?limit=&name=&since_ms=` — recent closed
+  spans, newest first. `fields_json` is parsed back to a JSON object;
+  parse failure surfaces under `_raw`. Limit clamped server-side to
+  1000.
+- `GET /v1/diagnostics/histogram?since_ms=` — per-name duration
+  histogram. SQL aggregates `count/min/max/sum`; quantiles computed
+  in Rust via nearest-rank on the sorted slice (sub-millisecond at
+  the 100k-row ring cap).
+- `GET /v1/diagnostics/queue_depth?model_version=` — embedding ingest
+  queue counts. Defaults to `recommend_model_version`; explicit
+  override useful during rolling model upgrades.
+
+The web `/diagnostics` page that renders these (M2.2) is not yet
+built.
+
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
 

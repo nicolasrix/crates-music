@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
         recommend.embedding_store,
         recommend.ann,
         recommend.model_version,
+        trace_store.clone(),
     );
     let router = build_router(state);
 

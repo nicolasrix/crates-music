@@ -9,6 +9,7 @@ use std::sync::Arc;
 use music_cache::Cache;
 use music_gateway::Config;
 use music_gateway::config::{CacheConfig, OauthConfig, ServerConfig, UpstreamConfig};
+use music_gateway::diagnostics::TraceStore;
 use music_gateway::embedder::EmbedderHandle;
 use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::state::AppState;
@@ -83,6 +84,9 @@ async fn build_state_full(
         .await
         .expect("in-memory embedding store opens");
     let ann = Arc::new(AnnIndex::open_in_memory(TEST_DIM, 16).expect("ann opens"));
+    let trace_store = TraceStore::open_in_memory()
+        .await
+        .expect("in-memory trace store opens");
     AppState::new(
         config,
         cache,
@@ -92,5 +96,6 @@ async fn build_state_full(
         embedding_store,
         ann,
         ModelVersion::from("test-v1"),
+        trace_store,
     )
 }
