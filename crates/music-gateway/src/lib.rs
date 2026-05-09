@@ -8,6 +8,7 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod diagnostics;
 pub mod embedder;
 pub mod events;
 pub mod ingest;

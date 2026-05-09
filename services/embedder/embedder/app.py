@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Annotated
+import re
+from typing import Annotated, Mapping
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -22,6 +23,35 @@ from pydantic import BaseModel, Field
 from embedder.protocol import Embedder
 
 EMBEDDING_DIM: int = 512
+
+# Server-Timing metric names must be HTTP tokens (RFC 7230). Anything
+# outside this set means the backend gave us a bad name; we drop the
+# entry rather than risk a malformed header that breaks parsers
+# downstream.
+_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def format_server_timing(stages_ms: Mapping[str, float]) -> str:
+    """Format a stage timing map as a `Server-Timing` header value.
+
+    `{"decode": 42.0, "gpu_forward": 520.0}` →
+    `"decode;dur=42, gpu_forward;dur=520"`.
+
+    Durations round to one decimal so sub-millisecond stages don't get
+    silently zeroed but the header stays compact. Whole-millisecond
+    values render without the trailing `.0`. Entries with non-token
+    names are skipped — see `_TOKEN_RE`.
+    """
+    parts: list[str] = []
+    for name, dur in stages_ms.items():
+        if not _TOKEN_RE.match(name):
+            continue
+        rounded = round(float(dur), 1)
+        # Drop trailing ".0" for whole milliseconds — purely cosmetic;
+        # parsers accept both forms per the RFC.
+        formatted = f"{int(rounded)}" if rounded == int(rounded) else f"{rounded}"
+        parts.append(f"{name};dur={formatted}")
+    return ", ".join(parts)
 
 
 # --- request / response models ---------------------------------------------
@@ -97,8 +127,8 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
             device=emb.device,
         )
 
-    @app.post("/embed/audio", response_model=EmbedResponse)
-    async def embed_audio(req: Request, emb: EmbedderDep) -> EmbedResponse:
+    @app.post("/embed/audio")
+    async def embed_audio(req: Request, emb: EmbedderDep) -> Response:
         # Inference runs in the default threadpool so concurrent calls
         # don't block the event loop. The actual GPU forward pass still
         # serializes on the device (only one CUDA/HIP stream by
@@ -110,25 +140,36 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         body = await req.body()
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="empty body")
-        vector = await asyncio.to_thread(emb.embed_audio, body)
-        return EmbedResponse(
-            vector=[float(x) for x in vector.tolist()],
-            dim=EMBEDDING_DIM,
-            model_version=emb.model_version,
-        )
+        result = await asyncio.to_thread(emb.embed_audio, body)
+        return _build_embed_response(result, emb.model_version)
 
-    @app.post("/embed/text", response_model=EmbedResponse)
-    async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep) -> EmbedResponse:
+    @app.post("/embed/text")
+    async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep) -> Response:
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
-        vector = await asyncio.to_thread(emb.embed_text, payload.text)
-        return EmbedResponse(
-            vector=[float(x) for x in vector.tolist()],
-            dim=EMBEDDING_DIM,
-            model_version=emb.model_version,
-        )
+        result = await asyncio.to_thread(emb.embed_text, payload.text)
+        return _build_embed_response(result, emb.model_version)
 
     return app
+
+
+def _build_embed_response(result, model_version: str) -> Response:
+    """Wrap an `EmbedResult` in a JSON response and attach the
+    `Server-Timing` header. Pulled out of the handlers so the two
+    endpoints share the same envelope + header logic.
+    """
+    from fastapi.responses import JSONResponse
+
+    payload = EmbedResponse(
+        vector=[float(x) for x in result.vector.tolist()],
+        dim=EMBEDDING_DIM,
+        model_version=model_version,
+    )
+    headers: dict[str, str] = {}
+    timing = format_server_timing(result.stages_ms)
+    if timing:
+        headers["Server-Timing"] = timing
+    return JSONResponse(content=payload.model_dump(), headers=headers)
 
 
 # Module-level app for `uvicorn embedder.app:app` deployments.

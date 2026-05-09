@@ -113,6 +113,7 @@ impl EmbeddingStore {
     /// on a *held* lock, not lock-upgrade contention. UPDATE…RETURNING
     /// (SQLite ≥ 3.35) sidesteps that by acquiring the write lock up
     /// front and selecting the row in the same statement.
+    #[tracing::instrument(name = "store.claim_next", skip(self), fields(model = %model_version))]
     pub async fn claim_next(&self, model_version: &ModelVersion) -> Result<Option<EmbeddingKey>> {
         let now = now_ms();
         let row = sqlx::query(
@@ -143,6 +144,7 @@ impl EmbeddingStore {
     }
 
     /// Mark an in-progress row as done and store its embedding vector.
+    #[tracing::instrument(name = "store.mark_done", skip(self, embedding), fields(track = %embedding.key.track_id))]
     pub async fn mark_done(&self, embedding: &Embedding) -> Result<()> {
         let dim = i64::try_from(embedding.dim()).expect("vector dim fits in i64");
         let blob = vector_to_blob(&embedding.vector);

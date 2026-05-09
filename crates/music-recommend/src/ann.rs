@@ -145,6 +145,7 @@ impl AnnIndex {
         Ok(self.len()? == 0)
     }
 
+    #[tracing::instrument(name = "ann.upsert", skip(self, vector), fields(track = %track_id))]
     pub fn upsert(&self, track_id: &TrackId, vector: &[f32]) -> Result<(), AnnError> {
         if vector.len() != self.dim {
             return Err(AnnError::DimMismatch {

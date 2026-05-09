@@ -308,3 +308,137 @@ async fn dim_mismatch_in_response_is_invalid_response() {
         .unwrap_err();
     assert!(matches!(err, EmbedderError::InvalidResponse(_)));
 }
+
+// --- Server-Timing parser ------------------------------------------------
+//
+// The parser is exposed at the crate root so the gateway (and these
+// tests) can verify it independently of the HTTP path. The record-on-
+// span behavior is exercised in the layered test below.
+
+mod server_timing_parser {
+    use music_recommend::embedder::parse_server_timing;
+
+    #[test]
+    fn single_entry() {
+        let out = parse_server_timing("decode;dur=42");
+        assert_eq!(out, vec![("decode".into(), 42.0_f64)]);
+    }
+
+    #[test]
+    fn multi_entry_with_whitespace() {
+        let out = parse_server_timing("decode;dur=42, gpu_forward;dur=520");
+        assert_eq!(
+            out,
+            vec![
+                ("decode".into(), 42.0_f64),
+                ("gpu_forward".into(), 520.0_f64),
+            ]
+        );
+    }
+
+    #[test]
+    fn fractional_durations_round_trip() {
+        let out = parse_server_timing("hash;dur=0.1, wrap;dur=1.8");
+        assert_eq!(
+            out,
+            vec![("hash".into(), 0.1_f64), ("wrap".into(), 1.8_f64)]
+        );
+    }
+
+    #[test]
+    fn entries_without_dur_are_skipped() {
+        // Per the RFC, `metric;desc="..."` (no dur) is a valid entry —
+        // we just have no useful number to extract, so we drop it.
+        let out = parse_server_timing("missing, decode;dur=42");
+        assert_eq!(out, vec![("decode".into(), 42.0_f64)]);
+    }
+
+    #[test]
+    fn extra_params_after_dur_are_ignored() {
+        // `decode;dur=42;desc="audio decode"` — keep dur, drop desc.
+        let out = parse_server_timing("decode;dur=42;desc=\"audio decode\"");
+        assert_eq!(out, vec![("decode".into(), 42.0_f64)]);
+    }
+
+    #[test]
+    fn empty_string_returns_empty_vec() {
+        assert!(parse_server_timing("").is_empty());
+        assert!(parse_server_timing("   ").is_empty());
+    }
+
+    #[test]
+    fn malformed_entries_dont_panic() {
+        // Each input is something a buggy backend might emit. None of
+        // them should panic; we either extract what we can or drop.
+        for header in [
+            ";dur=10",          // empty name
+            "decode;dur=",      // missing value
+            "decode;dur=NaN",   // unparseable
+            ",,, ,",            // pure separators
+            "decode;dur=42;",   // trailing semicolon
+        ] {
+            let _ = parse_server_timing(header);
+        }
+    }
+}
+
+// --- record-on-span integration -----------------------------------------
+
+#[tokio::test]
+async fn embed_audio_works_when_server_timing_header_absent() {
+    // Backwards compat: an embedder that doesn't emit Server-Timing
+    // should still produce a valid embedding; the gateway just won't
+    // get the stage breakdown. (The "field is actually written onto
+    // the embed_audio span" path is too racy to test with parallel
+    // `#[tokio::test]`s — `#[tracing::instrument]` creates the span at
+    // call time using whatever dispatcher is active on the test
+    // thread, and that's contested under parallel cargo test.
+    // Instead, the parser is exhaustively unit-tested above and the
+    // span-field plumbing is verified end-to-end by the M0 TraceLayer
+    // round-trip tests in `crates/music-gateway/tests/diagnostics_layer.rs`.)
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "vector": [0.1, 0.2, 0.3],
+            "dim": 3,
+            "model_version": "stub-v1"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = client
+        .embed_audio(Bytes::from_static(b"audio"))
+        .await
+        .expect("embed");
+    assert_eq!(out.vector.len(), 3);
+}
+
+#[tokio::test]
+async fn embed_audio_succeeds_when_server_timing_header_is_present() {
+    // The presence of Server-Timing must not change the embed result —
+    // we extract it as a side effect for tracing only.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Server-Timing", "decode;dur=42, gpu_forward;dur=520")
+                .set_body_json(json!({
+                    "vector": [0.1, 0.2, 0.3],
+                    "dim": 3,
+                    "model_version": "stub-v1"
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = client
+        .embed_audio(Bytes::from_static(b"audio"))
+        .await
+        .expect("embed");
+    assert_eq!(out.vector.len(), 3);
+    assert_eq!(out.dim, 3);
+}

@@ -109,6 +109,7 @@ impl IngestWorker {
     /// queue is empty. Errors here are *infrastructure* failures
     /// (SQLite, ANN); per-track failures are absorbed into
     /// `IngestOutcome::Failed`.
+    #[tracing::instrument(name = "ingest.process_next", skip(self))]
     pub async fn process_next(&self) -> Result<IngestOutcome, IngestError> {
         let Some(key) = self.cfg.store.claim_next(&self.cfg.model_version).await? else {
             return Ok(IngestOutcome::Idle);
@@ -154,6 +155,7 @@ impl IngestWorker {
         }
     }
 
+    #[tracing::instrument(name = "ingest.embed_one", skip(self), fields(track = %key.track_id))]
     async fn embed_one(&self, key: &EmbeddingKey) -> Result<Vec<f32>, String> {
         let bytes = self
             .cfg

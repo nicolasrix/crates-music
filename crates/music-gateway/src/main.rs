@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
+use music_gateway::diagnostics::{TraceLayer, TraceStore, spawn_drainer};
 use music_gateway::embedder::{EmbedderHandle, boot_probe};
 use music_gateway::ingest::{SubsonicAudioFetcher, spawn_ingest_worker};
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
@@ -19,7 +20,10 @@ use music_recommend::ann::AnnIndex;
 use music_recommend::ingest::{AudioFetcher, rebuild_ann_from_store};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default embedding dimension. CLAP's audio + text encoders share a
 /// 512-dim space; we hardcode this here because the ANN index has to
@@ -29,6 +33,18 @@ const DEFAULT_EMBEDDING_DIM: usize = 512;
 /// HNSW connectivity. usearch's recommended default for cosine-style
 /// similarity at our scale (~10⁴ vectors).
 const ANN_CONNECTIVITY: usize = 16;
+
+/// Diagnostics-trace channel buffer. Spans land here from the
+/// `TraceLayer` and are drained on a tick. Sized for ~1 s of bursty
+/// emission across 8 ingest workers + a few HTTP handlers.
+const TRACES_CHANNEL_BUFFER: usize = 1024;
+/// How often the diagnostics drainer flushes buffered spans into
+/// SQLite. Short enough that the diagnostics page feels live; long
+/// enough to amortize the SQLite write cost across a batch.
+const TRACES_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+/// Ring-buffer cap on the spans table. ~24-48 hours of ingest +
+/// request data at the rates we see in P6.
+const TRACES_MAX_ROWS: usize = 100_000;
 
 #[derive(Debug, Parser)]
 #[command(name = "music-gateway", about = "Music gateway for Navidrome")]
@@ -40,12 +56,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install rustls ring crypto provider");
@@ -53,6 +63,31 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)
         .with_context(|| format!("loading config from {}", args.config.display()))?;
+
+    // Diagnostics traces DB lives next to the OAuth state DB but in
+    // its own SQLite file — different lifecycle (ring-buffered,
+    // throwaway) from OAuth state (irreplaceable). See
+    // crates/music-gateway/src/diagnostics/mod.rs for the design
+    // rationale.
+    let traces_db_path = config.oauth.state_db.with_extension("traces.sqlite");
+    let trace_store = TraceStore::open(&traces_db_path)
+        .await
+        .with_context(|| format!("opening traces DB at {}", traces_db_path.display()))?;
+    let (trace_layer, trace_rx) = TraceLayer::new(TRACES_CHANNEL_BUFFER);
+    let _trace_drainer = spawn_drainer(
+        trace_store.clone(),
+        trace_rx,
+        TRACES_FLUSH_INTERVAL,
+        TRACES_MAX_ROWS,
+    );
+
+    // Layered subscriber: env-filtered fmt to stdout (existing behavior)
+    // + diagnostics layer that sinks spans into the traces DB.
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(tracing_subscriber::fmt::layer())
+        .with(trace_layer)
+        .init();
 
     let listen = config.server.listen;
     let tls = RustlsConfig::from_pem_file(&config.server.tls_cert, &config.server.tls_key)

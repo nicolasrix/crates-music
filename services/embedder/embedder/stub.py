@@ -14,8 +14,11 @@ L2-normalizes. Output is stable across runs.
 from __future__ import annotations
 
 import hashlib
+import time
 
 import numpy as np
+
+from embedder.protocol import EmbedResult
 
 
 class StubEmbedder:
@@ -37,11 +40,21 @@ class StubEmbedder:
     def device(self) -> str:
         return "cpu"
 
-    def embed_audio(self, raw_bytes: bytes) -> np.ndarray:
-        return self._hash_to_vector(b"audio:" + raw_bytes)
+    def embed_audio(self, raw_bytes: bytes) -> EmbedResult:
+        return self._timed_hash(b"audio:" + raw_bytes)
 
-    def embed_text(self, text: str) -> np.ndarray:
-        return self._hash_to_vector(b"text:" + text.encode("utf-8"))
+    def embed_text(self, text: str) -> EmbedResult:
+        return self._timed_hash(b"text:" + text.encode("utf-8"))
+
+    def _timed_hash(self, payload: bytes) -> EmbedResult:
+        # Single "hash" stage — the stub doesn't decode or run a model,
+        # so reporting decode/resample/gpu_forward would be a lie. The
+        # stage name is still useful to the gateway: it confirms the
+        # sidecar emitted timings without claiming work it didn't do.
+        t0 = time.perf_counter()
+        vec = self._hash_to_vector(payload)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return EmbedResult(vector=vec, stages_ms={"hash": elapsed_ms})
 
     @staticmethod
     def _hash_to_vector(payload: bytes) -> np.ndarray:

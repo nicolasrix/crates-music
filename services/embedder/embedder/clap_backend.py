@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 
 import numpy as np
+
+from embedder.protocol import EmbedResult
 
 logger = logging.getLogger(__name__)
 
@@ -65,25 +68,41 @@ class ClapEmbedder:
     def device(self) -> str:
         return self._device
 
-    def embed_audio(self, raw_bytes: bytes) -> np.ndarray:
+    def embed_audio(self, raw_bytes: bytes) -> EmbedResult:
         import soundfile  # type: ignore[import-not-found]
         import librosa  # type: ignore[import-not-found]
 
-        # Decode to mono float32, then resample to 48 kHz.
+        stages: dict[str, float] = {}
+
+        # Decode to mono float32.
+        t0 = time.perf_counter()
         with io.BytesIO(raw_bytes) as buf:
             audio, sr = soundfile.read(buf, dtype="float32", always_2d=False)
         if audio.ndim == 2:
             audio = audio.mean(axis=1)
+        stages["decode"] = (time.perf_counter() - t0) * 1000.0
+
+        # Resample to 48 kHz if needed.
+        t0 = time.perf_counter()
         if sr != self.SAMPLE_RATE:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=self.SAMPLE_RATE)
-        # CLAP expects (batch, samples).
+        stages["resample"] = (time.perf_counter() - t0) * 1000.0
+
+        # GPU forward pass. (CPU when CUDA isn't available — same code path.)
+        t0 = time.perf_counter()
         batch = audio[np.newaxis, :].astype(np.float32)
         emb = self._model.get_audio_embedding_from_data(x=batch, use_tensor=False)
-        return _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+        vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+        stages["gpu_forward"] = (time.perf_counter() - t0) * 1000.0
 
-    def embed_text(self, text: str) -> np.ndarray:
+        return EmbedResult(vector=vec, stages_ms=stages)
+
+    def embed_text(self, text: str) -> EmbedResult:
+        t0 = time.perf_counter()
         emb = self._model.get_text_embedding([text], use_tensor=False)
-        return _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+        vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return EmbedResult(vector=vec, stages_ms={"gpu_forward": elapsed_ms})
 
 
 def _derive_version(checkpoint_path: str) -> str:

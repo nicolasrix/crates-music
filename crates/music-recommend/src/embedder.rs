@@ -19,9 +19,43 @@ use std::time::Duration;
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use tracing::field;
 use url::Url;
 
 use crate::types::ModelVersion;
+
+/// Parse a `Server-Timing` HTTP header into `(metric, dur_ms)` pairs.
+///
+/// Per RFC, an entry is `metric;param=value, metric2;param=value`. We
+/// pluck only `dur=` because that's the only number we care about;
+/// other params (`desc=`) are ignored. Entries with no `dur=` and
+/// entries with unparseable values are dropped — this is parsing
+/// telemetry, not a wire contract, so be lenient.
+///
+/// Pure function, exhaustively unit-tested in
+/// `tests/embedder_client.rs::server_timing_parser`.
+#[must_use]
+pub fn parse_server_timing(header: &str) -> Vec<(String, f64)> {
+    header
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let mut parts = entry.split(';');
+            let name = parts.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let mut dur: Option<f64> = None;
+            for param in parts {
+                let param = param.trim();
+                if let Some(rest) = param.strip_prefix("dur=") {
+                    dur = rest.trim().parse().ok();
+                }
+            }
+            dur.map(|d| (name.to_string(), d))
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct EmbedderConfig {
@@ -99,6 +133,11 @@ impl EmbedderClient {
         Err(server_error(resp).await)
     }
 
+    #[tracing::instrument(
+        name = "embedder.embed_audio",
+        skip(self, audio),
+        fields(bytes = audio.len(), server_timing = field::Empty)
+    )]
     pub async fn embed_audio(&self, audio: Bytes) -> Result<EmbedResult, EmbedderError> {
         let url = join(&self.base, "/embed/audio");
         let resp = self
@@ -111,6 +150,7 @@ impl EmbedderClient {
         Self::parse_embed_response(resp).await
     }
 
+    #[tracing::instrument(name = "embedder.embed_text", skip(self), fields(server_timing = field::Empty))]
     pub async fn embed_text(&self, text: &str) -> Result<EmbedResult, EmbedderError> {
         let url = join(&self.base, "/embed/text");
         let resp = self
@@ -129,6 +169,17 @@ impl EmbedderClient {
         }
         if !status.is_success() {
             return Err(server_error(resp).await);
+        }
+        // Pluck Server-Timing before consuming the body — `resp.text()`
+        // moves the response, dropping the headers. `record` is a
+        // no-op when the field isn't declared on the current span, so
+        // this is safe to call regardless of caller context.
+        if let Some(timing) = resp
+            .headers()
+            .get("server-timing")
+            .and_then(|v| v.to_str().ok())
+        {
+            tracing::Span::current().record("server_timing", timing);
         }
         let body: EmbedBody = parse_json(resp).await?;
         if body.dim == 0 || body.vector.is_empty() {

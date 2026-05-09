@@ -118,6 +118,7 @@ fn pick_offset_seconds(duration_seconds: u32, window_seconds: u32) -> u32 {
 
 #[async_trait]
 impl AudioFetcher for SubsonicAudioFetcher {
+    #[tracing::instrument(name = "ingest.fetch_clip", skip(self), fields(track = %track_id))]
     async fn fetch_clip(&self, track_id: &TrackId) -> Result<Bytes, FetchError> {
         // Look up duration so we can pick a `timeOffset` centered on
         // the track. If `getSong` fails (transient transport, missing
