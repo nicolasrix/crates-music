@@ -180,6 +180,26 @@ export async function addTrackToPlaylist(
   await getSubsonic<unknown>(path, "");
 }
 
+// Rename an existing playlist. Subsonic's updatePlaylist accepts a `name`
+// param to overwrite the playlist's title — same endpoint as track edits.
+export async function renamePlaylist(
+  playlistId: string,
+  name: string
+): Promise<void> {
+  const path =
+    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
+    `&name=${encodeURIComponent(name)}`;
+  await getSubsonic<unknown>(path, "");
+}
+
+// Delete a playlist. Subsonic deletes immediately on success; no
+// soft-delete or undo. Caller is responsible for the confirmation step
+// and for invalidating the playlists list afterwards.
+export async function deletePlaylist(playlistId: string): Promise<void> {
+  const path = `/rest/deletePlaylist?id=${encodeURIComponent(playlistId)}`;
+  await getSubsonic<unknown>(path, "");
+}
+
 // "Recent tracks" — Subsonic doesn't have a direct "all songs" endpoint, so
 // we use search3 with a wildcard query. Library scale is single-user, so a
 // 200-row sample is enough for the all-tracks view.

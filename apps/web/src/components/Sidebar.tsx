@@ -9,9 +9,9 @@
 // active for any sub-page (via `prefix`).
 
 import { Disc3, Home as HomeIcon, ListMusic, User, Activity, Search, Plus } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { createPlaylist } from "../api/client";
+import { createPlaylist, listPlaylists } from "../api/client";
 import { Link, navigate, useRoute } from "../router";
 import { BrandMark } from "./BrandMark";
 
@@ -102,6 +102,14 @@ export function Sidebar() {
 
   const queryClient = useQueryClient();
   const [creating, setCreating] = useState(false);
+  // Shared cache key with TrackRowMenu's playlist picker — both surfaces
+  // refetch via the same `["playlists"]` invalidation after a create or
+  // edit, so navigating away and back doesn't cause a redundant fetch.
+  const playlistsQ = useQuery({
+    queryKey: ["playlists"],
+    queryFn: listPlaylists,
+    staleTime: 60_000,
+  });
   // Lightweight playlist creation — prompt() is sufficient for a single-
   // user app and avoids introducing a modal primitive that nothing else
   // uses. Once any other surface needs a modal, swap this for a proper
@@ -187,6 +195,22 @@ export function Sidebar() {
         <Plus size={18} strokeWidth={1.5} />
         <span>{creating ? "creating…" : "new playlist"}</span>
       </button>
+      {playlistsQ.data && playlistsQ.data.length > 0 && (
+        <div className="nav-subs">
+          {playlistsQ.data.map((p) => {
+            const to = `/playlists/${p.id}`;
+            return (
+              <Link
+                key={p.id}
+                to={to}
+                className={`nav-item is-sub ${path === to ? "is-active" : ""}`}
+              >
+                <span className="truncate" title={p.name}>{p.name}</span>
+              </Link>
+            );
+          })}
+        </div>
+      )}
 
       <div className="nav-group" style={{ marginTop: "auto", paddingTop: "var(--space-5)" }}>
         system

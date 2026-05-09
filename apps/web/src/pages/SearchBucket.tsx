@@ -17,8 +17,7 @@ import { ArtistTable } from "../components/ArtistTable";
 import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import { useRoute } from "../router";
-import { useSync } from "../sync/SyncContext";
-import { playSingle } from "../sync/playbackHelpers";
+import { usePlayback } from "../sync/usePlayback";
 import { rankResults } from "./searchRanking";
 
 export type BucketKind = "artists" | "albums" | "tracks";
@@ -41,7 +40,7 @@ const EXPANDED_OPTS = {
 export function SearchBucket({ bucket }: { bucket: BucketKind }) {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const sync = useSync();
+  const { playSingle } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query, "expanded"],
@@ -130,7 +129,7 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
           <TrackTable
             tracks={[...ranked!.tracks]}
             showAlbum
-            onPlay={(i) => playSingle(sync, ranked!.tracks[i]!)}
+            onPlay={(i) => playSingle(ranked!.tracks[i]!)}
           />
         </div>
       )}

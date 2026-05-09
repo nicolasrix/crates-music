@@ -19,6 +19,7 @@ import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
 import { useAutoplay } from "./AutoplayContext";
 import { usePlayer } from "./PlayerContext";
+import { VolumeControl } from "./VolumeControl";
 
 export function PlayerBar() {
   const { nowPlaying, isPlaying, togglePlay, next, prev, hasNext, hasPrev, queueLength } =
@@ -53,7 +54,21 @@ export function PlayerBar() {
         <div className="meta">
           <div className="title">{nowPlaying.title}</div>
           <div className="sub">
-            {nowPlaying.artist ?? "—"} · {nowPlaying.album ?? "—"}
+            {nowPlaying.artistId && nowPlaying.artist ? (
+              <Link to={`/artists/${nowPlaying.artistId}`}>
+                {nowPlaying.artist}
+              </Link>
+            ) : (
+              (nowPlaying.artist ?? "—")
+            )}
+            <span className="sep"> · </span>
+            {nowPlaying.albumId && nowPlaying.album ? (
+              <Link to={`/albums/${nowPlaying.albumId}`}>
+                {nowPlaying.album}
+              </Link>
+            ) : (
+              (nowPlaying.album ?? "—")
+            )}
           </div>
         </div>
       </div>
@@ -111,6 +126,7 @@ export function PlayerBar() {
       </div>
 
       <div className="right-cluster">
+        <VolumeControl />
         <Link
           to="/queue"
           className={`icon-btn queue-btn ${onQueuePage ? "is-on" : ""}`}

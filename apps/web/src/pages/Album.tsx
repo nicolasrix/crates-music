@@ -12,8 +12,7 @@ import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { Link } from "../router";
-import { useSync } from "../sync/SyncContext";
-import { playList, playSingle } from "../sync/playbackHelpers";
+import { usePlayback } from "../sync/usePlayback";
 import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
 
@@ -24,7 +23,7 @@ export function Album({ id }: { id: string }) {
   });
   const cover = coverArtUrl(q.data?.album.coverArt, 600);
   const palette = useCoverPalette(cover);
-  const sync = useSync();
+  const { playSingle, playList } = usePlayback();
 
   // Station state — surface "loading" / "not indexed" inline near the hero
   // actions row rather than as a toast, so the failure mode is co-located
@@ -53,7 +52,7 @@ export function Album({ id }: { id: string }) {
         setStationStatus({ kind: "empty" });
         return;
       }
-      playList(sync, tracks, 0);
+      playList(tracks, 0);
       setStationStatus({ kind: "idle" });
     } catch (e) {
       if (e instanceof SeedNotEmbeddedError) {
@@ -120,7 +119,7 @@ export function Album({ id }: { id: string }) {
           <div className="actions">
             <button
               className="play-disc"
-              onClick={() => playList(sync, tracks, 0)}
+              onClick={() => playList(tracks, 0)}
               aria-label="play album"
               title="play album"
             >
@@ -150,7 +149,7 @@ export function Album({ id }: { id: string }) {
         <TrackTable
           tracks={tracks}
           showAlbum={false}
-          onPlay={(i) => playSingle(sync, tracks[i]!)}
+          onPlay={(i) => playSingle(tracks[i]!)}
         />
       </div>
     </Layout>

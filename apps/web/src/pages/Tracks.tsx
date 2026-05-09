@@ -9,8 +9,7 @@ import {
 import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import { VirtualTrackTable } from "../components/VirtualTrackTable";
-import { useSync } from "../sync/SyncContext";
-import { playSingle } from "../sync/playbackHelpers";
+import { usePlayback } from "../sync/usePlayback";
 import type { Track } from "../api/types";
 import { ListMode, MODE_LABEL } from "./listMode";
 
@@ -48,7 +47,7 @@ function TracksAll() {
         : allPages.length * ALL_PAGE_SIZE,
     staleTime: 60_000,
   });
-  const sync = useSync();
+  const { playSingle } = usePlayback();
   const tracks: Track[] = q.data?.pages.flat() ?? [];
 
   // Prefetch sentinel. An IntersectionObserver fires next-page fetches
@@ -100,7 +99,7 @@ function TracksAll() {
           <VirtualTrackTable
             tracks={tracks}
             showAlbum
-            onPlay={(i) => playSingle(sync, tracks[i]!)}
+            onPlay={(i) => playSingle(tracks[i]!)}
           />
         )}
         {q.hasNextPage && (
@@ -129,7 +128,7 @@ function TracksHighlight({ mode }: { mode: Exclude<ListMode, "all"> }) {
     staleTime: mode === "random" ? 0 : 60_000,
     refetchOnMount: mode === "random" ? "always" : true,
   });
-  const sync = useSync();
+  const { playSingle } = usePlayback();
 
   const lead =
     mode === "recent"
@@ -163,7 +162,7 @@ function TracksHighlight({ mode }: { mode: Exclude<ListMode, "all"> }) {
           <TrackTable
             tracks={q.data}
             showAlbum
-            onPlay={(i) => playSingle(sync, q.data![i]!)}
+            onPlay={(i) => playSingle(q.data![i]!)}
           />
         )}
       </div>

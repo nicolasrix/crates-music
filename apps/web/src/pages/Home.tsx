@@ -13,8 +13,7 @@ import { ArtistCard } from "../components/ArtistCard";
 import { Layout } from "../components/Layout";
 import { Link } from "../router";
 import { TrackTable } from "../components/TrackTable";
-import { useSync } from "../sync/SyncContext";
-import { playSingle } from "../sync/playbackHelpers";
+import { usePlayback } from "../sync/usePlayback";
 import type { Album, Artist } from "../api/types";
 
 const ALBUMS_N = 12;
@@ -44,7 +43,7 @@ export function Home() {
     queryFn: () => listRecentTracks(TRACKS_N),
     staleTime: 60_000,
   });
-  const sync = useSync();
+  const { playSingle } = usePlayback();
 
   const albums = albumsQ.data ?? [];
   const recentArtists = deriveRecentArtists(albums, artistsQ.data ?? [], ARTISTS_N);
@@ -110,7 +109,7 @@ export function Home() {
           <TrackTable
             tracks={tracksQ.data}
             showAlbum
-            onPlay={(i) => playSingle(sync, tracksQ.data![i]!)}
+            onPlay={(i) => playSingle(tracksQ.data![i]!)}
           />
         )}
       </div>

@@ -27,6 +27,12 @@ interface PlayerCtx {
    *  scrubber can read currentTime / duration without us re-broadcasting
    *  every timeupdate through React state (60fps render storm otherwise). */
   audio: HTMLAudioElement | null;
+  /** Synchronously load + play a track. Intended to be called from a
+   *  click handler *before* the matching sync ops are submitted: the
+   *  WS roundtrip would lose the user gesture and the browser's
+   *  autoplay policy can refuse the deferred play(). Submitting the
+   *  sync ops afterwards just confirms what we've already started. */
+  primePlayback: (track: Track) => void;
 }
 
 const Ctx = createContext<PlayerCtx | null>(null);
@@ -231,6 +237,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (i !== null && i > 0) {
           submit({ type: "set_now_playing", index: i - 1 });
         }
+      },
+      primePlayback: (track) => {
+        const a = audioRef.current;
+        if (!a) return;
+        // Set src and play() *now*, while still inside the click handler's
+        // synchronous user-gesture window. The track-change effect would
+        // otherwise duplicate this work later (when set_now_playing's
+        // applied frame arrives), but by then the gesture is gone.
+        // Setting the same src twice is cheap — the browser dedups.
+        a.src = streamUrl(track.id);
+        startTsRef.current = performance.now();
+        void a.play().catch(() => {});
       },
     };
   }, [nowPlaying, is_playing, queue.items.length, now_playing_index, submit, audio]);

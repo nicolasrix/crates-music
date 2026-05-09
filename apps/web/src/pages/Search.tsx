@@ -20,8 +20,7 @@ import { Layout } from "../components/Layout";
 import { TrackHeroCard } from "../components/TrackHeroCard";
 import { TrackTable } from "../components/TrackTable";
 import { Link, useRoute } from "../router";
-import { useSync } from "../sync/SyncContext";
-import { playSingle } from "../sync/playbackHelpers";
+import { usePlayback } from "../sync/usePlayback";
 import { rankResults } from "./searchRanking";
 
 const TOP_RESULTS = 3;
@@ -34,7 +33,7 @@ const REST_LIMIT = 5;
 export function Search() {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const sync = useSync();
+  const { playSingle } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query],
@@ -162,7 +161,7 @@ export function Search() {
             <TrackHeroCard
               key={t.id}
               track={t}
-              onPlay={() => playSingle(sync, t)}
+              onPlay={() => playSingle(t)}
             />
           )}
           renderRest={(rest) => {
@@ -174,7 +173,7 @@ export function Search() {
               <TrackTable
                 tracks={arr}
                 showAlbum
-                onPlay={(i) => playSingle(sync, arr[i]!)}
+                onPlay={(i) => playSingle(arr[i]!)}
               />
             );
           }}

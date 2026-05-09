@@ -114,3 +114,111 @@ export async function startStationFromAny(
   }
   throw lastNotEmbedded ?? new Error("no candidate seed produced a station");
 }
+
+export interface PlaylistSuggestionResult {
+  tracks: Track[];
+  /** True when *every* sampled seed was unindexed. Lets the UI distinguish
+   *  "playlist hasn't been embedded yet" from "we just don't have anything
+   *  more to suggest" (e.g. tiny library where everything is already in
+   *  the playlist). */
+  allSeedsUnindexed: boolean;
+}
+
+/** Pick suggestions for an existing playlist by aggregating per-seed
+ *  recommendations across a sample of the playlist's tracks. We can't
+ *  hand the gateway a multi-seed query (no such endpoint), so we
+ *  fan out N single-seed queries client-side and combine.
+ *
+ *  Aggregation: each candidate's score = Σ similarity across seeds that
+ *  surfaced it. Tracks that appear under multiple seeds rank higher
+ *  than tracks that appear under just one — a cheap centroid proxy.
+ *
+ *  Sampling: random sample of `sampleSize` seeds (default 8). Random
+ *  rather than first-N so we cover the playlist's full vibe instead of
+ *  whatever was added earliest.
+ *
+ *  Exclusions: candidates already in the playlist are filtered out. The
+ *  `excludeIds` parameter lets callers also drop tracks they've just
+ *  added or dismissed without refetching. */
+export async function suggestForPlaylist(
+  playlistTrackIds: readonly string[],
+  opts: {
+    /** Per-seed candidate count. Default 20 — same as the station call. */
+    perSeedN?: number;
+    /** Max seeds to sample. Default 8. */
+    sampleSize?: number;
+    /** Final result cap. Default 20. */
+    topN?: number;
+    /** Extra IDs to exclude from suggestions (e.g. the playlist's own
+     *  tracks are added automatically; pass any further "I just added
+     *  this" or "dismissed" IDs here). */
+    excludeIds?: readonly string[];
+  } = {}
+): Promise<PlaylistSuggestionResult> {
+  const perSeedN = opts.perSeedN ?? 20;
+  const sampleSize = opts.sampleSize ?? 8;
+  const topN = opts.topN ?? 20;
+
+  if (playlistTrackIds.length === 0) {
+    return { tracks: [], allSeedsUnindexed: false };
+  }
+
+  const seeds = sampleN(playlistTrackIds, sampleSize);
+
+  // Fan out per-seed queries. Promise.allSettled lets us tolerate
+  // per-seed failures — typical case is a few unindexed tracks among
+  // mostly-indexed ones, and we want to use whatever we got rather
+  // than abort.
+  const settled = await Promise.allSettled(
+    seeds.map((s) => fetchRecommendations(s, perSeedN))
+  );
+
+  let unindexedCount = 0;
+  const scores = new Map<string, number>();
+  for (const r of settled) {
+    if (r.status === "rejected") {
+      if (r.reason instanceof SeedNotEmbeddedError) unindexedCount++;
+      continue;
+    }
+    for (const item of r.value.results) {
+      scores.set(item.track_id, (scores.get(item.track_id) ?? 0) + item.similarity);
+    }
+  }
+
+  const allSeedsUnindexed = unindexedCount === seeds.length;
+
+  // Drop any candidate already in the playlist or in the caller's
+  // exclude list. Use a Set of strings for O(1) lookup; the playlist
+  // can be large.
+  const exclude = new Set<string>(playlistTrackIds);
+  for (const id of opts.excludeIds ?? []) exclude.add(id);
+
+  const ranked = Array.from(scores.entries())
+    .filter(([id]) => !exclude.has(id))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([id]) => id);
+
+  // Hydrate to full Track shape so the UI can show artist/album/cover.
+  // Drop lookup failures silently — same policy as startStation.
+  const tracks = await Promise.all(
+    ranked.map((id) => getSong(id).catch(() => null))
+  );
+  return {
+    tracks: tracks.filter((t): t is Track => t !== null),
+    allSeedsUnindexed,
+  };
+}
+
+// Knuth shuffle, truncated to k. Avoids the "sort by random key" trick,
+// which is biased on V8 for some array sizes — and we don't care about
+// sorting the rest of the array, so partial shuffle is faster anyway.
+function sampleN<T>(arr: readonly T[], k: number): T[] {
+  if (arr.length <= k) return [...arr];
+  const copy = [...arr];
+  for (let i = 0; i < k; i++) {
+    const j = i + Math.floor(Math.random() * (copy.length - i));
+    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
+  }
+  return copy.slice(0, k);
+}
