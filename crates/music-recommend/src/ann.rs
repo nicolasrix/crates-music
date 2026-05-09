@@ -204,6 +204,30 @@ impl AnnIndex {
     /// Query with an exclusion list. Common pattern: "give me 5 tracks
     /// similar to seed X, but not X itself or anything I've already
     /// queued." We over-fetch a bit and filter in-process.
+    ///
+    /// Span fields:
+    /// - `k`, `excluded`, `returned` — request shape and result count.
+    /// - `index_size` — number of vectors currently in the HNSW.
+    /// - `search_ns` — wall-clock ns spent inside `usearch::search`
+    ///   only (excludes validation, lock acquisition, exclusion
+    ///   filtering). This is the cost that scales with catalog size.
+    /// - `ns_per_vector` — `search_ns / index_size`. Catalog-size
+    ///   normalised perf indicator. HNSW is sub-linear, so this
+    ///   trends *down* as the index grows; it is not constant. Useful
+    ///   for catching "search got 5× slower per vector" regressions
+    ///   without chasing absolute-time noise as the catalog evolves.
+    #[tracing::instrument(
+        name = "ann.query",
+        skip_all,
+        fields(
+            k = k,
+            excluded = exclude.len(),
+            returned = tracing::field::Empty,
+            index_size = tracing::field::Empty,
+            search_ns = tracing::field::Empty,
+            ns_per_vector = tracing::field::Empty,
+        ),
+    )]
     pub fn query_excluding(
         &self,
         query: &[f32],
@@ -220,13 +244,22 @@ impl AnnIndex {
             return Ok(Vec::new());
         }
         let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
+        let index_size = inner.forward.len();
         // Over-fetch by `exclude.len()` so we can drop matches and
         // still hit `k`. usearch caps fetches at the index size.
-        let want = (k + exclude.len()).min(inner.forward.len());
+        let want = (k + exclude.len()).min(index_size);
+        let span = tracing::Span::current();
+        span.record("index_size", index_size);
         if want == 0 {
             return Ok(Vec::new());
         }
+        let t_search = std::time::Instant::now();
         let matches = inner.index.search(query, want).map_err(to_usearch_err)?;
+        let search_ns = u64::try_from(t_search.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        span.record("search_ns", search_ns);
+        if index_size > 0 {
+            span.record("ns_per_vector", search_ns / index_size as u64);
+        }
         let mut out = Vec::with_capacity(k);
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
             let Some(track_id) = inner.reverse.get(key).cloned() else {
@@ -243,6 +276,7 @@ impl AnnIndex {
                 break;
             }
         }
+        span.record("returned", out.len());
         Ok(out)
     }
 

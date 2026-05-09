@@ -50,6 +50,16 @@ pub struct RecommendItem {
     pub similarity: f32,
 }
 
+#[tracing::instrument(
+    name = "recommend.next",
+    skip_all,
+    fields(
+        seed = %q.seed,
+        n = tracing::field::Empty,
+        seed_source = tracing::field::Empty,
+        results = tracing::field::Empty,
+    ),
+)]
 pub async fn next(
     State(state): State<AppState>,
     Query(q): Query<RecommendNextQuery>,
@@ -58,16 +68,18 @@ pub async fn next(
         return Err((StatusCode::BAD_REQUEST, "n must be >= 1"));
     }
     let n = q.n.min(MAX_N);
+    tracing::Span::current().record("n", n);
     let seed_id = TrackId::from(q.seed.clone());
     let model_version = state.recommend_model_version().clone();
 
-    let seed_vector = lookup_seed_vector(
+    let (seed_vector, source) = lookup_seed_vector(
         state.ann(),
         state.embedding_store(),
         &seed_id,
         &model_version,
     )
     .await;
+    tracing::Span::current().record("seed_source", source);
     let Some(vector) = seed_vector else {
         return Err((StatusCode::NOT_FOUND, "seed not embedded"));
     };
@@ -76,6 +88,7 @@ pub async fn next(
         .ann()
         .query_excluding(&vector, n, std::slice::from_ref(&seed_id))
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+    tracing::Span::current().record("results", results.len());
 
     Ok(Json(RecommendNextResponse {
         seed: q.seed,
@@ -130,16 +143,22 @@ pub async fn enqueue(
 /// hit it first — that's the cheap path and avoids a SQLite read on
 /// every recommend call. SQLite is the durable fallback in case the
 /// ANN is mid-rebuild.
+///
+/// Returns `(vector, source)` where `source` is one of `"ann"`,
+/// `"sqlite"`, or `"missing"` — recorded as a span field so
+/// /diagnostics can show fallback rate at a glance.
 async fn lookup_seed_vector(
     ann: &AnnIndex,
     store: &EmbeddingStore,
     seed: &TrackId,
     model_version: &ModelVersion,
-) -> Option<Vec<f32>> {
+) -> (Option<Vec<f32>>, &'static str) {
     if let Ok(Some(v)) = ann.get_vector(seed) {
-        return Some(v);
+        return (Some(v), "ann");
     }
     let key = EmbeddingKey::new(seed.clone(), model_version.clone());
-    let emb = store.get(&key).await.ok().flatten()?;
-    Some(emb.vector)
+    match store.get(&key).await.ok().flatten() {
+        Some(emb) => (Some(emb.vector), "sqlite"),
+        None => (None, "missing"),
+    }
 }
