@@ -76,7 +76,7 @@ async fn proxy_inner(
     tracing::Span::current().record("method", subsonic_method);
     let client_query = request.uri().query().unwrap_or("");
 
-    if BROWSE_METHODS.contains(&subsonic_method) {
+    if BROWSE_METHODS.contains(&subsonic_method) && is_cacheable(subsonic_method, client_query) {
         tracing::Span::current().record("kind", "browse");
         let if_none_match = request
             .headers()
@@ -243,6 +243,23 @@ fn forward_buffered(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Res
         response.headers_mut().insert(CONTENT_TYPE, ct);
     }
     response
+}
+
+/// Whether a browse-shaped request can safely be served from the L2 cache.
+///
+/// `getAlbumList2?type=random` is the only entry in `BROWSE_METHODS` whose
+/// response isn't a pure function of catalog state — Navidrome shuffles
+/// server-side per call. Caching it would pin the first shuffle for
+/// `browse_ttl_seconds` and the random-browse pages would show the same
+/// list every visit. Every other `type` (newest, frequent, alphabeticalByName,
+/// …) is deterministic at single-user scale and benefits from the cache.
+fn is_cacheable(method: &str, client_query: &str) -> bool {
+    if method != "getAlbumList2" {
+        return true;
+    }
+    let is_random = url::form_urlencoded::parse(client_query.as_bytes())
+        .any(|(k, v)| k == "type" && v == "random");
+    !is_random
 }
 
 /// Cache key derivation: method name plus non-auth query params, sorted by key
