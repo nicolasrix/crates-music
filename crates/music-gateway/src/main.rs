@@ -12,10 +12,11 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use music_cache::Cache;
 use music_gateway::embedder::{EmbedderHandle, boot_probe};
+use music_gateway::ingest::{SubsonicAudioFetcher, spawn_ingest_worker};
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use music_recommend::ann::AnnIndex;
-use music_recommend::ingest::rebuild_ann_from_store;
+use music_recommend::ingest::{AudioFetcher, rebuild_ann_from_store};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use tracing_subscriber::EnvFilter;
@@ -105,6 +106,18 @@ async fn main() -> Result<()> {
 
     let embedder = boot_probe(config.embedder.as_ref()).await;
     let recommend = boot_recommender(&config.oauth.state_db, &embedder).await?;
+
+    let fetcher: Arc<dyn AudioFetcher> = Arc::new(
+        SubsonicAudioFetcher::new(&config.upstream)
+            .context("building Subsonic ingest fetcher")?,
+    );
+    let _ingest_handle = spawn_ingest_worker(
+        recommend.embedding_store.clone(),
+        recommend.ann.clone(),
+        embedder.client().cloned(),
+        fetcher,
+        recommend.model_version.clone(),
+    );
 
     let state = AppState::new(
         config,

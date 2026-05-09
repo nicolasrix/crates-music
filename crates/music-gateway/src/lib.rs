@@ -10,6 +10,7 @@ pub mod auth;
 pub mod config;
 pub mod embedder;
 pub mod events;
+pub mod ingest;
 pub mod oauth;
 pub mod proxy;
 pub mod recommend;
