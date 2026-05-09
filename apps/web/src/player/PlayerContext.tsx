@@ -9,6 +9,7 @@
 
 import { createContext, ReactNode, useContext, useEffect, useMemo, useRef } from "react";
 import { streamUrl } from "../api/client";
+import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 
@@ -48,6 +49,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Swap src when the now-playing track changes. The track id (not the
   // index) is the right dependency: reordering the queue under the
   // cursor is a no-op for playback.
+  //
+  // We capture the wall clock at src-set, then emit `playback.start`
+  // on the *first* `playing` event for this track. That latency
+  // (request → first decoded sample) is the one users feel. We don't
+  // use `loadedmetadata` because metadata can arrive long before the
+  // browser actually starts decoding.
+  const startTsRef = useRef<number | null>(null);
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -56,8 +64,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       return;
     }
     audio.src = streamUrl(currentTrackId);
+    startTsRef.current = performance.now();
     if (is_playing) void audio.play().catch(() => {});
   }, [currentTrackId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // One-shot `playing` listener per src change emits the latency mark.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !currentTrackId) return;
+    const onPlaying = () => {
+      const start = startTsRef.current;
+      if (start === null) return;
+      const elapsed = performance.now() - start;
+      startTsRef.current = null; // one-shot — don't double-emit on resume
+      markEvent("playback.start", {
+        value_ms: elapsed,
+        fields: { track_id: currentTrackId },
+      });
+    };
+    audio.addEventListener("playing", onPlaying);
+    return () => audio.removeEventListener("playing", onPlaying);
+  }, [currentTrackId]);
 
   // Reflect the play/pause flag.
   useEffect(() => {

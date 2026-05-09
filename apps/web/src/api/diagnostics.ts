@@ -109,3 +109,32 @@ export function fetchQueueDepth(opts: { modelVersion?: string }): Promise<QueueD
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return getJson<QueueDepthResponse>(`/v1/diagnostics/queue_depth${suffix}`);
 }
+
+// --- client events --------------------------------------------------------
+
+export interface ClientEventEntry {
+  received_ms: number;
+  occurred_ms: number;
+  session_id: string;
+  name: string;
+  value_ms: number | null;
+  rating: "good" | "needs-improvement" | "poor" | null;
+  page_path: string;
+  user_agent: string | null;
+  fields: Record<string, unknown>;
+}
+
+export interface ClientEventsResponse {
+  events: ClientEventEntry[];
+}
+
+export function fetchClientEvents(opts: {
+  limit?: number;
+  name?: string;
+}): Promise<ClientEventsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.name) qs.set("name", opts.name);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<ClientEventsResponse>(`/v1/diagnostics/client_events${suffix}`);
+}

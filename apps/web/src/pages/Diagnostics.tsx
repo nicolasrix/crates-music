@@ -2,8 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import {
+  ClientEventEntry,
   HistogramBucket,
   TraceEntry,
+  fetchClientEvents,
   fetchHistogram,
   fetchQueueDepth,
   fetchTraces,
@@ -52,6 +54,10 @@ export function Diagnostics() {
       <Section title="Span duration histogram">
         {histogram.error && <ErrorLine error={histogram.error} />}
         {histogram.data && <HistogramTable buckets={histogram.data.buckets} />}
+      </Section>
+
+      <Section title="Client events (RUM)">
+        <ClientEventsSection />
       </Section>
 
       <Section title="Recent traces">
@@ -325,6 +331,78 @@ function SpanBar({
       )}
     </div>
   );
+}
+
+// --- client events ---------------------------------------------------------
+
+function ClientEventsSection() {
+  const events = useQuery({
+    queryKey: ["diag", "client_events"],
+    queryFn: () => fetchClientEvents({ limit: 100 }),
+    refetchInterval: REFRESH_MS,
+  });
+  if (events.error) return <ErrorLine error={events.error} />;
+  if (!events.data) return null;
+  if (events.data.events.length === 0) {
+    return <p className="text-sm text-stone-500">no client events yet</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="text-xs text-stone-500 uppercase tracking-wide">
+          <tr>
+            <th className="text-left pb-2">received</th>
+            <th className="text-left pb-2">name</th>
+            <th className="text-right pb-2 px-3">value</th>
+            <th className="text-left pb-2 pl-3">rating</th>
+            <th className="text-left pb-2 pl-3">page</th>
+            <th className="text-left pb-2 pl-3">session</th>
+          </tr>
+        </thead>
+        <tbody>
+          {events.data.events.map((e, i) => (
+            <ClientEventRow key={`${e.session_id}-${e.received_ms}-${i}`} event={e} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ClientEventRow({ event }: { event: ClientEventEntry }) {
+  return (
+    <tr className="border-t border-stone-800">
+      <td className="py-1 text-stone-400 tabular-nums">{fmtRecentTime(event.received_ms)}</td>
+      <td className="py-1 font-mono text-stone-200">{event.name}</td>
+      <td className="py-1 px-3 text-right tabular-nums">
+        {event.value_ms === null ? "—" : fmtMs(event.value_ms)}
+      </td>
+      <td className="py-1 pl-3">{event.rating ? <RatingPill rating={event.rating} /> : "—"}</td>
+      <td className="py-1 pl-3 text-stone-400 font-mono text-xs">{event.page_path}</td>
+      <td className="py-1 pl-3 text-stone-500 font-mono text-xs">
+        {event.session_id.slice(0, 8)}
+      </td>
+    </tr>
+  );
+}
+
+function RatingPill({ rating }: { rating: "good" | "needs-improvement" | "poor" }) {
+  // Color tracks the web-vitals convention: green / amber / red. We
+  // don't render it inline as a bar because most rows are non-timing
+  // marks anyway; the pill is enough to spot regressions at a glance.
+  const tone = {
+    good: "bg-emerald-700/40 text-emerald-200",
+    "needs-improvement": "bg-amber-700/40 text-amber-200",
+    poor: "bg-red-700/40 text-red-200",
+  }[rating];
+  return (
+    <span className={`px-2 py-0.5 rounded text-[11px] ${tone}`}>{rating}</span>
+  );
+}
+
+function fmtRecentTime(unixMs: number): string {
+  const d = new Date(unixMs);
+  return d.toLocaleTimeString();
 }
 
 // --- helpers ---------------------------------------------------------------

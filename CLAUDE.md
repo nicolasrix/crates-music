@@ -231,9 +231,10 @@ web has the optimistic-update sync provider. Single-linearizer model
 (P6.8), text-query stations via CLAP's text encoder (P6.9). The event
 log is in place to capture signal for P6.8 when it lands.
 
-**Diagnostics surface (M2.1 + M2.2) done.** Three authenticated
-endpoints read the M0 trace store, plus a web `/diagnostics` page
-that renders them.
+**Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
+endpoints read the M0 trace store and the new client-events ring,
+plus a web `/diagnostics` page that renders them and a browser RUM
+emitter that feeds it.
 
 Endpoints:
 
@@ -248,20 +249,54 @@ Endpoints:
 - `GET /v1/diagnostics/queue_depth?model_version=` — embedding ingest
   queue counts. Defaults to `recommend_model_version`; explicit
   override useful during rolling model upgrades.
+- `POST /v1/diagnostics/client_events` — browser RUM batch upload.
+  Body: `{events: [{session_id, occurred_ms, name, value_ms?,
+  rating?, page_path, fields?}, ...]}`. Server stamps `received_ms`
+  + `user_agent` (truncated to 256 chars). 422 on schema mismatch,
+  413 if `events.len() > 50`. Returns `{accepted: N}`.
+- `GET /v1/diagnostics/client_events?limit=&name=` — most recent
+  events, newest received first. Two timestamps preserved: client's
+  `occurred_ms` and gateway-stamped `received_ms`.
+
+Browser RUM (`apps/web/src/rum/`):
+
+- `web-vitals` 4.x — LCP / INP / CLS / FCP / TTFB → marks named
+  `web-vital.<NAME>` with the library's `rating` bucket attached.
+- `markEvent(name, {value_ms?, rating?, fields?})` — public API for
+  custom marks. Already wired from `PlayerContext`: emits
+  `playback.start` with `{value_ms, fields:{track_id}}` measured
+  from `src` set → first `playing` event (the user-perceived
+  latency, not `loadedmetadata` which fires too early).
+- Batched: 10s interval flush via `fetch`, plus pagehide /
+  visibilitychange→hidden flush via `fetch(..., {keepalive:true})`.
+  In-memory cap of 50 events drops oldest. Session id is one per
+  page-load, persisted in `sessionStorage`.
 
 Web (`apps/web/src/pages/Diagnostics.tsx`):
 
-- Three sections — queue depth (count tiles), histogram (table with
-  inline distribution bars at p50/p95/p99/max), traces (grouped by
-  trace_id, expandable with a top-down waterfall colored by stable
-  hash of span name).
+- Four sections — queue depth (count tiles), histogram (table with
+  inline distribution bars at p50/p95/p99/max), client events (RUM
+  table with rating pill + page_path + truncated session id), traces
+  (grouped by trace_id, expandable with a top-down waterfall colored
+  by stable hash of span name).
 - 5-second `refetchInterval` via TanStack Query keeps the page live
-  without a websocket. Filterable by span name (dropdown sourced from
-  the histogram response).
+  without a websocket. Filterable by span name (dropdown sourced
+  from the histogram response).
 - Reachable via a `/diagnostics` nav link in the header. Type-checks
-  and builds (~76 KB gzipped, +2 KB over the prior baseline).
-- *Browser verification pending* — the page compiles but has not yet
-  been clicked through against a running gateway.
+  and builds (~80 KB gzipped after web-vitals + RUM glue, +4 KB
+  over the M2 baseline).
+- *Browser verification pending* — the page compiles and builds but
+  has not been clicked through end-to-end against a running gateway.
+
+Diagnostics SQLite layout (`gateway-state.traces.sqlite`):
+
+- `spans` table — closed `tracing` spans, ring-trimmed by the
+  drainer (M0).
+- `client_events` table — browser RUM ring with two timestamps
+  (`occurred_ms` from client, `received_ms` stamped server-side)
+  and an indexed `session_id` for grouping. No automatic trimming
+  yet; the table grows. **Follow-up:** mirror the `spans` ring trim
+  policy when the table starts mattering for disk usage.
 
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
