@@ -18,6 +18,7 @@ dependencies = [
 clap = [
     "torch>=2.4",
     "torchaudio>=2.4",
+    "torchvision>=0.19",
     "laion-clap>=1.1.6",
     "librosa>=0.10",
     "soundfile>=0.12",

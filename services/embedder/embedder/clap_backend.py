@@ -46,7 +46,7 @@ class ClapEmbedder:
             ) from e
 
         logger.info("loading CLAP checkpoint from %s", checkpoint_path)
-        self._model = laion_clap.CLAP_Module(enable_fusion=False)
+        self._model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
         self._model.load_ckpt(checkpoint_path)
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
