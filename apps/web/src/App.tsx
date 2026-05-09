@@ -2,6 +2,7 @@ import { useAuth } from "./auth/AuthContext";
 import { Album } from "./pages/Album";
 import { Albums } from "./pages/Albums";
 import { Callback } from "./pages/Callback";
+import { Diagnostics } from "./pages/Diagnostics";
 import { SignIn } from "./pages/SignIn";
 import { PlayerBar } from "./player/PlayerBar";
 import { PlayerProvider } from "./player/PlayerContext";
@@ -29,5 +30,6 @@ export function App() {
 function Routed({ path }: { path: string }) {
   const m = path.match(/^\/albums\/([^/]+)$/);
   if (m && m[1]) return <Album id={m[1]} />;
+  if (path === "/diagnostics") return <Diagnostics />;
   return <Albums />;
 }

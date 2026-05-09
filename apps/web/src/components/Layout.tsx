@@ -8,9 +8,17 @@ export function Layout({ children }: { children: ReactNode }) {
     <div className="min-h-screen pb-24">
       <header className="sticky top-0 z-10 border-b border-stone-800 bg-stone-950/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <Link to="/" className="text-lg font-medium">
-            music
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link to="/" className="text-lg font-medium">
+              music
+            </Link>
+            <Link
+              to="/diagnostics"
+              className="text-sm text-stone-400 hover:text-stone-100"
+            >
+              diagnostics
+            </Link>
+          </div>
           <button
             onClick={() => void logout()}
             className="text-sm text-stone-400 hover:text-stone-100"

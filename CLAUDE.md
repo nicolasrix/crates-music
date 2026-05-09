@@ -231,8 +231,11 @@ web has the optimistic-update sync provider. Single-linearizer model
 (P6.8), text-query stations via CLAP's text encoder (P6.9). The event
 log is in place to capture signal for P6.8 when it lands.
 
-**Diagnostics surface (M2.1) done.** Three authenticated endpoints
-read the M0 trace store:
+**Diagnostics surface (M2.1 + M2.2) done.** Three authenticated
+endpoints read the M0 trace store, plus a web `/diagnostics` page
+that renders them.
+
+Endpoints:
 
 - `GET /v1/diagnostics/traces?limit=&name=&since_ms=` — recent closed
   spans, newest first. `fields_json` is parsed back to a JSON object;
@@ -246,8 +249,19 @@ read the M0 trace store:
   queue counts. Defaults to `recommend_model_version`; explicit
   override useful during rolling model upgrades.
 
-The web `/diagnostics` page that renders these (M2.2) is not yet
-built.
+Web (`apps/web/src/pages/Diagnostics.tsx`):
+
+- Three sections — queue depth (count tiles), histogram (table with
+  inline distribution bars at p50/p95/p99/max), traces (grouped by
+  trace_id, expandable with a top-down waterfall colored by stable
+  hash of span name).
+- 5-second `refetchInterval` via TanStack Query keeps the page live
+  without a websocket. Filterable by span name (dropdown sourced from
+  the histogram response).
+- Reachable via a `/diagnostics` nav link in the header. Type-checks
+  and builds (~76 KB gzipped, +2 KB over the prior baseline).
+- *Browser verification pending* — the page compiles but has not yet
+  been clicked through against a running gateway.
 
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
