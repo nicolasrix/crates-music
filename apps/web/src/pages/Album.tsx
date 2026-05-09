@@ -1,7 +1,20 @@
+// Album detail. Implements the "central mechanism" from the design handoff:
+// extracts a palette from the cover, sets --art-bg/fg/mute/accent on <main>,
+// renders a hero + tracklist that read those vars. Chrome (sidebar, topbar,
+// player bar) stays neutral by intent.
+
 import { useQuery } from "@tanstack/react-query";
+import { Plus, MoreHorizontal, Play, Sparkles } from "lucide-react";
+import { useState } from "react";
 import { coverArtUrl, getAlbum } from "../api/client";
+import { SeedNotEmbeddedError, startStationFromAny } from "../api/recommend";
 import { Layout } from "../components/Layout";
+import { useCoverPalette } from "../components/ArtworkPalette";
+import { TrackTable } from "../components/TrackTable";
+import { Link } from "../router";
 import { useSync } from "../sync/SyncContext";
+import { playList, playSingle } from "../sync/playbackHelpers";
+import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
 
 export function Album({ id }: { id: string }) {
@@ -9,94 +22,170 @@ export function Album({ id }: { id: string }) {
     queryKey: ["album", id],
     queryFn: () => getAlbum(id),
   });
+  const cover = coverArtUrl(q.data?.album.coverArt, 600);
+  const palette = useCoverPalette(cover);
   const sync = useSync();
 
-  function playFrom(tracks: Track[], startIndex: number) {
-    // Clear → push N → set cursor → play. The gateway linearizes;
-    // local state catches up via the broadcast `applied` frames.
-    sync.submit({ type: "clear" });
-    for (const t of tracks) sync.pushTrack(t);
-    sync.submit({ type: "set_now_playing", index: startIndex });
-    sync.submit({ type: "set_playing", is_playing: true });
+  // Station state — surface "loading" / "not indexed" inline near the hero
+  // actions row rather than as a toast, so the failure mode is co-located
+  // with the trigger.
+  const [stationStatus, setStationStatus] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "empty" }
+    | { kind: "not_indexed" }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  async function startStationForAlbum(albumTracks: Track[]) {
+    if (albumTracks.length === 0) return;
+    setStationStatus({ kind: "loading" });
+    try {
+      // Walk the album's tracks in order; the first one that's already in
+      // the ANN seeds the station. Only call the album "not indexed" if
+      // every track 404s — a single unindexed track is normal at our
+      // current ingest coverage.
+      const { tracks } = await startStationFromAny(
+        albumTracks.map((t) => t.id),
+        20
+      );
+      if (tracks.length === 0) {
+        setStationStatus({ kind: "empty" });
+        return;
+      }
+      playList(sync, tracks, 0);
+      setStationStatus({ kind: "idle" });
+    } catch (e) {
+      if (e instanceof SeedNotEmbeddedError) {
+        setStationStatus({ kind: "not_indexed" });
+      } else {
+        setStationStatus({ kind: "error", message: (e as Error).message });
+      }
+    }
   }
 
   if (q.isLoading) {
     return (
-      <Layout>
-        <p className="text-stone-400">loading…</p>
+      <Layout palette={null}>
+        <div className="section">
+          <p className="text-fg-muted text-sm">loading…</p>
+        </div>
       </Layout>
     );
   }
   if (q.error || !q.data) {
     return (
-      <Layout>
-        <p className="text-red-400">
-          error: {(q.error as Error | undefined)?.message ?? "not found"}
-        </p>
+      <Layout palette={null}>
+        <div className="section">
+          <p className="text-danger text-sm">
+            error: {(q.error as Error | undefined)?.message ?? "not found"}
+          </p>
+        </div>
       </Layout>
     );
   }
 
   const { album, tracks } = q.data;
-  const cover = coverArtUrl(album.coverArt, 600);
+  const totalSeconds = tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0);
 
   return (
-    <Layout>
-      <div className="flex flex-col md:flex-row gap-6 mb-8">
-        <div className="w-48 h-48 md:w-64 md:h-64 bg-stone-800 rounded overflow-hidden shrink-0">
-          {cover && (
-            <img src={cover} alt={album.name} className="w-full h-full object-cover" />
-          )}
+    <Layout breadcrumb={`albums · ${album.name}`} palette={palette}>
+      <div className="tinted-wash" />
+      <div className="hero">
+        <div className="cover-lg">
+          {cover && <img src={cover} alt={album.name} />}
         </div>
-        <div>
-          <h1 className="text-3xl font-semibold">{album.name}</h1>
-          <div className="text-stone-400 mt-1">
-            {album.artist ?? "—"}
-            {album.year ? ` · ${album.year}` : ""}
+        <div className="meta-stack">
+          <div className="kind">album</div>
+          <h1>{album.name}</h1>
+          <div className="sub">
+            {album.artistId && album.artist ? (
+              <Link to={`/artists/${album.artistId}`} className="sub-link">
+                {album.artist}
+              </Link>
+            ) : (
+              <span>{album.artist ?? "—"}</span>
+            )}
+            {album.year && <span aria-hidden>·</span>}
+            {album.year && <span>{album.year}</span>}
+            {tracks.length > 0 && <span aria-hidden>·</span>}
+            {tracks.length > 0 && (
+              <span>
+                {tracks.length} track{tracks.length === 1 ? "" : "s"}
+              </span>
+            )}
+            {totalSeconds > 0 && <span aria-hidden>·</span>}
+            {totalSeconds > 0 && <span>{fmtDuration(totalSeconds)}</span>}
           </div>
-          <button
-            onClick={() => playFrom(tracks, 0)}
-            className="mt-4 px-4 py-2 rounded bg-stone-200 text-stone-900 hover:bg-white"
-          >
-            Play album
-          </button>
+          <div className="actions">
+            <button
+              className="play-disc"
+              onClick={() => playList(sync, tracks, 0)}
+              aria-label="play album"
+              title="play album"
+            >
+              <Play size={20} fill="currentColor" strokeWidth={0} />
+            </button>
+            <button
+              className="icon-btn"
+              onClick={() => startStationForAlbum(tracks)}
+              disabled={tracks.length === 0 || stationStatus.kind === "loading"}
+              aria-label="start station"
+              title="start station — play tracks similar to this album"
+            >
+              <Sparkles size={18} strokeWidth={1.5} />
+            </button>
+            <button className="icon-btn" aria-label="add to queue" title="add to queue">
+              <Plus size={18} strokeWidth={1.5} />
+            </button>
+            <button className="icon-btn" aria-label="more" title="more">
+              <MoreHorizontal size={18} strokeWidth={1.5} />
+            </button>
+          </div>
+          <StationStatus status={stationStatus} />
         </div>
       </div>
 
-      <table className="w-full text-left">
-        <thead className="text-stone-400 text-sm border-b border-stone-800">
-          <tr>
-            <th className="w-10 py-2">#</th>
-            <th className="py-2">Title</th>
-            <th className="py-2 hidden md:table-cell">Artist</th>
-            <th className="py-2 w-16 text-right">Time</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tracks.map((t, i) => (
-            <tr
-              key={t.id}
-              onDoubleClick={() => playFrom(tracks, i)}
-              className="border-b border-stone-900 hover:bg-stone-900 cursor-pointer"
-            >
-              <td className="py-2 text-stone-500">{t.track ?? i + 1}</td>
-              <td className="py-2">{t.title}</td>
-              <td className="py-2 text-stone-400 hidden md:table-cell">
-                {t.artist ?? "—"}
-              </td>
-              <td className="py-2 text-stone-400 text-right">
-                {t.duration ? formatDuration(t.duration) : "—"}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="section">
+        <TrackTable
+          tracks={tracks}
+          showAlbum={false}
+          onPlay={(i) => playSingle(sync, tracks[i]!)}
+        />
+      </div>
     </Layout>
   );
 }
 
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+function StationStatus({
+  status,
+}: {
+  status:
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "empty" }
+    | { kind: "not_indexed" }
+    | { kind: "error"; message: string };
+}) {
+  if (status.kind === "idle") return null;
+  // Engineer-direct microcopy per design voice — no "Oops!", no exclamation
+  // marks. Each line tells the user what happened and what (if anything) to
+  // do next.
+  const label =
+    status.kind === "loading"
+      ? "starting station…"
+      : status.kind === "empty"
+        ? "no similar tracks found yet."
+        : status.kind === "not_indexed"
+          ? "this track isn't embedded yet — try another album."
+          : `error: ${status.message}`;
+  const tone =
+    status.kind === "error" || status.kind === "not_indexed"
+      ? "text-danger"
+      : "text-art-mute";
+  return (
+    <p className={`text-xs mt-2 ${tone}`} style={{ minHeight: "1.2em" }}>
+      {label}
+    </p>
+  );
 }

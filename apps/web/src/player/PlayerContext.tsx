@@ -7,8 +7,8 @@
 // SetPlaying(false) at the end of the queue). The eventual broadcast
 // flips local state and this effect picks up the change.
 
-import { createContext, ReactNode, useContext, useEffect, useMemo, useRef } from "react";
-import { streamUrl } from "../api/client";
+import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { coverArtUrl, streamUrl } from "../api/client";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
@@ -23,6 +23,10 @@ interface PlayerCtx {
   hasPrev: boolean;
   isPlaying: boolean;
   queueLength: number;
+  /** Direct handle to the underlying <audio> element. Exposed so the
+   *  scrubber can read currentTime / duration without us re-broadcasting
+   *  every timeupdate through React state (60fps render storm otherwise). */
+  audio: HTMLAudioElement | null;
 }
 
 const Ctx = createContext<PlayerCtx | null>(null);
@@ -30,21 +34,21 @@ const Ctx = createContext<PlayerCtx | null>(null);
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const { state, trackMeta, submit } = useSync();
   const { queue, now_playing_index, is_playing } = state.playback;
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Lazy-construct on first render (not in a useEffect) so the element is
+  // available to consumers — including the Scrubber that reads
+  // currentTime/duration off it — from the very first render. The lazy
+  // initializer in useState only runs once.
+  const [audio] = useState<HTMLAudioElement>(() => {
+    const a = new Audio();
+    a.preload = "auto";
+    return a;
+  });
+  const audioRef = useRef<HTMLAudioElement>(audio);
 
   const currentItem = now_playing_index !== null ? queue.items[now_playing_index] : undefined;
   const currentTrackId = currentItem?.track_id;
   const nowPlaying: Track | null =
     currentTrackId !== undefined ? trackMeta.get(currentTrackId) ?? null : null;
-
-  // Lazy-construct the <audio> on the client. SSR-safe (we don't SSR
-  // anyway, but the principle is cheap to keep).
-  useEffect(() => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-      audioRef.current.preload = "auto";
-    }
-  }, []);
 
   // Swap src when the now-playing track changes. The track id (not the
   // index) is the right dependency: reordering the queue under the
@@ -94,6 +98,101 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     else audio.pause();
   }, [is_playing]);
 
+  // External play/pause sync. Headphone media keys, OS media controls,
+  // and the browser's tab-mute affordance all flip the <audio> element
+  // directly without going through our React state. Without this listener
+  // the element pauses but `is_playing` in sync state stays true, leaving
+  // the play/pause icon and UI lying to the user.
+  //
+  // Submit only when the audio state diverges from the sync state, so the
+  // *internal* play/pause we trigger from `is_playing` doesn't bounce back
+  // into a duplicate op (would still be a no-op via dedup, but cleaner).
+  // We read the latest is_playing through a ref so the listener doesn't
+  // need to re-bind on every flip.
+  const isPlayingRef = useRef(is_playing);
+  useEffect(() => {
+    isPlayingRef.current = is_playing;
+  }, [is_playing]);
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onPlay = () => {
+      if (!isPlayingRef.current) submit({ type: "set_playing", is_playing: true });
+    };
+    const onPause = () => {
+      // Ignore pauses that fire as a side-effect of `ended` — the auto-
+      // advance handler will flip is_playing if we hit the queue tail, and
+      // we don't want to race it here.
+      if (audio.ended) return;
+      if (isPlayingRef.current) submit({ type: "set_playing", is_playing: false });
+    };
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+    return () => {
+      audio.removeEventListener("play", onPlay);
+      audio.removeEventListener("pause", onPause);
+    };
+  }, [submit]);
+
+  // Media Session API: tells the OS / lock screen / headphone display
+  // what's playing, and routes media-key gestures through our state
+  // machine instead of the raw audio element. Setting an action handler
+  // also makes Chrome show the album art in the system-tray controls,
+  // which is the user-visible payoff beyond the play/pause sync above.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
+    const ms = navigator.mediaSession;
+    if (nowPlaying) {
+      const artUrl = nowPlaying.coverArt ? coverArtUrl(nowPlaying.coverArt, 512) : null;
+      ms.metadata = new MediaMetadata({
+        title: nowPlaying.title,
+        artist: nowPlaying.artist ?? "",
+        album: nowPlaying.album ?? "",
+        artwork: artUrl
+          ? [{ src: artUrl, sizes: "512x512", type: "image/jpeg" }]
+          : [],
+      });
+    } else {
+      ms.metadata = null;
+    }
+  }, [nowPlaying]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
+    navigator.mediaSession.playbackState = is_playing ? "playing" : "paused";
+  }, [is_playing]);
+
+  // Action handlers: route OS-level media controls (headphone buttons,
+  // keyboard media keys, system tray) through the same submit() pipeline
+  // as the in-app buttons. We re-bind whenever the queue boundary changes
+  // so prev/next become unavailable at the ends.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
+    const ms = navigator.mediaSession;
+    const i = now_playing_index;
+    const total = queue.items.length;
+    ms.setActionHandler("play", () => submit({ type: "set_playing", is_playing: true }));
+    ms.setActionHandler("pause", () => submit({ type: "set_playing", is_playing: false }));
+    ms.setActionHandler("nexttrack", () => {
+      if (i !== null && i + 1 < total) submit({ type: "set_now_playing", index: i + 1 });
+    });
+    ms.setActionHandler("previoustrack", () => {
+      if (i !== null && i > 0) submit({ type: "set_now_playing", index: i - 1 });
+    });
+    ms.setActionHandler("seekto", (details) => {
+      const a = audioRef.current;
+      if (!a || details.seekTime === undefined) return;
+      a.currentTime = details.seekTime;
+    });
+    return () => {
+      ms.setActionHandler("play", null);
+      ms.setActionHandler("pause", null);
+      ms.setActionHandler("nexttrack", null);
+      ms.setActionHandler("previoustrack", null);
+      ms.setActionHandler("seekto", null);
+    };
+  }, [now_playing_index, queue.items.length, submit]);
+
   // Auto-advance on end. Submitting an op rather than mutating local
   // state keeps the gateway authoritative.
   useEffect(() => {
@@ -121,6 +220,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       queueLength: queue.items.length,
       hasNext: i !== null && i + 1 < queue.items.length,
       hasPrev: i !== null && i > 0,
+      audio,
       togglePlay: () => submit({ type: "set_playing", is_playing: !is_playing }),
       next: () => {
         if (i !== null && i + 1 < queue.items.length) {
@@ -133,7 +233,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
       },
     };
-  }, [nowPlaying, is_playing, queue.items.length, now_playing_index, submit]);
+  }, [nowPlaying, is_playing, queue.items.length, now_playing_index, submit, audio]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

@@ -6,7 +6,15 @@
 
 import { refreshTokens } from "../auth/oauth";
 import { clearTokens, readTokens } from "../auth/tokens";
-import { Album, AlbumWithTracks, Track } from "./types";
+import {
+  Album,
+  AlbumWithTracks,
+  Artist,
+  ArtistWithAlbums,
+  PlaylistSummary,
+  PlaylistWithTracks,
+  Track,
+} from "./types";
 
 class AuthError extends Error {}
 
@@ -52,10 +60,54 @@ async function getSubsonic<T>(path: string, key: string): Promise<T> {
   return env[key] as T;
 }
 
-export async function listAlbums(opts: { type: string; size: number }): Promise<Album[]> {
-  const path = `/rest/getAlbumList2?type=${encodeURIComponent(opts.type)}&size=${opts.size}`;
+// Subsonic's per-request cap. The spec mandates servers SHOULD honour up to
+// 500 per call; Navidrome enforces this exactly. To get more than 500 you
+// have to paginate via offset — see listAllAlbums.
+const ALBUMLIST_PAGE_MAX = 500;
+
+export async function listAlbums(opts: {
+  type: string;
+  size: number;
+  offset?: number;
+}): Promise<Album[]> {
+  const params = new URLSearchParams({
+    type: opts.type,
+    size: String(opts.size),
+  });
+  if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+  const path = `/rest/getAlbumList2?${params.toString()}`;
   const result = await getSubsonic<{ album?: Album[] }>(path, "albumList2");
   return result.album ?? [];
+}
+
+// Fetches every album in the library by repeatedly calling getAlbumList2
+// with increasing offset. The terminating signal is a short page (fewer
+// items than the per-request cap) — Subsonic has no "total count" field,
+// so you discover the tail empirically.
+//
+// Sequential rather than parallel: page count is small at single-user
+// scale (a few thousand albums → ~10 round-trips), HTTP/2 keeps the
+// connection warm, and avoiding parallel bursts is friendlier to the
+// gateway's L2 metadata cache and its upstream.
+export async function listAllAlbums(
+  type = "alphabeticalByName"
+): Promise<Album[]> {
+  const out: Album[] = [];
+  let offset = 0;
+  // Hard ceiling to guarantee termination if the server ever misbehaves
+  // and keeps returning full pages forever.
+  const MAX_PAGES = 200;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const chunk = await listAlbums({
+      type,
+      size: ALBUMLIST_PAGE_MAX,
+      offset,
+    });
+    out.push(...chunk);
+    if (chunk.length < ALBUMLIST_PAGE_MAX) break;
+    offset += ALBUMLIST_PAGE_MAX;
+  }
+  return out;
 }
 
 export async function getAlbum(id: string): Promise<AlbumWithTracks> {
@@ -63,6 +115,153 @@ export async function getAlbum(id: string): Promise<AlbumWithTracks> {
   const raw = await getSubsonic<Album & { song?: Track[] }>(path, "album");
   const { song, ...album } = raw;
   return { album, tracks: song ?? [] };
+}
+
+// Single-track lookup. Used to hydrate recommendation results, which return
+// only track_ids — no metadata.
+export async function getSong(id: string): Promise<Track> {
+  return getSubsonic<Track>(
+    `/rest/getSong?id=${encodeURIComponent(id)}`,
+    "song"
+  );
+}
+
+// Subsonic /rest/getArtists returns a nested shape: { index: [{ artist: [...] }] }.
+// Flatten to a single Artist[] sorted by name (which the response already is).
+export async function listArtists(): Promise<Artist[]> {
+  type IndexBlock = { name: string; artist?: Artist[] };
+  type ArtistsResp = { index?: IndexBlock[] };
+  const result = await getSubsonic<ArtistsResp>("/rest/getArtists", "artists");
+  return (result.index ?? []).flatMap((b) => b.artist ?? []);
+}
+
+export async function getArtist(id: string): Promise<ArtistWithAlbums> {
+  const path = `/rest/getArtist?id=${encodeURIComponent(id)}`;
+  const raw = await getSubsonic<Artist & { album?: Album[] }>(path, "artist");
+  const { album, ...artist } = raw;
+  return { artist, albums: album ?? [] };
+}
+
+export async function listPlaylists(): Promise<PlaylistSummary[]> {
+  type Resp = { playlist?: PlaylistSummary[] };
+  const result = await getSubsonic<Resp>("/rest/getPlaylists", "playlists");
+  return result.playlist ?? [];
+}
+
+export async function getPlaylist(id: string): Promise<PlaylistWithTracks> {
+  const path = `/rest/getPlaylist?id=${encodeURIComponent(id)}`;
+  const raw = await getSubsonic<PlaylistSummary & { entry?: Track[] }>(path, "playlist");
+  const { entry, ...playlist } = raw;
+  return { playlist, tracks: entry ?? [] };
+}
+
+// Create an empty playlist. Subsonic accepts createPlaylist with `name`
+// alone and returns the new playlist envelope. Some servers (Navidrome
+// included) wrap it under "playlist" exactly like getPlaylist; others
+// drop the wrapper. The fetched response carries enough metadata for us
+// to navigate to /playlists/:id.
+export async function createPlaylist(name: string): Promise<PlaylistSummary> {
+  const path = `/rest/createPlaylist?name=${encodeURIComponent(name)}`;
+  return getSubsonic<PlaylistSummary>(path, "playlist");
+}
+
+// Add a single song to an existing playlist via Subsonic's updatePlaylist.
+// Returns nothing — the caller invalidates the relevant queries to pick
+// up the new track count.
+export async function addTrackToPlaylist(
+  playlistId: string,
+  trackId: string
+): Promise<void> {
+  const path =
+    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
+    `&songIdToAdd=${encodeURIComponent(trackId)}`;
+  // updatePlaylist returns an empty `subsonic-response` body on success;
+  // we only care that getSubsonic doesn't throw on a non-ok envelope.
+  await getSubsonic<unknown>(path, "");
+}
+
+// "Recent tracks" — Subsonic doesn't have a direct "all songs" endpoint, so
+// we use search3 with a wildcard query. Library scale is single-user, so a
+// 200-row sample is enough for the all-tracks view.
+export async function listRecentTracks(size = 200): Promise<Track[]> {
+  return listTracksPage({ size });
+}
+
+// Paginated track listing via Subsonic search3 with songOffset. Subsonic
+// has no dedicated "list all songs" endpoint; an empty-query search3 is
+// the conventional substitute. The server returns `song.length` rows
+// (Navidrome's default order — roughly insertion order); a short page
+// signals the tail (no `total` field is exposed).
+export async function listTracksPage(opts: {
+  size: number;
+  offset?: number;
+}): Promise<Track[]> {
+  const params = new URLSearchParams({
+    query: "",
+    songCount: String(opts.size),
+    albumCount: "0",
+    artistCount: "0",
+  });
+  if (opts.offset !== undefined && opts.offset > 0) {
+    params.set("songOffset", String(opts.offset));
+  }
+  const path = `/rest/search3?${params.toString()}`;
+  const result = await getSubsonic<{ song?: Track[] }>(path, "searchResult3");
+  return result.song ?? [];
+}
+
+export async function listRandomTracks(size = 100): Promise<Track[]> {
+  type Resp = { song?: Track[] };
+  const result = await getSubsonic<Resp>(
+    `/rest/getRandomSongs?size=${size}`,
+    "randomSongs"
+  );
+  return result.song ?? [];
+}
+
+// Most-played tracks — vanilla Subsonic has no global "top songs" endpoint
+// (only per-artist via getTopSongs). Navidrome's OpenSubsonic exposes
+// `playCount` on song rows, so the workaround is: pull a wide search3
+// sample and sort client-side. Library scale is single-user, so a 1000-
+// row sample is fine. Tracks with no `playCount` field are excluded —
+// "most played" of zero plays would just be the search3 default order.
+export async function listMostPlayedTracks(size = 100): Promise<Track[]> {
+  type SongWithPlay = Track & { playCount?: number };
+  type Resp = { song?: SongWithPlay[] };
+  const result = await getSubsonic<Resp>(
+    `/rest/search3?query=${encodeURIComponent("")}&songCount=1000&albumCount=0&artistCount=0`,
+    "searchResult3"
+  );
+  const songs = result.song ?? [];
+  return songs
+    .filter((s) => (s.playCount ?? 0) > 0)
+    .sort((a, b) => (b.playCount ?? 0) - (a.playCount ?? 0))
+    .slice(0, size);
+}
+
+export interface SearchResults {
+  artists: Artist[];
+  albums: Album[];
+  tracks: Track[];
+}
+
+// Library-wide search via Subsonic search3. Caller decides per-section
+// caps; the defaults match what the Search page renders without paging.
+export async function searchAll(
+  query: string,
+  opts: { artistCount?: number; albumCount?: number; songCount?: number } = {}
+): Promise<SearchResults> {
+  const { artistCount = 20, albumCount = 40, songCount = 60 } = opts;
+  const path =
+    `/rest/search3?query=${encodeURIComponent(query)}` +
+    `&artistCount=${artistCount}&albumCount=${albumCount}&songCount=${songCount}`;
+  type Resp = { artist?: Artist[]; album?: Album[]; song?: Track[] };
+  const result = await getSubsonic<Resp>(path, "searchResult3");
+  return {
+    artists: result.artist ?? [],
+    albums: result.album ?? [],
+    tracks: result.song ?? [],
+  };
 }
 
 export function streamUrl(trackId: string): string {

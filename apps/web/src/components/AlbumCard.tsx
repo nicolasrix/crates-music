@@ -1,27 +1,45 @@
+import { Play } from "lucide-react";
 import { Album } from "../api/types";
 import { coverArtUrl } from "../api/client";
-import { Link } from "../router";
+import { Link, navigate } from "../router";
 
-export function AlbumCard({ album }: { album: Album }) {
-  const cover = coverArtUrl(album.coverArt);
+export function AlbumCard({
+  album,
+  onPlay,
+}: {
+  album: Album;
+  /** Optional — if provided, the floating play overlay button calls this
+   *  instead of navigating to the album page. */
+  onPlay?: () => void;
+}) {
+  const cover = coverArtUrl(album.coverArt, 400);
+
   return (
-    <Link
-      to={`/albums/${album.id}`}
-      className="block group"
-    >
-      <div className="aspect-square bg-stone-800 rounded overflow-hidden">
+    <Link to={`/albums/${album.id}`} className="tile">
+      <div className="tile-cover">
         {cover ? (
-          <img src={cover} alt={album.name} className="w-full h-full object-cover" />
+          <img src={cover} alt={album.name} loading="lazy" />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-stone-600 text-xs">
+          <div className="w-full h-full flex items-center justify-center text-fg-faint text-xs">
             no cover
           </div>
         )}
+        <button
+          className="tile-play"
+          aria-label={`play ${album.name}`}
+          onClick={(e) => {
+            // Prevent the parent <Link> from also navigating.
+            e.preventDefault();
+            e.stopPropagation();
+            if (onPlay) onPlay();
+            else navigate(`/albums/${album.id}`);
+          }}
+        >
+          <Play size={18} fill="currentColor" strokeWidth={0} />
+        </button>
       </div>
-      <div className="mt-2 truncate font-medium group-hover:text-stone-300">
-        {album.name}
-      </div>
-      <div className="truncate text-sm text-stone-400">{album.artist ?? "—"}</div>
+      <div className="tile-title">{album.name}</div>
+      <div className="tile-sub">{album.artist ?? "—"}</div>
     </Link>
   );
 }

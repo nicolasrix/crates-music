@@ -14,25 +14,35 @@ export function Callback() {
       return;
     }
     completeLogin(code)
-      // Hard reload so AuthProvider re-reads tokens from localStorage.
       .then(() => location.assign("/"))
       .catch((e: unknown) => setError(String(e)));
   }, []);
   return (
-    <div className="min-h-screen flex items-center justify-center">
+    <div
+      className="flex items-center justify-center"
+      style={{ minHeight: "100vh", padding: "var(--space-5)" }}
+    >
       {error ? (
-        <div className="max-w-md text-center">
-          <h1 className="text-xl font-semibold mb-2">sign-in failed</h1>
-          <p className="text-stone-400">{error}</p>
+        <div className="text-center" style={{ maxWidth: 480 }}>
+          <h1 className="text-xl font-medium mb-2">sign-in failed</h1>
+          <p className="text-fg-muted text-sm">{error}</p>
           <button
             onClick={() => location.assign("/")}
-            className="mt-4 px-3 py-1 rounded bg-stone-800 hover:bg-stone-700"
+            style={{
+              marginTop: "var(--space-4)",
+              padding: "8px 14px",
+              borderRadius: "var(--radius-2)",
+              background: "var(--surface-2)",
+              color: "var(--fg)",
+              border: 0,
+              cursor: "pointer",
+            }}
           >
             back
           </button>
         </div>
       ) : (
-        <p className="text-stone-400">finishing sign-in…</p>
+        <p className="text-fg-muted text-sm">finishing sign-in…</p>
       )}
     </div>
   );

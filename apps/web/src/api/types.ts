@@ -18,6 +18,7 @@ export interface Track {
   album?: string;
   albumId?: string;
   artist?: string;
+  artistId?: string;
   duration?: number;
   track?: number;
   coverArt?: string;
@@ -25,5 +26,32 @@ export interface Track {
 
 export interface AlbumWithTracks {
   album: Album;
+  tracks: Track[];
+}
+
+export interface Artist {
+  id: string;
+  name: string;
+  albumCount?: number;
+  coverArt?: string;
+  artistImageUrl?: string;
+}
+
+export interface ArtistWithAlbums {
+  artist: Artist;
+  albums: Album[];
+  biography?: string;
+}
+
+export interface PlaylistSummary {
+  id: string;
+  name: string;
+  songCount?: number;
+  duration?: number;
+  coverArt?: string;
+}
+
+export interface PlaylistWithTracks {
+  playlist: PlaylistSummary;
   tracks: Track[];
 }
