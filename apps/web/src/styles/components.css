@@ -425,6 +425,21 @@ body {
 .tracks .col-title { color: var(--fg); }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
+/* When the artist or album cell wraps a navigation link, mirror the
+   hero card's affordance: inherit the muted cell color at rest,
+   underline + brighten on hover. Tailwind's preflight already strips
+   the default anchor underline, so we only need to add it for the
+   hover state. */
+.tracks .col-artist a,
+.tracks .col-album a {
+  color: inherit;
+  text-decoration: none;
+}
+.tracks .col-artist a:hover,
+.tracks .col-album a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
 .tracks .col-time {
   width: 64px;
   text-align: right;
@@ -1046,67 +1061,48 @@ body {
     grid-template-columns: 1fr;
   }
 }
-/* Inside a two-column wrapper, each column is roughly half-width.
-   That's not always enough room for three 240px tiles + gaps, so we
-   relax the column cap. The tiles still stay larger than tile-grid
-   tiles thanks to the `.hero-strip .tile` typography overrides
-   below. */
-.search-grid .hero-strip {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* Search "top results" strip — three featured items per section, sized
-   bigger than the regular tile grid below. Columns are capped so the
-   featured tiles don't blow up to half the viewport on wide screens
-   (a 1fr column at our typical main-column width yields ~560px tiles,
-   which is way too dominant). 240px ≈ 1.5× the regular tile width. */
+/* Search "top results" strip — three featured items per section. All
+   three buckets (artists / albums / tracks) use the .search-hero card
+   shape (horizontal: cover + meta column), so a uniform 3×1fr grid
+   works for both the full-width tracks strip and the half-width
+   artists/albums strips inside .search-grid. */
 .hero-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 240px));
-  gap: var(--space-5);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
   margin-bottom: var(--space-5);
 }
-.hero-strip.is-rows {
-  /* Track hero cards are horizontal rows (cover + meta side by side),
-     so they want wider cells than tile-style heroes. Stretch to 1fr
-     and cap the strip itself, not each cell. */
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  max-width: 1080px;
-}
 @media (max-width: 768px) {
-  .hero-strip,
-  .hero-strip.is-rows {
+  .hero-strip {
     grid-template-columns: 1fr;
   }
 }
-/* When the hero strip wraps album/artist tiles, bump their typography
-   to differentiate from the dense tile-grid below. */
-.hero-strip .tile .tile-title {
-  font-size: var(--text-base);
-}
-.hero-strip .tile .tile-sub {
-  font-size: var(--text-sm);
-}
 
-/* Featured track card. Cover on the left, metadata on the right. The
-   cover doubles as a play button (the search page's mental model is
-   "click the top result to play it"). */
-.track-hero {
+/* Featured search-result card. Cover on the left, metadata on the
+   right. Used by ArtistHeroCard, AlbumHeroCard, and TrackHeroCard.
+   Each variant differs only in:
+     - cover shape (artists use .is-circle)
+     - whether the cover is a button (tracks: yes, plays the track)
+       or a plain div inside a Link wrapper (artists/albums: whole
+       card navigates). */
+.search-hero {
   display: flex;
-  gap: var(--space-4);
+  gap: var(--space-3);
   align-items: center;
   padding: var(--space-3);
   background: var(--surface-2);
   border-radius: var(--radius-3);
   transition: background var(--dur-2) var(--ease-out-soft);
   min-width: 0;
+  text-decoration: none;
+  color: inherit;
 }
-.track-hero:hover {
+.search-hero:hover {
   background: var(--surface-3);
 }
-.track-hero-cover {
-  width: 88px;
-  height: 88px;
+.search-hero-cover {
+  width: 72px;
+  height: 72px;
   flex-shrink: 0;
   border-radius: var(--radius-2);
   overflow: hidden;
@@ -1114,21 +1110,26 @@ body {
   border: none;
   padding: 0;
   background: var(--surface-3);
-  cursor: pointer;
   color: var(--fg);
 }
-.track-hero-cover.is-placeholder {
+button.search-hero-cover {
+  cursor: pointer;
+}
+.search-hero-cover.is-circle {
+  border-radius: var(--radius-full);
+}
+.search-hero-cover.is-placeholder {
   background: radial-gradient(circle at 30% 30%,
     color-mix(in oklab, var(--accent) 30%, var(--surface-3)) 0%,
     var(--surface-3) 60%);
 }
-.track-hero-cover img {
+.search-hero-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-.track-hero-play {
+.search-hero-play {
   position: absolute;
   inset: 0;
   display: flex;
@@ -1139,17 +1140,17 @@ body {
   opacity: 0;
   transition: opacity var(--dur-2) var(--ease-out-soft);
 }
-.track-hero-cover:hover .track-hero-play,
-.track-hero-cover:focus-visible .track-hero-play {
+.search-hero:hover .search-hero-play,
+.search-hero-cover:focus-visible .search-hero-play {
   opacity: 1;
 }
-.track-hero-meta {
+.search-hero-meta {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
-.track-hero-title {
+.search-hero-title {
   font-size: var(--text-base);
   font-weight: var(--weight-medium);
   color: var(--fg);
@@ -1157,26 +1158,34 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.track-hero-sub {
+/* When the title is itself a link (album hero), strip the default
+   anchor underline; rely on hover for affordance. */
+a.search-hero-title {
+  text-decoration: none;
+}
+a.search-hero-title:hover {
+  text-decoration: underline;
+}
+.search-hero-sub {
   font-size: var(--text-sm);
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.track-hero-sub a {
+.search-hero-sub a {
   color: inherit;
   text-decoration: none;
 }
-.track-hero-sub a:hover {
+.search-hero-sub a:hover {
   color: var(--fg);
   text-decoration: underline;
 }
-.track-hero-sep {
+.search-hero-sep {
   margin: 0 6px;
   color: var(--fg-faint);
 }
-.track-hero-time {
+.search-hero-time {
   font-size: var(--text-xs);
   color: var(--fg-faint);
   margin-top: 2px;

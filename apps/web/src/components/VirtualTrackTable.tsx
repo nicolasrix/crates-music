@@ -162,7 +162,13 @@ export function VirtualTrackTable({ tracks, showAlbum = false, onPlay }: Props) 
                 >
                   {t.title}
                 </td>
-                <td className="col-artist">{t.artist ?? "—"}</td>
+                <td className="col-artist">
+                  {t.artistId && t.artist ? (
+                    <Link to={`/artists/${t.artistId}`}>{t.artist}</Link>
+                  ) : (
+                    (t.artist ?? "—")
+                  )}
+                </td>
                 {showAlbum && (
                   <td className="col-album">
                     {t.albumId && t.album ? (

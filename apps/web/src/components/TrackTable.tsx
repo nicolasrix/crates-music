@@ -68,13 +68,19 @@ export function TrackTable({ tracks, showAlbum = false, onPlay }: Props) {
               <td className="col-title is-clickable" onClick={() => onPlay(i)}>
                 {t.title}
               </td>
-              <td className="col-artist">{t.artist ?? "—"}</td>
+              <td className="col-artist">
+                {t.artistId && t.artist ? (
+                  <Link to={`/artists/${t.artistId}`}>{t.artist}</Link>
+                ) : (
+                  (t.artist ?? "—")
+                )}
+              </td>
               {showAlbum && (
                 <td className="col-album">
                   {t.albumId && t.album ? (
                     <Link to={`/albums/${t.albumId}`}>{t.album}</Link>
                   ) : (
-                    t.album ?? "—"
+                    (t.album ?? "—")
                   )}
                 </td>
               )}

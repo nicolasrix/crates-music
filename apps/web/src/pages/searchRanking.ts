@@ -109,9 +109,27 @@ export interface RawResults {
   tracks: Track[];
 }
 
-export function rankResults(raw: RawResults, query: string): RankedResults {
+// Optional canonical artist registry (typically the cached
+// /rest/getArtists list). When provided, both search3 artists and
+// derived artists are hydrated from it — this is how we recover
+// `albumCount` (and any other fields) for artists that came in via
+// the derivation pass and would otherwise be metadata-bare.
+export interface RankOptions {
+  knownArtists?: readonly Artist[];
+}
+
+export function rankResults(
+  raw: RawResults,
+  query: string,
+  opts: RankOptions = {}
+): RankedResults {
   const q = normalize(query);
   const tokens = tokenize(query);
+
+  const knownById = new Map<string, Artist>();
+  if (opts.knownArtists) {
+    for (const a of opts.knownArtists) knownById.set(a.id, a);
+  }
 
   // Pass 1 — count artist appearances across track + album results, and
   // remember a coverArt fallback for artists who weren't returned by
@@ -141,16 +159,26 @@ export function rankResults(raw: RawResults, query: string): RankedResults {
   for (const t of raw.tracks) bump(t.artistId, t.artist, t.coverArt);
   for (const a of raw.albums) bump(a.artistId, a.artist, a.coverArt);
 
-  // Pass 2 — merge raw artists with derived. Raw wins on coverArt and
-  // metadata (it's the canonical /rest/getArtists shape with albumCount
-  // etc), but derived contributes hit counts to the score.
+  // Pass 2 — merge raw artists with derived, hydrating from
+  // knownArtists where available. The hydration matters for derived
+  // artists especially: search3's artist bucket returns full records
+  // (with albumCount), but derived ones have only id + name + a
+  // borrowed coverArt unless we look them up against the canonical
+  // /rest/getArtists list.
   const artistById = new Map<string, Artist>();
-  for (const a of raw.artists) artistById.set(a.id, a);
+  for (const a of raw.artists) {
+    const known = knownById.get(a.id);
+    // {...known, ...a} keeps fields a doesn't define (e.g. albumCount
+    // when search3 omits it for some reason) while letting search3's
+    // record override anything it does define.
+    artistById.set(a.id, known ? { ...known, ...a } : a);
+  }
   for (const [id, d] of derived) {
     if (!artistById.has(id)) {
-      const a: Artist = { id, name: d.name };
-      if (d.coverArt) a.coverArt = d.coverArt;
-      artistById.set(id, a);
+      const known = knownById.get(id);
+      const base: Artist = known ? { ...known } : { id, name: d.name };
+      if (!base.coverArt && d.coverArt) base.coverArt = d.coverArt;
+      artistById.set(id, base);
     }
   }
 

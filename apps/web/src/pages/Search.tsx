@@ -11,9 +11,11 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { searchAll } from "../api/client";
-import { AlbumCard } from "../components/AlbumCard";
-import { ArtistCard } from "../components/ArtistCard";
+import { listArtists, searchAll } from "../api/client";
+import { AlbumHeroCard } from "../components/AlbumHeroCard";
+import { AlbumTable } from "../components/AlbumTable";
+import { ArtistHeroCard } from "../components/ArtistHeroCard";
+import { ArtistTable } from "../components/ArtistTable";
 import { Layout } from "../components/Layout";
 import { TrackHeroCard } from "../components/TrackHeroCard";
 import { TrackTable } from "../components/TrackTable";
@@ -23,11 +25,11 @@ import { playSingle } from "../sync/playbackHelpers";
 import { rankResults } from "./searchRanking";
 
 const TOP_RESULTS = 3;
-// In the compact overview, tracks get a small table after the hero
-// strip. Tile-style buckets (artists/albums) show only the hero —
-// adding more tiles below would push the next section off-screen,
-// defeating the "all three sections visible at once" goal.
-const TRACKS_REST_LIMIT = 5;
+// Each section shows a small table of next-best results after the
+// hero strip. Five rows is the sweet spot: tall enough to be useful,
+// short enough that all three sections still fit on a typical
+// viewport (the goal is "everything visible at once").
+const REST_LIMIT = 5;
 
 export function Search() {
   const { search } = useRoute();
@@ -45,13 +47,30 @@ export function Search() {
     refetchOnWindowFocus: false,
   });
 
+  // Canonical artist registry — used by rankResults to hydrate derived
+  // artists with albumCount and other fields search3's track/album
+  // results don't carry. Shared cache key with Artists/Home, so this
+  // is a no-op fetch when the user has already visited those pages.
+  const knownArtistsQ = useQuery({
+    queryKey: ["artists"],
+    queryFn: listArtists,
+    staleTime: 5 * 60_000,
+  });
+
   // Re-rank + derive every time the underlying data or the query changes.
   // Cheap (O(n) over a few hundred items at most), deterministic, and
   // keeping it out of useQuery keeps the cache key honest — the same
   // raw search3 response is reused across re-renders.
   const ranked = useMemo(
-    () => (q.data ? rankResults(q.data, query) : null),
-    [q.data, query]
+    () =>
+      q.data
+        ? rankResults(
+            q.data,
+            query,
+            knownArtistsQ.data ? { knownArtists: knownArtistsQ.data } : {}
+          )
+        : null,
+    [q.data, query, knownArtistsQ.data]
   );
 
   if (query.length === 0) {
@@ -98,20 +117,20 @@ export function Search() {
           <SectionWithTop
             heading="artists"
             items={ranked.artists}
-            restLimit={0}
+            restLimit={REST_LIMIT}
             seeAllHref={`/search/artists${qParam}`}
-            renderHero={(a) => <ArtistCard key={a.id} artist={a} />}
-            renderRest={() => null}
+            renderHero={(a) => <ArtistHeroCard key={a.id} artist={a} />}
+            renderRest={(rest) => <ArtistTable artists={rest} />}
           />
         );
         const albumsSection = ranked.albums.length > 0 && (
           <SectionWithTop
             heading="albums"
             items={ranked.albums}
-            restLimit={0}
+            restLimit={REST_LIMIT}
             seeAllHref={`/search/albums${qParam}`}
-            renderHero={(a) => <AlbumCard key={a.id} album={a} />}
-            renderRest={() => null}
+            renderHero={(a) => <AlbumHeroCard key={a.id} album={a} />}
+            renderRest={(rest) => <AlbumTable albums={rest} />}
           />
         );
         // Two-column wrap only when both buckets have content. Otherwise
@@ -137,8 +156,7 @@ export function Search() {
         <SectionWithTop
           heading="tracks"
           items={ranked.tracks}
-          heroVariant="rows"
-          restLimit={TRACKS_REST_LIMIT}
+          restLimit={REST_LIMIT}
           seeAllHref={`/search/tracks${qParam}`}
           renderHero={(t) => (
             <TrackHeroCard
@@ -181,7 +199,6 @@ function SectionWithTop<T>({
   items,
   renderHero,
   renderRest,
-  heroVariant = "tiles",
   restLimit,
   seeAllHref,
 }: {
@@ -189,10 +206,6 @@ function SectionWithTop<T>({
   items: readonly T[];
   renderHero: (item: T) => React.ReactNode;
   renderRest: (items: readonly T[]) => React.ReactNode;
-  /** "tiles" — vertical cards (artists/albums); columns capped at
-   *  ~240px so covers don't dominate. "rows" — horizontal cards
-   *  (tracks); cells stretch within a capped strip width. */
-  heroVariant?: "tiles" | "rows";
   /** How many items to render after the hero strip. 0 = none. Items
    *  beyond TOP_RESULTS + restLimit are reachable via seeAllHref. */
   restLimit: number;
@@ -204,8 +217,6 @@ function SectionWithTop<T>({
   const rest = items.slice(TOP_RESULTS, TOP_RESULTS + restLimit);
   const visibleCount = top.length + rest.length;
   const hasMore = items.length > visibleCount;
-  const stripClass =
-    heroVariant === "rows" ? "hero-strip is-rows" : "hero-strip";
   return (
     <div className="section">
       <div className="section-head">
@@ -218,7 +229,7 @@ function SectionWithTop<T>({
           <span className="count tabular">{items.length}</span>
         )}
       </div>
-      <div className={stripClass}>{top.map((item) => renderHero(item))}</div>
+      <div className="hero-strip">{top.map((item) => renderHero(item))}</div>
       {rest.length > 0 && renderRest(rest)}
     </div>
   );

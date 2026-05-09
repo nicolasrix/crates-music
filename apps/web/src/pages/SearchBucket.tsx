@@ -11,9 +11,9 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { searchAll } from "../api/client";
-import { AlbumCard } from "../components/AlbumCard";
-import { ArtistCard } from "../components/ArtistCard";
+import { listArtists, searchAll } from "../api/client";
+import { AlbumTable } from "../components/AlbumTable";
+import { ArtistTable } from "../components/ArtistTable";
 import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import { useRoute } from "../router";
@@ -51,9 +51,26 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
     refetchOnWindowFocus: false,
   });
 
+  // Same canonical-artist registry as the overview. Without this,
+  // derived artists (those synthesized from track/album hits) show
+  // "—" for albumCount because search3 only returns it on the
+  // artist bucket — and our derived ones aren't in that bucket.
+  const knownArtistsQ = useQuery({
+    queryKey: ["artists"],
+    queryFn: listArtists,
+    staleTime: 5 * 60_000,
+  });
+
   const ranked = useMemo(
-    () => (q.data ? rankResults(q.data, query) : null),
-    [q.data, query]
+    () =>
+      q.data
+        ? rankResults(
+            q.data,
+            query,
+            knownArtistsQ.data ? { knownArtists: knownArtistsQ.data } : {}
+          )
+        : null,
+    [q.data, query, knownArtistsQ.data]
   );
 
   if (query.length === 0) {
@@ -98,21 +115,13 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
 
       {bucket === "artists" && items.length > 0 && (
         <div className="section">
-          <div className="tile-grid">
-            {ranked!.artists.map((a) => (
-              <ArtistCard key={a.id} artist={a} />
-            ))}
-          </div>
+          <ArtistTable artists={ranked!.artists} />
         </div>
       )}
 
       {bucket === "albums" && items.length > 0 && (
         <div className="section">
-          <div className="tile-grid">
-            {ranked!.albums.map((a) => (
-              <AlbumCard key={a.id} album={a} />
-            ))}
-          </div>
+          <AlbumTable albums={ranked!.albums} />
         </div>
       )}
 
