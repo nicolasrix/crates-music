@@ -16,11 +16,9 @@ use music_recommend::embedder::{EmbedderClient, EmbedderConfig};
 use music_recommend::ingest::{
     AudioFetcher, FetchError, IngestOutcome, IngestWorker, IngestWorkerConfig,
 };
-use music_recommend::store::{EmbeddingStore, MIGRATIONS};
+use music_recommend::store::EmbeddingStore;
 use music_recommend::types::{IngestStatus, ModelVersion};
 use serde_json::json;
-use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -28,18 +26,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const DIM: usize = 8;
 
 async fn fresh_store() -> (EmbeddingStore, TempDir) {
+    // Use the production `open` so the test inherits WAL + busy_timeout
+    // settings — concurrent worker tests would otherwise pass on a
+    // permissive in-test config and fail in production.
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("rec.sqlite");
-    let opts = SqliteConnectOptions::new()
-        .filename(&db)
-        .create_if_missing(true);
-    let pool: SqlitePool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(opts)
-        .await
-        .expect("connect");
-    MIGRATIONS.run(&pool).await.expect("migrate");
-    (EmbeddingStore::new(pool), dir)
+    let store = EmbeddingStore::open(&db).await.expect("open store");
+    (store, dir)
 }
 
 struct MockFetcher {
@@ -330,6 +323,71 @@ async fn drains_until_idle() {
     let counts = store.counts(&ModelVersion::from("stub-v1")).await.unwrap();
     assert_eq!(counts.done, 5);
     assert_eq!(counts.not_started, 0);
+}
+
+#[tokio::test]
+async fn concurrent_drainers_split_queue_without_double_processing() {
+    // Phase-2 concurrency contract: spawn N tasks each calling
+    // `worker.drain()` on a shared Arc. SQLite's UPDATE ... RETURNING
+    // in claim_next must keep two tasks from claiming the same row.
+    // Total embedded must equal the enqueued count exactly — neither
+    // less (lost row) nor more (double-processed row).
+    const ENQUEUED: usize = 16;
+    const WORKERS: usize = 4;
+
+    let (store, _dir) = fresh_store().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vector_response(DIM)))
+        .mount(&server)
+        .await;
+
+    for i in 0..ENQUEUED {
+        store
+            .enqueue(&music_recommend::EmbeddingKey::new(
+                TrackId::from(format!("t{i:02}")),
+                ModelVersion::from("stub-v1"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let ann = Arc::new(AnnIndex::open_in_memory(DIM, 16).unwrap());
+    let fetcher = Arc::new(MockFetcher::new());
+    let embedder = build_embedder_for(&server);
+    let worker = Arc::new(IngestWorker::new(IngestWorkerConfig {
+        store: store.clone(),
+        ann: ann.clone(),
+        embedder,
+        fetcher,
+        model_version: ModelVersion::from("stub-v1"),
+    }));
+
+    let mut handles = Vec::with_capacity(WORKERS);
+    for _ in 0..WORKERS {
+        let w = Arc::clone(&worker);
+        handles.push(tokio::spawn(async move { w.drain().await }));
+    }
+
+    let mut total_embedded = 0u64;
+    let mut total_failed = 0u64;
+    for h in handles {
+        let stats = h.await.expect("task join").expect("drain ok");
+        total_embedded += stats.embedded;
+        total_failed += stats.failed;
+    }
+
+    assert_eq!(total_embedded, ENQUEUED as u64, "every row processed once");
+    assert_eq!(total_failed, 0);
+
+    let counts = store.counts(&ModelVersion::from("stub-v1")).await.unwrap();
+    assert_eq!(counts.done, ENQUEUED as u64);
+    assert_eq!(counts.not_started, 0);
+    assert_eq!(counts.in_progress, 0);
+
+    // ANN length matches: no duplicate upserts and no missing tracks.
+    assert_eq!(ann.len().unwrap(), ENQUEUED);
 }
 
 #[tokio::test]

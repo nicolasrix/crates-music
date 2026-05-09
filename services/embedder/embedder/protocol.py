@@ -25,6 +25,17 @@ class Embedder(Protocol):
         """Whether the underlying weights are loaded and ready to serve."""
         ...
 
+    @property
+    def device(self) -> str:
+        """Compute device the model is running on: "cpu" or "cuda".
+
+        On ROCm-built PyTorch, HIP devices identify as "cuda" — so this
+        being "cuda" with an AMD card means GPU acceleration is engaged.
+        Surfaced via /healthz so the gateway boot probe (and humans) can
+        detect silent CPU fallback after a ROCm install.
+        """
+        ...
+
     def embed_audio(self, raw_bytes: bytes) -> np.ndarray:
         """Return a 1-D float32 ndarray of shape (EMBEDDING_DIM,)."""
         ...

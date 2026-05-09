@@ -60,6 +60,16 @@ pub fn parse_album_list2(body: &str) -> Result<Vec<Album>> {
     Ok(wire.into_iter().map(Into::into).collect())
 }
 
+pub fn parse_get_song(body: &str) -> Result<Track> {
+    let inner = unwrap_envelope(body)?;
+    let song_val = inner
+        .get("song")
+        .cloned()
+        .ok_or_else(|| Error::BadResponse("missing 'song' field".into()))?;
+    let wire: WireTrack = serde_json::from_value(song_val)?;
+    Ok(wire.into())
+}
+
 pub fn parse_get_album(body: &str) -> Result<AlbumWithSongs> {
     let inner = unwrap_envelope(body)?;
     let mut album_val = inner

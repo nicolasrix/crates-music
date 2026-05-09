@@ -111,12 +111,12 @@ async fn main() -> Result<()> {
         SubsonicAudioFetcher::new(&config.upstream)
             .context("building Subsonic ingest fetcher")?,
     );
-    let _ingest_handle = spawn_ingest_worker(
+    let _ingest_handles = spawn_ingest_worker(
         recommend.embedding_store.clone(),
         recommend.ann.clone(),
         embedder.client().cloned(),
         fetcher,
-        recommend.model_version.clone(),
+        &recommend.model_version,
     );
 
     let state = AppState::new(

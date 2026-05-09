@@ -58,6 +58,11 @@ pub struct EmbedderHealth {
     pub model_loaded: bool,
     pub model_version: ModelVersion,
     pub dim: usize,
+    /// Compute device the sidecar is running on, e.g. "cpu" or "cuda".
+    /// `None` when the sidecar pre-dates the device field — gateway
+    /// surfaces this as "device=unknown" in its boot log rather than
+    /// failing the probe.
+    pub device: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +93,7 @@ impl EmbedderClient {
                 model_loaded: body.model_loaded,
                 model_version: ModelVersion::from(body.model_version),
                 dim: body.dim,
+                device: body.device,
             });
         }
         Err(server_error(resp).await)
@@ -152,6 +158,10 @@ struct HealthBody {
     model_loaded: bool,
     model_version: String,
     dim: usize,
+    /// Optional: older sidecars don't emit this. `serde(default)` parses
+    /// the missing-field case as `None` instead of failing.
+    #[serde(default)]
+    device: Option<String>,
 }
 
 #[derive(Deserialize)]

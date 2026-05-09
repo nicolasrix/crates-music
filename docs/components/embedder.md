@@ -23,9 +23,16 @@ Returns 200 if the model is loaded, 503 otherwise.
   "status": "ok",
   "model_loaded": true,
   "model_version": "clap-music_audioset_epoch_15_esc_90.14",
-  "dim": 512
+  "dim": 512,
+  "device": "cuda"
 }
 ```
+
+The `device` field reports the compute device the sidecar is running
+on. On ROCm-built PyTorch, HIP devices identify as `"cuda"` — so
+`"cuda"` with an AMD card means GPU acceleration is engaged. Older
+sidecars that pre-date this field still parse on the gateway side
+(they're surfaced as `device=unknown` in the boot log).
 
 The Rust client treats both 200 and 503 as "embedder is reachable" —
 it differentiates `ModelNotLoaded` separately so the gateway can log
@@ -90,6 +97,11 @@ checkpoint from `CLAP_CHECKPOINT` at construction time. Device
 selection is delegated to `laion_clap.CLAP_Module`, which picks up
 `CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` from the environment.
 
+The music checkpoints (e.g. `music_audioset_epoch_15_esc_90.14.pt`)
+require `amodel="HTSAT-base"` rather than the default tiny variant —
+hardcoded in `clap_backend.py` because the dimensions don't match
+otherwise.
+
 For audio: `soundfile` + `librosa.resample` decode and resample to
 48 kHz mono (CLAP's expected sample rate), then the audio encoder
 produces a 512-dim embedding.
@@ -97,8 +109,61 @@ produces a 512-dim embedding.
 For text: the CLAP text encoder produces a 512-dim embedding in the
 same space.
 
-GPU is strongly recommended. Single-track inference on CPU is ~10 s;
-on a recent AMD card, ~50 ms.
+## GPU acceleration (AMD ROCm)
+
+The default PyPI torch wheel is CUDA-only. To use an AMD card, install
+the system ROCm SDK and route torch through PyTorch's ROCm wheel
+index. Verified working on the AMD RDNA4 (gfx1201) with ROCm 7.2.2
++ torch 2.9.1+rocm6.4.
+
+**1. Install ROCm userspace** (Arch / CachyOS):
+
+```bash
+sudo pacman -S rocm-hip-sdk    # or rocm-hip-runtime + rocm-hip-libraries
+/opt/rocm/bin/rocminfo | grep -E "gfx|Marketing"
+```
+
+The card should be listed natively (e.g. `gfx1201`). If it's only
+listed under a generic name, set `HSA_OVERRIDE_GFX_VERSION=11.0.0` to
+fall back to RDNA3 emulation — works on RDNA4 cards before native
+support lands in older ROCm versions.
+
+**2. Pin ROCm torch wheels.** `services/embedder/pyproject.toml`
+already routes `torch`, `torchaudio`, `torchvision`, and
+`pytorch-triton-rocm` through `https://download.pytorch.org/whl/rocm6.4`
+on Linux. The marker keeps non-Linux installs on default PyPI.
+
+```bash
+cd services/embedder && uv sync --extra clap
+```
+
+This swaps in `torch==2.9.1+rocm6.4` and removes the ~6 GB of
+unused `nvidia-*` libraries the default wheels ship with.
+
+**3. Verify.** Start the embedder and check `/healthz`:
+
+```bash
+EMBEDDER_BACKEND=clap CLAP_CHECKPOINT=/path/to/model.pt \
+  HIP_VISIBLE_DEVICES=0 \
+  uv run uvicorn embedder.app:app --port 9000
+curl -s localhost:9000/healthz | jq .device   # → "cuda"
+```
+
+The gateway boot log echoes the same field — look for
+`embedder: ready ... device="cuda"` — so silent CPU fallback (e.g.
+after a torch upgrade clobbers the source override) is visible
+without re-benchmarking.
+
+**Measured throughput** (RDNA4, 5 random tracks via Subsonic
+range-fetch + transcode):
+
+| Config | Drain time (5 tracks) | Per-track end-to-end |
+|---|---|---|
+| CPU torch | ~31 s | ~6 s |
+| ROCm torch on RDNA4 | ~5.3 s | ~1 s |
+
+End-to-end times are network/transcode-bound on GPU. Pure CLAP
+inference on the GPU is well under 100 ms/track; the bottleneck moved.
 
 ## Layout
 

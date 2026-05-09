@@ -133,13 +133,23 @@ Cache directory follows the same XDG layout under
 |---|---|---|
 | `EMBEDDER_BACKEND` | `stub` | `stub` for deterministic hash vectors (no GPU); `clap` for the real LAION CLAP backend. Any other value → service refuses to start. |
 | `CLAP_CHECKPOINT` | — | Required when `EMBEDDER_BACKEND=clap`. Path to a `.pt` checkpoint file. |
+| `HIP_VISIBLE_DEVICES` | — | AMD ROCm: pin to a specific GPU index (e.g. `0`). Recommended on hosts with both a discrete and integrated GPU — without pinning, torch may pick the iGPU. |
+| `CUDA_VISIBLE_DEVICES` | — | NVIDIA equivalent of `HIP_VISIBLE_DEVICES`. |
+| `HSA_OVERRIDE_GFX_VERSION` | — | AMD ROCm fallback: e.g. `11.0.0` to make a newer card identify as RDNA3. Only needed when the installed ROCm version pre-dates native support for the card. |
 
 The embedding dimension is fixed at 512 (constant `EMBEDDING_DIM` in
 `embedder/app.py`); both the CLAP audio + text encoders and the stub
-backend produce 512-dim vectors. Device selection (CPU vs GPU) for
-the CLAP backend is whatever `laion_clap.CLAP_Module` picks up — set
-`CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` if you want to pin to
-a specific device.
+backend produce 512-dim vectors.
+
+Device selection for the CLAP backend is whatever
+`laion_clap.CLAP_Module` picks up at load time. The current device is
+reported on `/healthz` as `device: "cpu" | "cuda"`; the gateway boot
+log echoes it as `embedder: ready ... device="cuda"`. ROCm-built
+torch reports HIP devices as `"cuda"`, so `device="cuda"` with an AMD
+card means GPU is engaged.
+
+For ROCm install + torch wheel pinning, see
+[`docs/components/embedder.md`](./components/embedder.md#gpu-acceleration-amd-rocm).
 
 ### Web
 

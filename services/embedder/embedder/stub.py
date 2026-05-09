@@ -33,6 +33,10 @@ class StubEmbedder:
     def loaded(self) -> bool:
         return self._loaded
 
+    @property
+    def device(self) -> str:
+        return "cpu"
+
     def embed_audio(self, raw_bytes: bytes) -> np.ndarray:
         return self._hash_to_vector(b"audio:" + raw_bytes)
 

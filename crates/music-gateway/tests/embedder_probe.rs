@@ -141,6 +141,7 @@ async fn ready_flips_from_not_loaded_to_loaded_after_record() {
         model_loaded: true,
         model_version: ModelVersion::from("stub-v1"),
         dim: 512,
+        device: Some("cpu".to_string()),
     });
     assert!(h.ready(), "ready flips to true once health is recorded");
 }

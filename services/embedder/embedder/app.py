@@ -12,6 +12,7 @@ backend selected from the `EMBEDDER_BACKEND` env var.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Annotated
 
@@ -31,6 +32,7 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     model_version: str
     dim: int
+    device: str
 
 
 class EmbedTextRequest(BaseModel):
@@ -92,16 +94,23 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
             model_loaded=loaded,
             model_version=emb.model_version,
             dim=EMBEDDING_DIM,
+            device=emb.device,
         )
 
     @app.post("/embed/audio", response_model=EmbedResponse)
     async def embed_audio(req: Request, emb: EmbedderDep) -> EmbedResponse:
+        # Inference runs in the default threadpool so concurrent calls
+        # don't block the event loop. The actual GPU forward pass still
+        # serializes on the device (only one CUDA/HIP stream by
+        # default), but decode + resample on the CPU side can overlap
+        # across requests, which is what 8 concurrent ingest workers
+        # need.
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
         body = await req.body()
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="empty body")
-        vector = emb.embed_audio(body)
+        vector = await asyncio.to_thread(emb.embed_audio, body)
         return EmbedResponse(
             vector=[float(x) for x in vector.tolist()],
             dim=EMBEDDING_DIM,
@@ -109,10 +118,10 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         )
 
     @app.post("/embed/text", response_model=EmbedResponse)
-    def embed_text(payload: EmbedTextRequest, emb: EmbedderDep) -> EmbedResponse:
+    async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep) -> EmbedResponse:
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
-        vector = emb.embed_text(payload.text)
+        vector = await asyncio.to_thread(emb.embed_text, payload.text)
         return EmbedResponse(
             vector=[float(x) for x in vector.tolist()],
             dim=EMBEDDING_DIM,

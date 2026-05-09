@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use music_core::TrackId;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::time::Duration;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use crate::types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
@@ -38,11 +40,18 @@ impl EmbeddingStore {
     /// makes "many crates contributing migrations" fragile. One file
     /// per crate keeps each migration directory self-contained.
     pub async fn open(path: &Path) -> Result<Self> {
+        // WAL + busy_timeout is required for concurrent ingest workers.
+        // Default journal_mode (`delete`) serializes writers and errors
+        // out on lock contention; WAL allows one writer alongside many
+        // readers, and the timeout makes brief contentions wait
+        // instead of failing.
         let opts = SqliteConnectOptions::new()
             .filename(path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(8)
             .connect_with(opts)
             .await?;
         MIGRATIONS.run(&pool).await?;
@@ -94,37 +103,38 @@ impl EmbeddingStore {
     /// claimed key, or `None` if the queue is empty.
     ///
     /// Implementation note: SQLite doesn't support `RETURNING` reliably
-    /// on UPDATE in all versions, so we run this as a transaction:
-    /// SELECT-for-update equivalent (BEGIN IMMEDIATE), UPDATE, COMMIT.
+    /// Single atomic statement; safe for many concurrent workers.
+    ///
+    /// The previous shape used a transaction with separate SELECT and
+    /// UPDATE. With `pool.begin()` (BEGIN DEFERRED), two workers each
+    /// acquire a read lock during SELECT, then deadlock when both try
+    /// to upgrade to write — SQLite returns SQLITE_BUSY immediately
+    /// regardless of busy_timeout, because timeouts only cover waiting
+    /// on a *held* lock, not lock-upgrade contention. UPDATE…RETURNING
+    /// (SQLite ≥ 3.35) sidesteps that by acquiring the write lock up
+    /// front and selecting the row in the same statement.
     pub async fn claim_next(&self, model_version: &ModelVersion) -> Result<Option<EmbeddingKey>> {
-        let mut tx = self.pool.begin().await?;
+        let now = now_ms();
         let row = sqlx::query(
-            "SELECT track_id FROM track_embeddings
-             WHERE model_version = ? AND status = 'not_started'
-             ORDER BY created_at ASC
-             LIMIT 1",
+            "UPDATE track_embeddings
+                SET status = 'in_progress', updated_at = ?
+              WHERE rowid = (
+                  SELECT rowid FROM track_embeddings
+                   WHERE model_version = ? AND status = 'not_started'
+                   ORDER BY created_at ASC
+                   LIMIT 1
+              )
+              RETURNING track_id",
         )
+        .bind(now)
         .bind(model_version.as_str())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&self.pool)
         .await?;
 
         let Some(row) = row else {
-            tx.commit().await?;
             return Ok(None);
         };
         let track_id: String = row.get("track_id");
-        let now = now_ms();
-        sqlx::query(
-            "UPDATE track_embeddings
-                SET status = 'in_progress', updated_at = ?
-              WHERE track_id = ? AND model_version = ? AND status = 'not_started'",
-        )
-        .bind(now)
-        .bind(&track_id)
-        .bind(model_version.as_str())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
 
         Ok(Some(EmbeddingKey {
             track_id: TrackId::from(track_id),

@@ -114,6 +114,58 @@ fn parses_get_album_response_with_songs() {
 }
 
 #[test]
+fn parses_get_song_response() {
+    // Subsonic /rest/getSong returns the track under the `song` key, with
+    // the same fields as one entry from `getAlbum.song[]`.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-1",
+                "title": "1/1",
+                "album": "Music for Airports",
+                "albumId": "al-1",
+                "artist": "Brian Eno",
+                "artistId": "ar-1",
+                "track": 1,
+                "discNumber": 1,
+                "duration": 1042,
+                "bitRate": 320,
+                "contentType": "audio/flac",
+                "suffix": "flac"
+            }
+        }
+    }"#;
+
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.id, TrackId::from("t-1"));
+    assert_eq!(track.title, "1/1");
+    assert_eq!(track.album_id, Some(AlbumId::from("al-1")));
+    assert_eq!(track.duration_seconds, Some(1042));
+    assert_eq!(track.bit_rate_kbps, Some(320));
+}
+
+#[test]
+fn parses_get_song_with_sparse_fields() {
+    // Older Subsonic servers may omit duration / bitRate.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-9",
+                "title": "Untitled"
+            }
+        }
+    }"#;
+
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.id, TrackId::from("t-9"));
+    assert_eq!(track.duration_seconds, None);
+}
+
+#[test]
 fn parses_error_envelope_into_typed_error() {
     let body = r#"{
         "subsonic-response": {

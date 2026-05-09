@@ -214,7 +214,12 @@ web has the optimistic-update sync provider. Single-linearizer model
   sidecar for the `(TrackId ↔ u64)` map. ANN is a derived cache —
   rebuildable from SQLite at boot.
 - Python sidecar (`services/embedder/`): FastAPI + LAION CLAP for
-  audio + text embeddings. Stub backend for tests / dev.
+  audio + text embeddings. Stub backend for tests / dev. ROCm GPU
+  inference enabled — `pyproject.toml` routes torch through PyTorch's
+  ROCm wheel index; `/healthz` reports `device: "cuda" | "cpu"` so
+  silent CPU fallback is visible. ~6× wall-clock speedup over CPU on a
+  RDNA4 (5-track drain: 31 s CPU → 5 s GPU; pipeline now
+  Subsonic-bound, not compute-bound).
 - Gateway endpoints: `GET /v1/recommend/next`, `POST /v1/recommend/enqueue`,
   `POST /v1/events`. Boot-time embedder probe with degraded-mode
   fallback if unreachable.

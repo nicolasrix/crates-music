@@ -42,6 +42,22 @@ def test_healthz_returns_200_when_loaded(app_with_loaded_stub):
     assert body["dim"] == EMBEDDING_DIM
 
 
+def test_healthz_reports_device_for_stub(app_with_loaded_stub):
+    # Stub always runs on CPU. The field exists so callers (the gateway
+    # boot probe) can detect silent CPU fallback after a ROCm install.
+    client = TestClient(app_with_loaded_stub)
+    body = client.get("/healthz").json()
+    assert body["device"] == "cpu"
+
+
+def test_healthz_reports_device_when_unloaded(app_with_unloaded_stub):
+    # device is reported regardless of load state — useful when probing
+    # a still-loading sidecar to see whether GPU was selected at all.
+    client = TestClient(app_with_unloaded_stub)
+    body = client.get("/healthz").json()
+    assert body["device"] == "cpu"
+
+
 def test_healthz_returns_503_when_not_loaded(app_with_unloaded_stub):
     client = TestClient(app_with_unloaded_stub)
     r = client.get("/healthz")

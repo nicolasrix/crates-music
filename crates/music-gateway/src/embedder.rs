@@ -115,6 +115,7 @@ pub async fn boot_probe(cfg: Option<&EmbedderConfigSection>) -> EmbedderHandle {
             tracing::info!(
                 model_version = %h.model_version,
                 dim = h.dim,
+                device = h.device.as_deref().unwrap_or("unknown"),
                 "embedder: ready"
             );
             EmbedderHandle::new(Some(client), Some(h))
@@ -122,6 +123,7 @@ pub async fn boot_probe(cfg: Option<&EmbedderConfigSection>) -> EmbedderHandle {
         Ok(h) => {
             tracing::warn!(
                 model_version = %h.model_version,
+                device = h.device.as_deref().unwrap_or("unknown"),
                 "embedder: reachable but model not loaded — degraded mode (will retry)"
             );
             EmbedderHandle::new(Some(client), Some(h))

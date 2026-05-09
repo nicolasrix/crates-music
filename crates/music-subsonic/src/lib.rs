@@ -9,7 +9,7 @@ pub mod auth;
 mod error;
 pub mod wire;
 
-use music_core::{Album, AlbumId, TrackId};
+use music_core::{Album, AlbumId, Track, TrackId};
 use reqwest::Client as Http;
 use url::Url;
 
@@ -134,6 +134,15 @@ impl Client {
         let params = vec![("id", id.as_str().to_string())];
         let body = self.fetch_text("getAlbum", &params).await?;
         wire::parse_get_album(&body)
+    }
+
+    /// Fetch a single track's metadata by id. Used by the ingest pipeline
+    /// to read `duration_seconds` so it can pick a `timeOffset` for the
+    /// embedding window.
+    pub async fn get_song(&self, id: &TrackId) -> Result<Track> {
+        let params = vec![("id", id.as_str().to_string())];
+        let body = self.fetch_text("getSong", &params).await?;
+        wire::parse_get_song(&body)
     }
 
     /// Build the URL for streaming a track. The caller is responsible for

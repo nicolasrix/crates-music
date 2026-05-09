@@ -50,6 +50,8 @@ class ClapEmbedder:
         self._model.load_ckpt(checkpoint_path)
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
+        self._device = _detect_device()
+        logger.info("CLAP loaded on device=%s", self._device)
 
     @property
     def model_version(self) -> str:
@@ -58,6 +60,10 @@ class ClapEmbedder:
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def device(self) -> str:
+        return self._device
 
     def embed_audio(self, raw_bytes: bytes) -> np.ndarray:
         import soundfile  # type: ignore[import-not-found]
@@ -86,6 +92,23 @@ def _derive_version(checkpoint_path: str) -> str:
 
     base = os.path.basename(checkpoint_path)
     return base.rsplit(".", 1)[0] or "clap"
+
+
+def _detect_device() -> str:
+    """Return "cuda" if a HIP/CUDA torch device is usable, else "cpu".
+
+    laion_clap auto-moves the model to GPU when torch.cuda.is_available()
+    is True — including on ROCm-built torch where HIP devices report as
+    "cuda". So this single check matches what the model is actually
+    doing without us having to introspect model parameters (which would
+    require touching CLAP's internals).
+    """
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
 
 
 def _l2_normalize(v: np.ndarray) -> np.ndarray:

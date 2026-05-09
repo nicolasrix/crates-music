@@ -30,7 +30,8 @@ async fn healthz_loaded_returns_health() {
             "status": "ok",
             "model_loaded": true,
             "model_version": "stub-v1",
-            "dim": 512
+            "dim": 512,
+            "device": "cpu"
         })))
         .mount(&server)
         .await;
@@ -41,6 +42,52 @@ async fn healthz_loaded_returns_health() {
     assert!(h.model_loaded);
     assert_eq!(h.model_version.as_str(), "stub-v1");
     assert_eq!(h.dim, 512);
+    assert_eq!(h.device.as_deref(), Some("cpu"));
+}
+
+#[tokio::test]
+async fn healthz_reports_cuda_device() {
+    // When the sidecar runs on ROCm-built torch, HIP devices identify
+    // as "cuda" — that's the contract this assertion pins.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "model_loaded": true,
+            "model_version": "clap-v1",
+            "dim": 512,
+            "device": "cuda"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let h = client.healthz().await.expect("healthz");
+    assert_eq!(h.device.as_deref(), Some("cuda"));
+}
+
+#[tokio::test]
+async fn healthz_missing_device_field_parses_as_none() {
+    // Backwards compat: an older sidecar that doesn't yet emit `device`
+    // should still produce a valid EmbedderHealth — gateway will log
+    // "device=unknown" rather than crash-loop.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "model_loaded": true,
+            "model_version": "old-v0",
+            "dim": 512
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let h = client.healthz().await.expect("healthz");
+    assert!(h.reachable);
+    assert_eq!(h.device, None);
 }
 
 #[tokio::test]

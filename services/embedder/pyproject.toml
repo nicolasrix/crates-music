@@ -19,6 +19,11 @@ clap = [
     "torch>=2.4",
     "torchaudio>=2.4",
     "torchvision>=0.19",
+    # Direct-listed only so the rocm-index source override below fires
+    # for it (uv's [tool.uv.sources] doesn't apply to purely transitive
+    # deps). Linux-gated because non-Linux platforms get CPU torch
+    # without this triton variant.
+    "pytorch-triton-rocm; sys_platform == 'linux'",
     "laion-clap>=1.1.6",
     "librosa>=0.10",
     "soundfile>=0.12",
@@ -38,3 +43,36 @@ packages = ["embedder"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# AMD ROCm-built PyTorch wheels.
+#
+# Without this, uv pulls torch from PyPI's default index, which ships
+# CUDA-13 wheels — useless on AMD hardware (~6 GB of nvidia-* libs sit
+# idle and torch.cuda.is_available() returns False).
+#
+# Path picked: stable rocm6.4 (torch 2.9.0). Our system ROCm is 7.2.2,
+# but PyTorch wheels bundle their own ROCm runtime so kernel-driver
+# forward compatibility is what matters at the OS layer. If RDNA4
+# (gfx1201) kernel coverage in rocm6.4 wheels turns out to be
+# incomplete on RDNA4, switch the index URL below to
+# `https://download.pytorch.org/whl/nightly/rocm7.0` — same shape, no
+# other code changes needed. Phase-1 device-field on /healthz tells us
+# which path we're on.
+#
+# Marker `sys_platform == 'linux'` keeps non-Linux dev installs (CI,
+# macOS) on the default PyPI source. Pinning is `explicit = true` so
+# only the listed packages route here; everything else still resolves
+# via PyPI normally.
+[tool.uv.sources]
+torch = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+# torch's transitive triton dep also lives on the ROCm index (it has a
+# different build flavour than upstream `triton`). Route it explicitly
+# or the resolver fails with "no version of pytorch-triton-rocm…".
+pytorch-triton-rocm = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true

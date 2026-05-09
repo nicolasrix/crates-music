@@ -32,11 +32,10 @@ use tokio::task::JoinHandle;
 
 use crate::config::UpstreamConfig;
 
-/// How many bytes to range-fetch per track. CLAP's audio encoder
-/// truncates / pads internally to 10 s windows, so we don't need a
-/// precise duration — we just need enough bytes to decode at least one
-/// window. 8 MiB at 192 kbps MP3 ≈ 5.5 minutes, plenty.
-const MAX_CLIP_BYTES: u64 = 8 * 1024 * 1024;
+/// Embedding window length in seconds. CLAP picks a 10 s slice from
+/// whatever audio it's handed; we ask for slightly more than that so
+/// the decoder has frame-boundary slack at both ends.
+const WINDOW_SECONDS: u32 = 12;
 
 /// Bitrate cap (kbps) we ask Navidrome to transcode to. Lossy MP3 lets
 /// us truncate the byte stream mid-file without the decoder losing
@@ -44,9 +43,35 @@ const MAX_CLIP_BYTES: u64 = 8 * 1024 * 1024;
 /// sync" because the file ends mid-frame.
 const TRANSCODE_MAX_BITRATE: u32 = 192;
 
+/// Headroom on the byte range above the theoretical window size — covers
+/// ID3 tags, transcoder priming frames, and the few bytes the MP3
+/// decoder needs to sync to the next frame boundary after `timeOffset`.
+const CLIP_HEADROOM_BYTES: u64 = 96 * 1024;
+
+/// How many bytes to range-fetch per track. Sized for `WINDOW_SECONDS`
+/// at `TRANSCODE_MAX_BITRATE` plus headroom — small enough that
+/// Navidrome's ffmpeg transcode stops almost immediately after the
+/// window we asked for, large enough that the decoder gets a clean
+/// `WINDOW_SECONDS`-second clip.
+const MAX_CLIP_BYTES: u64 =
+    (TRANSCODE_MAX_BITRATE as u64 * 1000 / 8) * WINDOW_SECONDS as u64 + CLIP_HEADROOM_BYTES;
+
 /// Idle backoff between queue polls. Snappy enough for manual testing
 /// while keeping per-tick cost trivial (one indexed lookup in SQLite).
 const IDLE_TICK: Duration = Duration::from_secs(5);
+
+/// How many concurrent ingest workers to spawn. Each worker
+/// independently calls `claim_next` → fetch → embed → write. SQLite's
+/// atomic UPDATE…RETURNING in `claim_next` keeps two workers from
+/// claiming the same row.
+///
+/// 8 is a good fit for the local-network case: end-to-end per-track
+/// time is ~3.5 s and dominated by Subsonic transcode + range fetch,
+/// so 8 in-flight fetches hide the network latency behind the GPU
+/// (which is single-digit-percent of the pipeline). Higher counts hit
+/// the embedder sidecar's per-process serialization on the GPU and
+/// stop helping; lower counts leave the GPU idle most of the time.
+const INGEST_WORKER_COUNT: usize = 8;
 
 /// Audio fetcher backed by the upstream Navidrome via the typed
 /// Subsonic client. Range-caps every request at `MAX_CLIP_BYTES`.
@@ -73,9 +98,45 @@ impl SubsonicAudioFetcher {
     }
 }
 
+/// Pick a deterministic offset (seconds) into a track of duration
+/// `duration_seconds`, so that a `window_seconds`-long clip starting at
+/// the offset is centered on the track's midpoint.
+///
+/// Returns 0 when the track is shorter than the window — the caller
+/// should just embed the whole thing in that case.
+///
+/// Pure function, exhaustively unit-tested below. Determinism here is
+/// important: re-embedding the same track on a model bump must produce
+/// the same window selection so cosine deltas reflect model changes,
+/// not random window drift.
+fn pick_offset_seconds(duration_seconds: u32, window_seconds: u32) -> u32 {
+    if duration_seconds <= window_seconds {
+        return 0;
+    }
+    (duration_seconds - window_seconds) / 2
+}
+
 #[async_trait]
 impl AudioFetcher for SubsonicAudioFetcher {
     async fn fetch_clip(&self, track_id: &TrackId) -> Result<Bytes, FetchError> {
+        // Look up duration so we can pick a `timeOffset` centered on
+        // the track. If `getSong` fails (transient transport, missing
+        // track) we fall back to offset=0 — the worst case is that we
+        // embed the first `WINDOW_SECONDS` of the track, which is what
+        // we'd do for a short track anyway.
+        let duration_seconds = match self.client.get_song(track_id).await {
+            Ok(track) => track.duration_seconds.unwrap_or(0),
+            Err(e) => {
+                tracing::debug!(
+                    track = %track_id,
+                    error = %e,
+                    "ingest: getSong failed; using offset=0"
+                );
+                0
+            }
+        };
+        let offset = pick_offset_seconds(duration_seconds, WINDOW_SECONDS);
+
         let mut url = self
             .client
             .stream_url(track_id)
@@ -83,9 +144,18 @@ impl AudioFetcher for SubsonicAudioFetcher {
         // Force transcode to MP3 so the byte-range cap below produces a
         // decodable prefix. FLAC sources truncated mid-file fail with
         // "decoder lost sync" inside soundfile.
-        url.query_pairs_mut()
-            .append_pair("format", "mp3")
-            .append_pair("maxBitRate", &TRANSCODE_MAX_BITRATE.to_string());
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("format", "mp3")
+                .append_pair("maxBitRate", &TRANSCODE_MAX_BITRATE.to_string());
+            // Only attach timeOffset when non-zero. Some Subsonic
+            // implementations interpret the parameter strictly and may
+            // re-prime the transcoder on its presence; sending 0
+            // gratuitously is just wasteful.
+            if offset > 0 {
+                q.append_pair("timeOffset", &offset.to_string());
+            }
+        }
 
         let range = format!("bytes=0-{}", MAX_CLIP_BYTES - 1);
         let resp = self
@@ -110,18 +180,25 @@ impl AudioFetcher for SubsonicAudioFetcher {
     }
 }
 
-/// Spawn the background ingest loop. Returns `None` (and logs) if no
-/// embedder client is available — the gateway then runs in degraded
-/// mode and queued rows sit at `not_started` until a future restart
-/// sees the embedder.
+/// Spawn the background ingest loop. Returns an empty Vec (and logs)
+/// if no embedder client is available — the gateway then runs in
+/// degraded mode and queued rows sit at `not_started` until a future
+/// restart sees the embedder.
+///
+/// Spawns `INGEST_WORKER_COUNT` independent tasks, all sharing one
+/// `Arc<IngestWorker>`. Each task runs the same drain-then-sleep loop;
+/// SQLite-side atomicity in `claim_next` ensures rows aren't
+/// double-processed.
 pub fn spawn_ingest_worker(
     store: EmbeddingStore,
     ann: Arc<AnnIndex>,
     embedder: Option<EmbedderClient>,
     fetcher: Arc<dyn AudioFetcher>,
-    model_version: ModelVersion,
-) -> Option<JoinHandle<()>> {
-    let embedder = embedder?;
+    model_version: &ModelVersion,
+) -> Vec<JoinHandle<()>> {
+    let Some(embedder) = embedder else {
+        return Vec::new();
+    };
     let cfg = IngestWorkerConfig {
         store,
         ann,
@@ -129,28 +206,85 @@ pub fn spawn_ingest_worker(
         fetcher,
         model_version: model_version.clone(),
     };
-    let worker = IngestWorker::new(cfg);
+    let worker = Arc::new(IngestWorker::new(cfg));
 
-    let handle = tokio::spawn(async move {
-        tracing::info!(model = %model_version, "ingest: worker started");
-        loop {
-            match worker.drain().await {
-                Ok(stats) if stats.embedded == 0 && stats.failed == 0 => {
-                    tokio::time::sleep(IDLE_TICK).await;
+    tracing::info!(
+        model = %model_version,
+        workers = INGEST_WORKER_COUNT,
+        "ingest: workers started"
+    );
+
+    (0..INGEST_WORKER_COUNT)
+        .map(|worker_id| {
+            let worker = Arc::clone(&worker);
+            tokio::spawn(async move {
+                loop {
+                    match worker.drain().await {
+                        Ok(stats) if stats.embedded == 0 && stats.failed == 0 => {
+                            tokio::time::sleep(IDLE_TICK).await;
+                        }
+                        Ok(stats) => {
+                            tracing::info!(
+                                worker = worker_id,
+                                embedded = stats.embedded,
+                                failed = stats.failed,
+                                "ingest: drained queue"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                worker = worker_id,
+                                error = %e,
+                                "ingest: drain failed; backing off"
+                            );
+                            tokio::time::sleep(IDLE_TICK).await;
+                        }
+                    }
                 }
-                Ok(stats) => {
-                    tracing::info!(
-                        embedded = stats.embedded,
-                        failed = stats.failed,
-                        "ingest: drained queue"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "ingest: drain failed; backing off");
-                    tokio::time::sleep(IDLE_TICK).await;
-                }
-            }
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pick_offset_returns_zero_when_track_shorter_than_window() {
+        // 8 s track, 12 s window — we just embed the whole thing.
+        assert_eq!(pick_offset_seconds(8, WINDOW_SECONDS), 0);
+        assert_eq!(pick_offset_seconds(0, WINDOW_SECONDS), 0);
+        // Boundary: track exactly the length of the window.
+        assert_eq!(pick_offset_seconds(WINDOW_SECONDS, WINDOW_SECONDS), 0);
+    }
+
+    #[test]
+    fn pick_offset_centers_window_on_track_midpoint() {
+        // 60 s track, 12 s window: offset = (60 - 12) / 2 = 24
+        // → window covers seconds 24..36, midpoint at 30 ✓
+        assert_eq!(pick_offset_seconds(60, 12), 24);
+        // 1042 s track, 12 s window: offset = (1042 - 12) / 2 = 515
+        // → window covers seconds 515..527, midpoint 521 ≈ 1042/2 ✓
+        assert_eq!(pick_offset_seconds(1042, 12), 515);
+    }
+
+    #[test]
+    fn pick_offset_is_deterministic() {
+        // Same input → same output, on every call. Important for
+        // re-embedding stability.
+        for _ in 0..100 {
+            assert_eq!(pick_offset_seconds(180, WINDOW_SECONDS), 84);
         }
-    });
-    Some(handle)
+    }
+
+    #[test]
+    fn max_clip_bytes_matches_window_size() {
+        // 12 s × 192 kbps / 8 + 96 KiB ≈ 384 KiB. The exact number isn't
+        // load-bearing, but if the constant ever drifts above ~512 KiB
+        // (or below ~256 KiB) the perf properties of the system change
+        // materially — pin it here so the change is visible in diff.
+        const _: () = assert!(MAX_CLIP_BYTES >= 256 * 1024);
+        const _: () = assert!(MAX_CLIP_BYTES <= 512 * 1024);
+    }
 }

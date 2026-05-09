@@ -131,6 +131,32 @@ async fn get_album_returns_album_with_tracks() {
 }
 
 #[tokio::test]
+async fn get_song_returns_typed_track() {
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-7", "title": "Sample",
+                "albumId": "al-3", "duration": 240, "bitRate": 192
+            }
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path("/rest/getSong"))
+        .and(query_param("id", "t-7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let client = Client::new(&server.uri(), creds()).unwrap();
+    let track = client.get_song(&TrackId::from("t-7")).await.unwrap();
+    assert_eq!(track.id, TrackId::from("t-7"));
+    assert_eq!(track.duration_seconds, Some(240));
+}
+
+#[tokio::test]
 async fn http_500_surfaces_as_transport_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
