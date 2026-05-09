@@ -15,12 +15,18 @@
 //! (`since_ms`) to match what `SpanRecord` already stores; no Duration
 //! parsing on the wire.
 
-use axum::{Json, extract::Query, extract::State, http::StatusCode};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode, header},
+};
 use music_recommend::types::ModelVersion;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::diagnostics::{HistogramBucket, SpanRecord};
+use crate::diagnostics::{ClientEventRecord, HistogramBucket, SpanRecord};
 use crate::state::AppState;
 
 const DEFAULT_TRACE_LIMIT: usize = 100;
@@ -180,6 +186,175 @@ pub struct QueueDepthResponse {
     in_progress: u64,
     done: u64,
     failed: u64,
+}
+
+// --- /v1/diagnostics/client_events ----------------------------------------
+
+/// Cap on a single batch. The web emitter flushes every ~10 s or on
+/// `pagehide`; in steady state a session emits at most a handful of
+/// vitals + a small number of custom marks per minute, so 50 is
+/// generous. Rejecting at the edge avoids quadratic INSERT work and
+/// caps the worst-case row burst per request.
+const MAX_BATCH: usize = 50;
+
+/// Truncation budget for `user_agent`. Any real browser UA fits in
+/// ~200 bytes; 256 leaves headroom while preventing a hostile client
+/// from filling the table with multi-MB strings.
+const MAX_USER_AGENT_LEN: usize = 256;
+
+#[derive(Debug, Deserialize)]
+pub struct ClientEventInput {
+    /// Random per-page-load identifier. Lets the diagnostics page
+    /// group events from one session even when the path changes.
+    session_id: String,
+    /// Client-side wall clock (unix-ms) at the moment the event fired.
+    occurred_ms: i64,
+    /// Event name, e.g. `web-vital.LCP` or `playback.start`.
+    name: String,
+    /// Web-vital value or custom-mark duration. Optional because some
+    /// marks are events without a duration (e.g. `playback.user_skipped`).
+    value_ms: Option<f64>,
+    /// `web-vitals` library bucket (`good`/`needs-improvement`/`poor`)
+    /// or `None` for custom marks.
+    rating: Option<String>,
+    /// Path the user was viewing when the event fired.
+    page_path: String,
+    /// Free-form attributes; serialized as `fields_json` in storage.
+    #[serde(default)]
+    fields: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientEventsRequest {
+    events: Vec<ClientEventInput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClientEventsAccepted {
+    accepted: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClientEventEntry {
+    received_ms: i64,
+    occurred_ms: i64,
+    session_id: String,
+    name: String,
+    value_ms: Option<f64>,
+    rating: Option<String>,
+    page_path: String,
+    user_agent: Option<String>,
+    fields: Value,
+}
+
+impl From<ClientEventRecord> for ClientEventEntry {
+    fn from(r: ClientEventRecord) -> Self {
+        let fields = serde_json::from_str::<Value>(&r.fields_json)
+            .unwrap_or_else(|_| serde_json::json!({"_raw": r.fields_json}));
+        Self {
+            received_ms: r.received_ms,
+            occurred_ms: r.occurred_ms,
+            session_id: r.session_id,
+            name: r.name,
+            value_ms: r.value_ms,
+            rating: r.rating,
+            page_path: r.page_path,
+            user_agent: r.user_agent,
+            fields,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClientEventsResponse {
+    events: Vec<ClientEventEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientEventsQuery {
+    limit: Option<usize>,
+    name: Option<String>,
+}
+
+fn now_unix_ms() -> i64 {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(dur.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn user_agent_from(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    // Truncate at char boundary — `take(N)` on chars, not bytes — so we
+    // never split a multi-byte codepoint and corrupt UTF-8.
+    let truncated: String = raw.chars().take(MAX_USER_AGENT_LEN).collect();
+    Some(truncated)
+}
+
+pub async fn submit_client_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClientEventsRequest>,
+) -> Result<Json<ClientEventsAccepted>, (StatusCode, Json<Value>)> {
+    if body.events.len() > MAX_BATCH {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": "batch too large",
+                "max_batch": MAX_BATCH,
+            })),
+        ));
+    }
+    if body.events.is_empty() {
+        return Ok(Json(ClientEventsAccepted { accepted: 0 }));
+    }
+
+    let received_ms = now_unix_ms();
+    let user_agent = user_agent_from(&headers);
+
+    let records: Vec<ClientEventRecord> = body
+        .events
+        .into_iter()
+        .map(|e| {
+            let fields_json = e
+                .fields
+                .as_ref()
+                .map_or_else(|| "{}".to_string(), ToString::to_string);
+            ClientEventRecord {
+                received_ms,
+                occurred_ms: e.occurred_ms,
+                session_id: e.session_id,
+                name: e.name,
+                value_ms: e.value_ms,
+                rating: e.rating,
+                page_path: e.page_path,
+                user_agent: user_agent.clone(),
+                fields_json,
+            }
+        })
+        .collect();
+    let n = records.len();
+    state
+        .trace_store()
+        .insert_client_events(records)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(ClientEventsAccepted { accepted: n }))
+}
+
+pub async fn list_client_events(
+    State(state): State<AppState>,
+    Query(q): Query<ClientEventsQuery>,
+) -> Result<Json<ClientEventsResponse>, (StatusCode, Json<Value>)> {
+    let limit = q.limit.unwrap_or(DEFAULT_TRACE_LIMIT).clamp(1, MAX_TRACE_LIMIT);
+    let rows = state
+        .trace_store()
+        .recent_client_events(limit, q.name.as_deref())
+        .await
+        .map_err(db_error)?;
+    Ok(Json(ClientEventsResponse {
+        events: rows.into_iter().map(ClientEventEntry::from).collect(),
+    }))
 }
 
 pub async fn queue_depth(

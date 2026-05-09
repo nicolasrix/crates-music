@@ -36,3 +36,27 @@ impl SpanRecord {
         self.end_ms - self.start_ms
     }
 }
+
+/// One browser RUM event uploaded by a web client. Two timestamps —
+/// `occurred_ms` from the client and `received_ms` stamped by the
+/// gateway — are kept distinct because client clocks drift, and the
+/// diagnostics feed must order on a clock the operator controls.
+///
+/// `value_ms` is `f64` because Web Vitals are typically fractional
+/// (e.g. LCP=1234.5 ms); it is `None` for non-timing marks like
+/// `playback.user_skipped`. `rating` is the `web-vitals` library's
+/// bucket (`good` / `needs-improvement` / `poor`) — `None` for custom
+/// marks. `user_agent` is captured from the request header and
+/// truncated server-side; we never trust the client to bound it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ClientEventRecord {
+    pub received_ms: i64,
+    pub occurred_ms: i64,
+    pub session_id: String,
+    pub name: String,
+    pub value_ms: Option<f64>,
+    pub rating: Option<String>,
+    pub page_path: String,
+    pub user_agent: Option<String>,
+    pub fields_json: String,
+}

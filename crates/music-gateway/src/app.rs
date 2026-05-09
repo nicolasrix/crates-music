@@ -48,6 +48,11 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/diagnostics/queue_depth",
             get(diagnostics_handlers::queue_depth),
         )
+        .route(
+            "/v1/diagnostics/client_events",
+            get(diagnostics_handlers::list_client_events)
+                .post(diagnostics_handlers::submit_client_events),
+        )
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 

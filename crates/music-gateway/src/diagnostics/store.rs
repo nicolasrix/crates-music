@@ -15,7 +15,7 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
-use super::types::SpanRecord;
+use super::types::{ClientEventRecord, SpanRecord};
 
 /// Migrations live in their own directory so they don't collide with
 /// the OAuth migrations also owned by this crate. sqlx tracks the
@@ -297,6 +297,91 @@ impl TraceStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Persist a batch of browser RUM events in a single transaction.
+    /// Empty batch is a no-op (the upload handler returns OK with
+    /// `accepted: 0` for that case). All timestamps and the user_agent
+    /// must be stamped by the caller — the store stays dumb.
+    pub async fn insert_client_events(&self, batch: Vec<ClientEventRecord>) -> sqlx::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for e in &batch {
+            sqlx::query(
+                "INSERT INTO client_events
+                    (received_ms, occurred_ms, session_id, name,
+                     value_ms, rating, page_path, user_agent, fields_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(e.received_ms)
+            .bind(e.occurred_ms)
+            .bind(&e.session_id)
+            .bind(&e.name)
+            .bind(e.value_ms)
+            .bind(e.rating.as_deref())
+            .bind(&e.page_path)
+            .bind(e.user_agent.as_deref())
+            .bind(&e.fields_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Most-recently-received client events, newest first. Optional
+    /// name filter mirrors `query()` semantics: `None` means "all".
+    pub async fn recent_client_events(
+        &self,
+        limit: usize,
+        name: Option<&str>,
+    ) -> sqlx::Result<Vec<ClientEventRecord>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = match name {
+            None => {
+                sqlx::query(
+                    "SELECT received_ms, occurred_ms, session_id, name,
+                            value_ms, rating, page_path, user_agent, fields_json
+                     FROM client_events
+                     ORDER BY id DESC
+                     LIMIT ?",
+                )
+                .bind(limit_i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some(n) => {
+                sqlx::query(
+                    "SELECT received_ms, occurred_ms, session_id, name,
+                            value_ms, rating, page_path, user_agent, fields_json
+                     FROM client_events
+                     WHERE name = ?
+                     ORDER BY id DESC
+                     LIMIT ?",
+                )
+                .bind(n)
+                .bind(limit_i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(ClientEventRecord {
+                received_ms: row.try_get("received_ms")?,
+                occurred_ms: row.try_get("occurred_ms")?,
+                session_id: row.try_get("session_id")?,
+                name: row.try_get("name")?,
+                value_ms: row.try_get("value_ms")?,
+                rating: row.try_get("rating")?,
+                page_path: row.try_get("page_path")?,
+                user_agent: row.try_get("user_agent")?,
+                fields_json: row.try_get("fields_json")?,
+            });
+        }
+        Ok(out)
     }
 }
 

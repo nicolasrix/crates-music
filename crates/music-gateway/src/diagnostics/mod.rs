@@ -18,4 +18,4 @@ mod types;
 
 pub use layer::{TraceLayer, spawn_drainer};
 pub use store::{HistogramBucket, TraceStore};
-pub use types::SpanRecord;
+pub use types::{ClientEventRecord, SpanRecord};
