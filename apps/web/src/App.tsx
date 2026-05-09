@@ -12,6 +12,7 @@ import { Home } from "./pages/Home";
 import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
+import { SearchBucket } from "./pages/SearchBucket";
 import { SignIn } from "./pages/SignIn";
 import { Tracks } from "./pages/Tracks";
 import { AutoplayProvider } from "./player/AutoplayContext";
@@ -75,6 +76,9 @@ function Routed({ path }: { path: string }) {
   if (m && m[1]) return <Playlist id={m[1]} />;
 
   if (path === "/search") return <Search />;
+  if (path === "/search/artists") return <SearchBucket bucket="artists" />;
+  if (path === "/search/albums") return <SearchBucket bucket="albums" />;
+  if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
   if (path === "/diagnostics") return <Diagnostics />;
   return <Home />;
