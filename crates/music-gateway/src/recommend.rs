@@ -249,6 +249,8 @@ pub struct FromSeedsResponse {
         filter_admitted_min_sim = tracing::field::Empty,
         filter_admitted_max_sim = tracing::field::Empty,
         filter_sim_gap = tracing::field::Empty,
+        filter_admitted_sims_json = tracing::field::Empty,
+        filter_dropped_sims_json = tracing::field::Empty,
     ),
 )]
 pub async fn from_seeds(
@@ -417,6 +419,8 @@ pub struct FromAnyResponse {
         filter_admitted_min_sim = tracing::field::Empty,
         filter_admitted_max_sim = tracing::field::Empty,
         filter_sim_gap = tracing::field::Empty,
+        filter_admitted_sims_json = tracing::field::Empty,
+        filter_dropped_sims_json = tracing::field::Empty,
     ),
 )]
 pub async fn from_any(
@@ -568,22 +572,33 @@ async fn build_filter_with_metadata(
 /// and recorded onto the request span so /diagnostics can show "did
 /// the filter cost us anything in this slate?".
 ///
-/// The headline number is [`Self::sim_gap`]: when positive, the filter
+/// Two layers of detail end up on the span:
+///
+/// 1. **Scalars** — `dropped_artist`, `dropped_dedup`,
+///    `admitted_min_sim`, `admitted_max_sim`, `dropped_max_sim`,
+///    `sim_gap`. Kept as direct span fields so the existing
+///    /diagnostics histograms can `json_extract` them in O(1) without
+///    iterating an array.
+/// 2. **Per-track arrays** — `admitted_sims_json`, `dropped_sims_json`.
+///    Recorded as compact JSON arrays of f32. Lets ad-hoc queries
+///    compute any aggregate (mean, p50, p95, stdev) over the slate
+///    distribution after the fact, without baking each new aggregate
+///    into the recorder.
+///
+/// The headline scalar is [`Self::sim_gap`]: when positive, the filter
 /// rejected a candidate stronger than the worst we admitted — a direct
 /// proxy for the "genre jump" symptom we're trying to characterise
 /// before tuning the algorithm.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default)]
 struct FilterStats {
     dropped_artist: u32,
     dropped_dedup: u32,
-    /// Highest similarity rejected by artist cap or dedup. `None` when
-    /// nothing was dropped this request.
-    dropped_max_sim: Option<f32>,
-    /// Lowest similarity in the admitted slate. `None` when no admits.
-    admitted_min_sim: Option<f32>,
-    /// Highest similarity in the admitted slate. Mostly for context —
-    /// pair with `admitted_min_sim` to see the spread of what we kept.
-    admitted_max_sim: Option<f32>,
+    /// Per-admit similarity-to-seed. Length equals the admitted slate
+    /// size (≤ `top_n`).
+    admitted_sims: Vec<f32>,
+    /// Per-drop similarity-to-seed. Length equals `total_dropped()`.
+    /// Bounded by `internal_top_n - admitted` ≤ MAX_N - top_n.
+    dropped_sims: Vec<f32>,
 }
 
 impl FilterStats {
@@ -592,8 +607,7 @@ impl FilterStats {
     }
 
     fn record_admit(&mut self, sim: f32) {
-        self.admitted_min_sim = Some(self.admitted_min_sim.map_or(sim, |v| v.min(sim)));
-        self.admitted_max_sim = Some(self.admitted_max_sim.map_or(sim, |v| v.max(sim)));
+        self.admitted_sims.push(sim);
     }
 
     fn record_drop(&mut self, decision: FilterDecision, sim: f32) {
@@ -604,17 +618,58 @@ impl FilterStats {
             // rejection decisions to `record_drop`. Defensive no-op.
             FilterDecision::Accept => return,
         }
-        self.dropped_max_sim = Some(self.dropped_max_sim.map_or(sim, |v| v.max(sim)));
+        self.dropped_sims.push(sim);
+    }
+
+    /// Lowest similarity in the admitted slate. `None` when no admits.
+    fn admitted_min(&self) -> Option<f32> {
+        self.admitted_sims.iter().copied().reduce(f32::min)
+    }
+
+    /// Highest similarity in the admitted slate. `None` when no admits.
+    fn admitted_max(&self) -> Option<f32> {
+        self.admitted_sims.iter().copied().reduce(f32::max)
+    }
+
+    /// Highest similarity rejected by artist cap or dedup. `None` when
+    /// nothing was dropped this request.
+    fn dropped_max(&self) -> Option<f32> {
+        self.dropped_sims.iter().copied().reduce(f32::max)
     }
 
     /// Spread between best dropped and worst admitted. Positive when
     /// the filter forced a worse pick than something it rejected.
     fn sim_gap(&self) -> Option<f32> {
-        match (self.dropped_max_sim, self.admitted_min_sim) {
+        match (self.dropped_max(), self.admitted_min()) {
             (Some(d), Some(a)) => Some(d - a),
             _ => None,
         }
     }
+}
+
+/// Compact JSON array formatter for an `&[f32]`. Hand-rolled (rather
+/// than `serde_json`) so the seam stays dependency-light and the
+/// formatting is deterministic — `format!("{v:.6}")` always emits
+/// fixed-decimal notation, no scientific-notation switching at the
+/// edges of the f32 range.
+///
+/// 6 decimal places exceeds the effective precision of cosine sims
+/// computed from 512-dim CLAP embeddings (which are themselves stored
+/// as f32 to begin with), so no information is lost.
+fn sims_as_json(sims: &[f32]) -> String {
+    use std::fmt::Write as _;
+    // ~9 chars per value plus brackets and commas. Slight over-estimate
+    // is fine; saves the realloc on the common 20-element case.
+    let mut out = String::with_capacity(sims.len() * 10 + 2);
+    out.push('[');
+    for (i, v) in sims.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{v:.6}");
+    }
+    out.push(']');
+    out
 }
 
 /// Push every collected stat onto the current span. Optional fields are
@@ -626,17 +681,33 @@ fn record_filter_stats(stats: &FilterStats) {
     span.record("filter_dropped_artist", stats.dropped_artist);
     span.record("filter_dropped_dedup", stats.dropped_dedup);
     // tracing's `Value` impl covers f64 but not f32 — cast at the seam.
-    if let Some(v) = stats.dropped_max_sim {
+    if let Some(v) = stats.dropped_max() {
         span.record("filter_dropped_max_sim", f64::from(v));
     }
-    if let Some(v) = stats.admitted_min_sim {
+    if let Some(v) = stats.admitted_min() {
         span.record("filter_admitted_min_sim", f64::from(v));
     }
-    if let Some(v) = stats.admitted_max_sim {
+    if let Some(v) = stats.admitted_max() {
         span.record("filter_admitted_max_sim", f64::from(v));
     }
     if let Some(v) = stats.sim_gap() {
         span.record("filter_sim_gap", f64::from(v));
+    }
+    // Per-track arrays only get recorded when non-empty. Empty arrays
+    // would still be valid JSON (`"[]"`) but adding a second
+    // distinguishable case (field present + empty vs. absent) to the
+    // diagnostics queries buys nothing.
+    if !stats.admitted_sims.is_empty() {
+        span.record(
+            "filter_admitted_sims_json",
+            sims_as_json(&stats.admitted_sims).as_str(),
+        );
+    }
+    if !stats.dropped_sims.is_empty() {
+        span.record(
+            "filter_dropped_sims_json",
+            sims_as_json(&stats.dropped_sims).as_str(),
+        );
     }
 }
 
@@ -731,5 +802,128 @@ async fn lookup_seed_vector(
     match store.get(&key).await.ok().flatten() {
         Some(emb) => (Some(emb.vector), "sqlite"),
         None => (None, "missing"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-Rust tests for the diagnostics helpers. The handler-level
+    //! integration coverage lives in `tests/recommend.rs`; here we only
+    //! exercise the stat-aggregation seam that decides what ends up in
+    //! the trace store's `fields_json`.
+    use super::*;
+
+    #[test]
+    fn sims_as_json_empty_returns_bracket_pair() {
+        assert_eq!(sims_as_json(&[]), "[]");
+    }
+
+    #[test]
+    fn sims_as_json_single_value_uses_six_decimals() {
+        assert_eq!(sims_as_json(&[0.5_f32]), "[0.500000]");
+    }
+
+    #[test]
+    fn sims_as_json_multiple_values_are_comma_separated_no_spaces() {
+        // Compactness matters: this string lands in fields_json; spaces
+        // are wasted bytes at 100k-row scale. Trailing zeros come from
+        // the `{:.6}` formatter, not from the literals.
+        assert_eq!(
+            sims_as_json(&[0.84_f32, 0.8125_f32, 0.5_f32]),
+            "[0.840000,0.812500,0.500000]"
+        );
+    }
+
+    #[test]
+    fn sims_as_json_handles_negative_values() {
+        // Cosine sims are bounded in [-1, 1]; negatives are legal.
+        assert_eq!(sims_as_json(&[-0.25_f32, 0.75_f32]), "[-0.250000,0.750000]");
+    }
+
+    #[test]
+    fn filter_stats_default_has_no_admits_or_drops() {
+        let s = FilterStats::default();
+        assert!(s.admitted_sims.is_empty());
+        assert!(s.dropped_sims.is_empty());
+        assert_eq!(s.total_dropped(), 0);
+        assert!(s.admitted_min().is_none());
+        assert!(s.admitted_max().is_none());
+        assert!(s.dropped_max().is_none());
+        assert!(s.sim_gap().is_none());
+    }
+
+    #[test]
+    fn record_admit_appends_to_admitted_sims() {
+        let mut s = FilterStats::default();
+        s.record_admit(0.9);
+        s.record_admit(0.7);
+        s.record_admit(0.8);
+        assert_eq!(s.admitted_sims, vec![0.9, 0.7, 0.8]);
+    }
+
+    #[test]
+    fn admitted_min_max_track_extremes_across_admits() {
+        let mut s = FilterStats::default();
+        for v in [0.9_f32, 0.7, 0.85, 0.6, 0.95] {
+            s.record_admit(v);
+        }
+        // Comparisons are on f32 so we use exact-equal: inputs are
+        // small fractions with exact f32 representations of the
+        // float-literal kind, which is true of the chosen values.
+        assert_eq!(s.admitted_min(), Some(0.6));
+        assert_eq!(s.admitted_max(), Some(0.95));
+    }
+
+    #[test]
+    fn record_drop_increments_per_decision_counter() {
+        let mut s = FilterStats::default();
+        s.record_drop(FilterDecision::RejectArtistCap, 0.85);
+        s.record_drop(FilterDecision::RejectArtistCap, 0.80);
+        s.record_drop(FilterDecision::RejectDedup, 0.78);
+        assert_eq!(s.dropped_artist, 2);
+        assert_eq!(s.dropped_dedup, 1);
+        assert_eq!(s.total_dropped(), 3);
+        assert_eq!(s.dropped_sims, vec![0.85, 0.80, 0.78]);
+        assert_eq!(s.dropped_max(), Some(0.85));
+    }
+
+    #[test]
+    fn record_drop_accept_variant_is_a_noop() {
+        // Defensive: if a caller ever forwards an Accept here, it
+        // shouldn't mutate counters. The apply loop already handles
+        // Accept separately, but the contract should hold.
+        let mut s = FilterStats::default();
+        s.record_drop(FilterDecision::Accept, 0.5);
+        assert_eq!(s.total_dropped(), 0);
+        assert!(s.dropped_sims.is_empty());
+    }
+
+    #[test]
+    fn sim_gap_is_dropped_max_minus_admitted_min() {
+        let mut s = FilterStats::default();
+        s.record_admit(0.7);
+        s.record_admit(0.8);
+        s.record_drop(FilterDecision::RejectArtistCap, 0.85);
+        s.record_drop(FilterDecision::RejectArtistCap, 0.82);
+        // best dropped (0.85) - worst admitted (0.7) = 0.15
+        let gap = s.sim_gap().expect("gap defined");
+        assert!(
+            (gap - 0.15_f32).abs() < 1e-6,
+            "expected ~0.15, got {gap}"
+        );
+    }
+
+    #[test]
+    fn sim_gap_is_none_when_either_side_is_empty() {
+        // Admits but no drops → no gap.
+        let mut a = FilterStats::default();
+        a.record_admit(0.7);
+        assert!(a.sim_gap().is_none());
+
+        // Drops but no admits → no gap (the "filter starved the slate"
+        // case the user is investigating).
+        let mut b = FilterStats::default();
+        b.record_drop(FilterDecision::RejectArtistCap, 0.85);
+        assert!(b.sim_gap().is_none());
     }
 }
