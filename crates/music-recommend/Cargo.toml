@@ -20,6 +20,7 @@ reqwest = { workspace = true }
 url = { workspace = true }
 bytes = { workspace = true }
 usearch = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }

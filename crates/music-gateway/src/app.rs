@@ -37,6 +37,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sync/ops", post(sync_handlers::submit_op))
         .route("/v1/sync", get(crate::sync::ws::ws_handler))
         .route("/v1/recommend/next", get(recommend::next))
+        .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
+        .route("/v1/recommend/from-any", post(recommend::from_any))
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
         .route("/v1/events", post(events::submit))
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))

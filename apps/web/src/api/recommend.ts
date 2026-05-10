@@ -1,9 +1,15 @@
 // Wrapper for the gateway's /v1/recommend/* endpoints.
 //
-// Auth: piggybacks on the Subsonic apiFetch helper in client.ts, which adds
-// the Bearer token and handles 401 → refresh → retry. The recommender
-// endpoints are *not* Subsonic-shaped (no envelope), so we do raw JSON
-// parsing here rather than going through getSubsonic.
+// Auth: piggybacks on the same Bearer-with-refresh dance the rest of
+// the API client uses. The recommender endpoints are *not* Subsonic-
+// shaped (no envelope), so we parse raw JSON here rather than going
+// through getSubsonic.
+//
+// Aggregation across seeds (Σ-similarity), random sampling, and the
+// first-indexed-wins fallback all live server-side now (gateway
+// `/v1/recommend/from-seeds` and `/v1/recommend/from-any`). This module
+// is a thin transport layer plus client-side `getSong` hydration so
+// callers receive full Track shapes, not just track ids.
 
 import { refreshTokens } from "../auth/oauth";
 import { clearTokens, readTokens } from "../auth/tokens";
@@ -12,11 +18,17 @@ import type { Track } from "./types";
 
 class AuthError extends Error {}
 
-async function apiFetch(path: string): Promise<Response> {
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const tokens = readTokens();
   if (!tokens) throw new AuthError("not signed in");
   const doFetch = (token: string) =>
-    fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+    fetch(path, {
+      ...init,
+      headers: {
+        ...(init?.headers ?? {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
   let res = await doFetch(tokens.accessToken);
   if (res.status === 401) {
@@ -35,6 +47,14 @@ async function apiFetch(path: string): Promise<Response> {
     }
   }
   return res;
+}
+
+async function postJson(path: string, body: unknown): Promise<Response> {
+  return apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export interface RecommendItem {
@@ -70,49 +90,56 @@ export async function fetchRecommendations(
   return (await res.json()) as RecommendResponse;
 }
 
-/** End-to-end "start station" helper: fetch top-N recommendations for `seed`,
- *  then hydrate each result to a full Track via Subsonic getSong so the
- *  player UI has artist/album/duration to display.
- *
- *  Failures on individual song lookups are tolerated — a track that can't be
- *  resolved is dropped from the station rather than aborting the whole flow. */
-export async function startStation(seed: string, n = 20): Promise<Track[]> {
-  const rec = await fetchRecommendations(seed, n);
-  // Parallel fetch — with HTTP/2 multiplexing the gateway and Navidrome
-  // handle this without trouble at N≤20.
-  const tracks = await Promise.all(
-    rec.results.map((r) => getSong(r.track_id).catch(() => null))
-  );
+/** Hydrate a list of track ids to full Track shapes via Subsonic
+ *  getSong. Failures on individual lookups are tolerated — a track
+ *  that can't be resolved is dropped rather than aborting the flow.
+ *  Parallel: HTTP/2 multiplexing handles N≤20 without trouble. */
+async function hydrateTracks(ids: readonly string[]): Promise<Track[]> {
+  const tracks = await Promise.all(ids.map((id) => getSong(id).catch(() => null)));
   return tracks.filter((t): t is Track => t !== null);
 }
 
-/** Try `startStation` against each candidate seed in order, falling through
- *  SeedNotEmbeddedError until one succeeds. Useful when the caller has
- *  several plausible seeds (an album's tracks, say) and only needs *one* to
- *  be indexed for the station to be meaningful.
+/** End-to-end "start station" helper for a single seed: fetch top-N
+ *  recommendations, then hydrate to full Track via Subsonic getSong. */
+export async function startStation(seed: string, n = 20): Promise<Track[]> {
+  const rec = await fetchRecommendations(seed, n);
+  return hydrateTracks(rec.results.map((r) => r.track_id));
+}
+
+interface FromAnyResponse {
+  seed_used: string;
+  model_version: string | null;
+  degraded: boolean;
+  results: RecommendItem[];
+}
+
+/** Try `candidates` in order, returning the first that has an ANN
+ *  entry plus its top-N similar tracks. The seed-by-seed fallthrough
+ *  runs server-side now: one POST instead of one GET-per-candidate.
  *
- *  Throws SeedNotEmbeddedError on the *last* seed if every candidate is
- *  unindexed. Other errors short-circuit immediately — they likely indicate
- *  a backend problem rather than a missing-embedding case. */
+ *  Throws SeedNotEmbeddedError on the *last* candidate if none are
+ *  indexed (mirrors the previous client-side semantics so callers
+ *  don't need to change). */
 export async function startStationFromAny(
   candidates: readonly string[],
   n = 20
 ): Promise<{ seed: string; tracks: Track[] }> {
   if (candidates.length === 0) throw new Error("no candidate seeds");
-  let lastNotEmbedded: SeedNotEmbeddedError | null = null;
-  for (const seed of candidates) {
-    try {
-      const tracks = await startStation(seed, n);
-      return { seed, tracks };
-    } catch (e) {
-      if (e instanceof SeedNotEmbeddedError) {
-        lastNotEmbedded = e;
-        continue;
-      }
-      throw e;
-    }
+
+  const res = await postJson("/v1/recommend/from-any", {
+    candidate_seeds: [...candidates],
+    n,
+  });
+  if (res.status === 404) {
+    // Mirror the old behavior: throw with the last seed as the
+    // "blamed" id so existing UI copy (\"$id isn't indexed yet\") still
+    // makes sense to the user.
+    throw new SeedNotEmbeddedError(candidates[candidates.length - 1]!);
   }
-  throw lastNotEmbedded ?? new Error("no candidate seed produced a station");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = (await res.json()) as FromAnyResponse;
+  const tracks = await hydrateTracks(body.results.map((r) => r.track_id));
+  return { seed: body.seed_used, tracks };
 }
 
 export interface PlaylistSuggestionResult {
@@ -124,101 +151,53 @@ export interface PlaylistSuggestionResult {
   allSeedsUnindexed: boolean;
 }
 
+interface FromSeedsResponse {
+  model_version: string | null;
+  degraded: boolean;
+  results: RecommendItem[];
+  all_seeds_unindexed: boolean;
+}
+
 /** Pick suggestions for an existing playlist by aggregating per-seed
- *  recommendations across a sample of the playlist's tracks. We can't
- *  hand the gateway a multi-seed query (no such endpoint), so we
- *  fan out N single-seed queries client-side and combine.
+ *  recommendations on the gateway. Σ-similarity scoring + random
+ *  sampling + exclusion of the playlist's own tracks all happen
+ *  server-side; here we just translate options to the request body
+ *  and hydrate the result.
  *
- *  Aggregation: each candidate's score = Σ similarity across seeds that
- *  surfaced it. Tracks that appear under multiple seeds rank higher
- *  than tracks that appear under just one — a cheap centroid proxy.
+ *  Defaults match the previous client-side behavior:
+ *  perSeedN=20, sampleSize=8, topN=20.
  *
- *  Sampling: random sample of `sampleSize` seeds (default 8). Random
- *  rather than first-N so we cover the playlist's full vibe instead of
- *  whatever was added earliest.
- *
- *  Exclusions: candidates already in the playlist are filtered out. The
- *  `excludeIds` parameter lets callers also drop tracks they've just
- *  added or dismissed without refetching. */
+ *  Note: the gateway always excludes the seed set automatically, so
+ *  passing the playlist's tracks in `excludeIds` is unnecessary —
+ *  but harmless. The parameter still accepts caller-supplied
+ *  exclusions for "I just dismissed this" tracks the gateway can't
+ *  know about. */
 export async function suggestForPlaylist(
   playlistTrackIds: readonly string[],
   opts: {
-    /** Per-seed candidate count. Default 20 — same as the station call. */
     perSeedN?: number;
-    /** Max seeds to sample. Default 8. */
     sampleSize?: number;
-    /** Final result cap. Default 20. */
     topN?: number;
-    /** Extra IDs to exclude from suggestions (e.g. the playlist's own
-     *  tracks are added automatically; pass any further "I just added
-     *  this" or "dismissed" IDs here). */
     excludeIds?: readonly string[];
   } = {}
 ): Promise<PlaylistSuggestionResult> {
-  const perSeedN = opts.perSeedN ?? 20;
-  const sampleSize = opts.sampleSize ?? 8;
-  const topN = opts.topN ?? 20;
-
   if (playlistTrackIds.length === 0) {
     return { tracks: [], allSeedsUnindexed: false };
   }
 
-  const seeds = sampleN(playlistTrackIds, sampleSize);
-
-  // Fan out per-seed queries. Promise.allSettled lets us tolerate
-  // per-seed failures — typical case is a few unindexed tracks among
-  // mostly-indexed ones, and we want to use whatever we got rather
-  // than abort.
-  const settled = await Promise.allSettled(
-    seeds.map((s) => fetchRecommendations(s, perSeedN))
-  );
-
-  let unindexedCount = 0;
-  const scores = new Map<string, number>();
-  for (const r of settled) {
-    if (r.status === "rejected") {
-      if (r.reason instanceof SeedNotEmbeddedError) unindexedCount++;
-      continue;
-    }
-    for (const item of r.value.results) {
-      scores.set(item.track_id, (scores.get(item.track_id) ?? 0) + item.similarity);
-    }
-  }
-
-  const allSeedsUnindexed = unindexedCount === seeds.length;
-
-  // Drop any candidate already in the playlist or in the caller's
-  // exclude list. Use a Set of strings for O(1) lookup; the playlist
-  // can be large.
-  const exclude = new Set<string>(playlistTrackIds);
-  for (const id of opts.excludeIds ?? []) exclude.add(id);
-
-  const ranked = Array.from(scores.entries())
-    .filter(([id]) => !exclude.has(id))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([id]) => id);
-
-  // Hydrate to full Track shape so the UI can show artist/album/cover.
-  // Drop lookup failures silently — same policy as startStation.
-  const tracks = await Promise.all(
-    ranked.map((id) => getSong(id).catch(() => null))
-  );
-  return {
-    tracks: tracks.filter((t): t is Track => t !== null),
-    allSeedsUnindexed,
+  const body: Record<string, unknown> = {
+    seeds: [...playlistTrackIds],
   };
-}
-
-// Knuth shuffle, truncated to k. Avoids the "sort by random key" trick,
-// which is biased on V8 for some array sizes — and we don't care about
-// sorting the rest of the array, so partial shuffle is faster anyway.
-function sampleN<T>(arr: readonly T[], k: number): T[] {
-  if (arr.length <= k) return [...arr];
-  const copy = [...arr];
-  for (let i = 0; i < k; i++) {
-    const j = i + Math.floor(Math.random() * (copy.length - i));
-    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
+  if (opts.perSeedN !== undefined) body.per_seed_n = opts.perSeedN;
+  if (opts.sampleSize !== undefined) body.sample_size = opts.sampleSize;
+  if (opts.topN !== undefined) body.top_n = opts.topN;
+  if (opts.excludeIds && opts.excludeIds.length > 0) {
+    body.exclude_track_ids = [...opts.excludeIds];
   }
-  return copy.slice(0, k);
+
+  const res = await postJson("/v1/recommend/from-seeds", body);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const parsed = (await res.json()) as FromSeedsResponse;
+  const tracks = await hydrateTracks(parsed.results.map((r) => r.track_id));
+  return { tracks, allSeedsUnindexed: parsed.all_seeds_unindexed };
 }

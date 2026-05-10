@@ -10,6 +10,7 @@
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod aggregate;
 pub mod ann;
 pub mod embedder;
 pub mod events;
