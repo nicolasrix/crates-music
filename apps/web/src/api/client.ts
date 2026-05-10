@@ -293,11 +293,19 @@ export function streamUrl(trackId: string): string {
   return `/rest/stream?id=${encodeURIComponent(trackId)}${auth}`;
 }
 
-export function coverArtUrl(coverArt: string | undefined, size = 300): string | null {
+export function coverArtUrl(
+  coverArt: string | undefined,
+  size = 300,
+  seed?: string,
+): string | null {
   if (!coverArt) return null;
   const tokens = readTokens();
   const auth = tokens ? `&access_token=${encodeURIComponent(tokens.accessToken)}` : "";
-  return `/rest/getCoverArt?id=${encodeURIComponent(coverArt)}&size=${size}${auth}`;
+  // `seed` is a gateway-only hint that drives the placeholder initial when
+  // Navidrome returns its built-in default image. Stripped before forwarding
+  // upstream — see STRIPPED_PARAM_KEYS in crates/music-gateway/src/proxy.rs.
+  const seedQ = seed ? `&seed=${encodeURIComponent(seed)}` : "";
+  return `/rest/getCoverArt?id=${encodeURIComponent(coverArt)}&size=${size}${auth}${seedQ}`;
 }
 
 export { AuthError };

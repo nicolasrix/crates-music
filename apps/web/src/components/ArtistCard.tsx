@@ -1,13 +1,17 @@
 import { Artist } from "../api/types";
-import { coverArtUrl } from "../api/client";
+import { Cover } from "./Cover";
 import { Link } from "../router";
 
 export function ArtistCard({ artist }: { artist: Artist }) {
-  const cover = coverArtUrl(artist.coverArt, 400);
   return (
     <Link to={`/artists/${artist.id}`} className="tile">
-      <div className={`tile-cover is-circle ${cover ? "" : "is-placeholder"}`}>
-        {cover && <img src={cover} alt={artist.name} loading="lazy" />}
+      <div className="tile-cover is-circle">
+        <Cover
+          coverArt={artist.coverArt}
+          seed={artist.name}
+          size={400}
+          alt={artist.name}
+        />
       </div>
       <div className="tile-title">{artist.name}</div>
       {artist.albumCount != null && (

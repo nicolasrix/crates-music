@@ -16,6 +16,7 @@
 
 import { ChevronDown, ChevronUp, Play, Trash2, X } from "lucide-react";
 import { coverArtUrl } from "../api/client";
+import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
 import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link } from "../router";
@@ -137,8 +138,7 @@ export function Queue() {
 // background on the card itself, so we can blur + dim it independently
 // of the foreground text.
 function NowPlayingCard({ track }: { track: Track }) {
-  const cover = coverArtUrl(track.coverArt, 600);
-  const thumb = coverArtUrl(track.coverArt, 200);
+  const cover = coverArtUrl(track.coverArt, 600, track.album ?? track.title);
   return (
     <div className="now-playing-card">
       {cover && (
@@ -150,11 +150,12 @@ function NowPlayingCard({ track }: { track: Track }) {
       )}
       <div className="now-playing-body">
         <div className="now-playing-cover">
-          {thumb ? (
-            <img src={thumb} alt="" />
-          ) : (
-            <div className="now-playing-cover-fallback" aria-hidden />
-          )}
+          <Cover
+            coverArt={track.coverArt}
+            seed={track.album ?? track.title}
+            size={200}
+            alt=""
+          />
         </div>
         <div className="now-playing-meta">
           <div className="now-playing-kind">now playing</div>

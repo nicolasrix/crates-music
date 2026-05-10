@@ -7,7 +7,7 @@
 
 import { Play } from "lucide-react";
 import { Track } from "../api/types";
-import { coverArtUrl } from "../api/client";
+import { Cover } from "./Cover";
 import { Link } from "../router";
 import { fmtDuration } from "../utils/format";
 
@@ -17,16 +17,20 @@ interface Props {
 }
 
 export function TrackHeroCard({ track, onPlay }: Props) {
-  const cover = coverArtUrl(track.coverArt, 200);
   return (
     <div className="search-hero">
       <button
         type="button"
-        className={`search-hero-cover ${cover ? "" : "is-placeholder"}`}
+        className="search-hero-cover"
         onClick={onPlay}
         aria-label={`play ${track.title}`}
       >
-        {cover && <img src={cover} alt={track.title} loading="lazy" />}
+        <Cover
+          coverArt={track.coverArt}
+          seed={track.title}
+          size={200}
+          alt={track.title}
+        />
         <span className="search-hero-play" aria-hidden>
           <Play size={20} fill="currentColor" strokeWidth={0} />
         </span>

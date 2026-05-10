@@ -149,7 +149,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (typeof navigator === "undefined" || !navigator.mediaSession) return;
     const ms = navigator.mediaSession;
     if (nowPlaying) {
-      const artUrl = nowPlaying.coverArt ? coverArtUrl(nowPlaying.coverArt, 512) : null;
+      const artUrl = nowPlaying.coverArt
+        ? coverArtUrl(nowPlaying.coverArt, 512, nowPlaying.album ?? nowPlaying.title)
+        : null;
       ms.metadata = new MediaMetadata({
         title: nowPlaying.title,
         artist: nowPlaying.artist ?? "",

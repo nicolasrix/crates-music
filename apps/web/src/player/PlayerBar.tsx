@@ -13,8 +13,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { coverArtUrl } from "../api/client";
 import { useArtwork } from "../components/ArtworkPalette";
+import { Cover } from "../components/Cover";
 import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
@@ -43,14 +43,18 @@ export function PlayerBar() {
     );
   }
 
-  const cover = nowPlaying.coverArt ? coverArtUrl(nowPlaying.coverArt, 100) : null;
   const artAccent = palette?.accent ?? "var(--accent)";
 
   return (
     <div className="player" style={{ ["--art-accent" as never]: artAccent }}>
       <div className="np">
         <div className="cover">
-          {cover && <img src={cover} alt="" />}
+          <Cover
+            coverArt={nowPlaying.coverArt}
+            seed={nowPlaying.album ?? nowPlaying.title}
+            size={100}
+            alt=""
+          />
         </div>
         <div className="meta">
           <div className="title">{nowPlaying.title}</div>

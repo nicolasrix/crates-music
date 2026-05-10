@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Play } from "lucide-react";
 import { coverArtUrl, getArtist } from "../api/client";
 import { AlbumCard } from "../components/AlbumCard";
+import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 
@@ -14,7 +15,7 @@ export function Artist({ id }: { id: string }) {
     queryKey: ["artist", id],
     queryFn: () => getArtist(id),
   });
-  const cover = coverArtUrl(q.data?.artist.coverArt, 600);
+  const cover = coverArtUrl(q.data?.artist.coverArt, 600, q.data?.artist.name);
   const palette = useCoverPalette(cover);
 
   if (q.isLoading) {
@@ -44,8 +45,14 @@ export function Artist({ id }: { id: string }) {
     <Layout breadcrumb={`artists · ${artist.name}`} palette={palette}>
       <div className="tinted-wash" />
       <div className="hero">
-        <div className={`cover-lg is-circle ${cover ? "" : ""}`}>
-          {cover && <img src={cover} alt={artist.name} />}
+        <div className="cover-lg is-circle">
+          <Cover
+            coverArt={artist.coverArt}
+            seed={artist.name}
+            size={600}
+            alt={artist.name}
+            loading="eager"
+          />
         </div>
         <div className="meta-stack">
           <div className="kind">artist</div>

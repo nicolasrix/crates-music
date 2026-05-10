@@ -5,7 +5,9 @@
 //! L2 cache, and OAuth state DB live here so connection pooling and the SQLite
 //! pools are per-process, not per-request.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use music_cache::Cache;
 use music_recommend::EventStore;
@@ -46,6 +48,21 @@ struct Inner {
     /// `main.rs` is the sole writer. Cloning is cheap (wraps a sqlx
     /// pool).
     trace_store: TraceStore,
+    /// Etags of upstream cover-art bodies that have been observed for
+    /// two or more distinct cover-art ids — i.e. Navidrome's default
+    /// "no artwork" placeholder. Lookups on cover-art fetches skip the
+    /// SQL duplicate-check once an etag is in here. Not persisted —
+    /// rebuilt naturally on restart after the first two duplicate
+    /// fetches.
+    placeholder_etags: RwLock<HashSet<String>>,
+    /// Per-cache-key timestamp of the last placeholder revalidation
+    /// attempt. When a request hits the cache and finds a placeholder
+    /// (our SVG, or a Navidrome default discovered post-hoc), a
+    /// background task fetches upstream to see if real art is now
+    /// available; this map gates that task so a burst of cache hits
+    /// (e.g. 60 covers on a page reload) coalesces into a single
+    /// upstream fetch per key per cooldown window.
+    placeholder_revalidations: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -81,6 +98,8 @@ impl AppState {
                 ann,
                 recommend_model_version,
                 trace_store,
+                placeholder_etags: RwLock::new(HashSet::new()),
+                placeholder_revalidations: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -135,5 +154,13 @@ impl AppState {
 
     pub fn trace_store(&self) -> &TraceStore {
         &self.inner.trace_store
+    }
+
+    pub fn placeholder_etags(&self) -> &RwLock<HashSet<String>> {
+        &self.inner.placeholder_etags
+    }
+
+    pub fn placeholder_revalidations(&self) -> &Mutex<HashMap<String, Instant>> {
+        &self.inner.placeholder_revalidations
     }
 }

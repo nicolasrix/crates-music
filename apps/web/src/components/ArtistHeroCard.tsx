@@ -5,17 +5,19 @@
 // artist detail page itself).
 
 import { Artist } from "../api/types";
-import { coverArtUrl } from "../api/client";
+import { Cover } from "./Cover";
 import { Link } from "../router";
 
 export function ArtistHeroCard({ artist }: { artist: Artist }) {
-  const cover = coverArtUrl(artist.coverArt, 200);
   return (
     <Link to={`/artists/${artist.id}`} className="search-hero">
-      <div
-        className={`search-hero-cover is-circle ${cover ? "" : "is-placeholder"}`}
-      >
-        {cover && <img src={cover} alt={artist.name} loading="lazy" />}
+      <div className="search-hero-cover is-circle">
+        <Cover
+          coverArt={artist.coverArt}
+          seed={artist.name}
+          size={200}
+          alt={artist.name}
+        />
       </div>
       <div className="search-hero-meta">
         <div className="search-hero-title">{artist.name}</div>

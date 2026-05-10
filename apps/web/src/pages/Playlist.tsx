@@ -13,6 +13,7 @@ import {
   renamePlaylist,
 } from "../api/client";
 import { suggestForPlaylist } from "../api/recommend";
+import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
@@ -30,7 +31,9 @@ export function Playlist({ id }: { id: string }) {
   // the playlist itself often lacks dedicated artwork.
   const seedCover =
     q.data?.tracks.find((t) => t.coverArt)?.coverArt ?? q.data?.playlist.coverArt;
-  const palette = useCoverPalette(coverArtUrl(seedCover, 600));
+  const palette = useCoverPalette(
+    coverArtUrl(seedCover, 600, q.data?.playlist.name),
+  );
   const { playSingle, playList } = usePlayback();
   const queryClient = useQueryClient();
 
@@ -316,7 +319,6 @@ function SuggestionRow({
   onAdd: () => void;
   onPlay: () => void;
 }) {
-  const cover = coverArtUrl(track.coverArt, 80);
   return (
     <li className="suggestion-row">
       <button
@@ -325,7 +327,12 @@ function SuggestionRow({
         onClick={onPlay}
         aria-label={`play ${track.title}`}
       >
-        {cover ? <img src={cover} alt="" loading="lazy" /> : null}
+        <Cover
+          coverArt={track.coverArt}
+          seed={track.album ?? track.title}
+          size={80}
+          alt=""
+        />
         <span className="suggestion-cover-play" aria-hidden>
           <Play size={16} fill="currentColor" strokeWidth={0} />
         </span>
@@ -363,7 +370,7 @@ function pickQuiltCovers(tracks: Track[]): string[] {
   const out: string[] = [];
   for (const t of tracks) {
     if (!t.coverArt) continue;
-    const url = coverArtUrl(t.coverArt, 300);
+    const url = coverArtUrl(t.coverArt, 300, t.album ?? t.title);
     if (!url || seen.has(url)) continue;
     seen.add(url);
     out.push(url);

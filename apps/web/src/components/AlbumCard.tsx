@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { Album } from "../api/types";
-import { coverArtUrl } from "../api/client";
+import { Cover } from "./Cover";
 import { Link, navigate } from "../router";
 
 export function AlbumCard({
@@ -12,18 +12,15 @@ export function AlbumCard({
    *  instead of navigating to the album page. */
   onPlay?: () => void;
 }) {
-  const cover = coverArtUrl(album.coverArt, 400);
-
   return (
     <Link to={`/albums/${album.id}`} className="tile">
       <div className="tile-cover">
-        {cover ? (
-          <img src={cover} alt={album.name} loading="lazy" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-fg-faint text-xs">
-            no cover
-          </div>
-        )}
+        <Cover
+          coverArt={album.coverArt}
+          seed={album.name}
+          size={400}
+          alt={album.name}
+        />
         <button
           className="tile-play"
           aria-label={`play ${album.name}`}

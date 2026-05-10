@@ -6,20 +6,24 @@
 // HTML — the inner artist link wouldn't be reachable.
 
 import { Album } from "../api/types";
-import { coverArtUrl } from "../api/client";
+import { Cover } from "./Cover";
 import { Link } from "../router";
 
 export function AlbumHeroCard({ album }: { album: Album }) {
-  const cover = coverArtUrl(album.coverArt, 200);
   const albumHref = `/albums/${album.id}`;
   return (
     <div className="search-hero">
       <Link
         to={albumHref}
-        className={`search-hero-cover ${cover ? "" : "is-placeholder"}`}
+        className="search-hero-cover"
         aria-label={album.name}
       >
-        {cover && <img src={cover} alt={album.name} loading="lazy" />}
+        <Cover
+          coverArt={album.coverArt}
+          seed={album.name}
+          size={200}
+          alt={album.name}
+        />
       </Link>
       <div className="search-hero-meta">
         <Link to={albumHref} className="search-hero-title">

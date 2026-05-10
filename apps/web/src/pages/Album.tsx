@@ -8,6 +8,7 @@ import { Plus, MoreHorizontal, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { coverArtUrl, getAlbum } from "../api/client";
 import { SeedNotEmbeddedError, startStationFromAny } from "../api/recommend";
+import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
@@ -21,7 +22,7 @@ export function Album({ id }: { id: string }) {
     queryKey: ["album", id],
     queryFn: () => getAlbum(id),
   });
-  const cover = coverArtUrl(q.data?.album.coverArt, 600);
+  const cover = coverArtUrl(q.data?.album.coverArt, 600, q.data?.album.name);
   const palette = useCoverPalette(cover);
   const { playSingle, playList } = usePlayback();
 
@@ -92,7 +93,13 @@ export function Album({ id }: { id: string }) {
       <div className="tinted-wash" />
       <div className="hero">
         <div className="cover-lg">
-          {cover && <img src={cover} alt={album.name} />}
+          <Cover
+            coverArt={album.coverArt}
+            seed={album.name}
+            size={600}
+            alt={album.name}
+            loading="eager"
+          />
         </div>
         <div className="meta-stack">
           <div className="kind">album</div>
