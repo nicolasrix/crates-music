@@ -632,6 +632,15 @@ body {
   gap: var(--space-1);
   min-width: 0;
 }
+/* Same reasoning as `.np .row-menu-trigger`: the now-playing card is
+   persistent chrome, not a hover surface, so the default fade-on-hover
+   leaves the affordance invisible. The trigger sits adjacent to the
+   meta block (one body-gap of separation) rather than being pushed to
+   the card's right edge — closer to the song it acts on. */
+.now-playing-body > .row-menu-trigger {
+  opacity: 1;
+  flex-shrink: 0;
+}
 .now-playing-kind {
   font-size: var(--text-xs);
   text-transform: uppercase;
@@ -656,6 +665,7 @@ body {
 }
 .now-playing-sub .sub-link:hover {
   color: var(--fg);
+  text-decoration: underline;
 }
 .tracks tbody tr:hover .col-num .num-text { display: none; }
 .tracks tbody tr:hover .col-num .num-play { display: inline-flex; }
@@ -747,6 +757,11 @@ body {
   text-decoration: underline;
 }
 .np .sub .sep { color: var(--fg-faint); }
+/* Always show the player's row-menu trigger — the player is persistent
+   chrome, not a hover surface, so the default "fade in on row hover"
+   pattern leaves the affordance invisible. Same reasoning as the
+   queue-row-actions override. */
+.np .row-menu-trigger { opacity: 1; flex-shrink: 0; }
 .transport-col {
   display: flex;
   flex-direction: column;
@@ -811,32 +826,6 @@ body {
   gap: var(--space-2);
   justify-content: flex-end;
 }
-.autoplay-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: var(--radius-1);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  user-select: none;
-  background: var(--surface-2);
-  color: var(--fg-muted);
-  border: 0;
-  transition: background var(--dur-1) var(--ease-out-soft), color var(--dur-1) var(--ease-out-soft);
-}
-.autoplay-toggle.is-on {
-  background: color-mix(in oklab, var(--accent) 14%, transparent);
-  color: var(--accent);
-}
-.autoplay-toggle .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: currentColor;
-}
-
 /* Player-bar scrubber — reads --art-accent on the wrapper.
  *
  * flex:1 makes the bar fill the middle column of .scrub (between the two

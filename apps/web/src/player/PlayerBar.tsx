@@ -15,6 +15,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { coverArtUrl } from "../api/client";
 import { useArtwork } from "../components/ArtworkPalette";
+import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
 import { useAutoplay } from "./AutoplayContext";
@@ -71,6 +72,11 @@ export function PlayerBar() {
             )}
           </div>
         </div>
+        {/* Same shape as the queue rows — the now-playing track is by
+            definition already in the queue, so "play next" / "add to
+            queue" are hidden. What remains: add to playlist, go to
+            album, go to artist. */}
+        <TrackRowMenu track={nowPlaying} showQueueActions={false} />
       </div>
 
       <div className="transport-col">
@@ -135,14 +141,6 @@ export function PlayerBar() {
           <ListMusic size={18} strokeWidth={1.5} />
           {queueLength > 0 && <span className="queue-count tabular">{queueLength}</span>}
         </Link>
-        <button
-          className={`autoplay-toggle ${autoplay ? "is-on" : ""}`}
-          onClick={() => setAutoplay(!autoplay)}
-          aria-pressed={autoplay}
-        >
-          <span className="dot" />
-          autoplay {autoplay ? "on" : "off"}
-        </button>
       </div>
     </div>
   );

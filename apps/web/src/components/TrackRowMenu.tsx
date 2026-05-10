@@ -18,6 +18,7 @@ import {
   User,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   addTrackToPlaylist,
   createPlaylist,
@@ -27,12 +28,28 @@ import { navigate } from "../router";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 
-export function TrackRowMenu({ track }: { track: Track }) {
+/**
+ * @param showQueueActions  Whether to render "play next" / "add to queue".
+ *   Default `true`. Set to `false` for rows whose track is *already* in
+ *   the queue (the Queue page) — those actions don't make sense there.
+ */
+export function TrackRowMenu({
+  track,
+  showQueueActions = true,
+}: {
+  track: Track;
+  showQueueActions?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"root" | "playlists">("root");
-  const [coords, setCoords] = useState<{ top: number; left: number } | null>(
-    null
-  );
+  // Coords are either top-anchored (menu grows downward from a top edge) or
+  // bottom-anchored (menu grows upward from a bottom edge). Bottom-anchoring
+  // is used when the menu has to flip above the trigger — it lets us avoid
+  // predicting the menu's height, which varies with the number of entries.
+  type Coords =
+    | { left: number; top: number }
+    | { left: number; bottom: number };
+  const [coords, setCoords] = useState<Coords | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   function openAt() {
@@ -40,18 +57,23 @@ export function TrackRowMenu({ track }: { track: Track }) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
     // Anchor right edge of menu to the trigger; render below by default.
-    // If we'd run off the bottom, flip above.
+    // If we'd run off the bottom, flip above and anchor by `bottom` so we
+    // don't need to know the menu's actual height (it varies with the
+    // number of entries — 3 items in the player vs ~6 in a track table —
+    // and a single `MENU_H_GUESS` over-predicts in the small case,
+    // leaving a visible gap above the trigger).
     const MENU_W = 220;
     const MENU_H_GUESS = 220;
-    let top = rect.bottom + 4;
-    if (top + MENU_H_GUESS > window.innerHeight) {
-      top = Math.max(8, rect.top - MENU_H_GUESS - 4);
-    }
     const left = Math.min(
       window.innerWidth - MENU_W - 8,
       Math.max(8, rect.right - MENU_W)
     );
-    setCoords({ top, left });
+    const wouldOverflowBelow =
+      rect.bottom + 4 + MENU_H_GUESS > window.innerHeight;
+    const next: Coords = wouldOverflowBelow
+      ? { left, bottom: Math.max(8, window.innerHeight - rect.top + 4) }
+      : { left, top: rect.bottom + 4 };
+    setCoords(next);
     setView("root");
     setOpen(true);
   }
@@ -79,11 +101,16 @@ export function TrackRowMenu({ track }: { track: Track }) {
           view={view}
           setView={setView}
           track={track}
+          showQueueActions={showQueueActions}
         />
       )}
     </>
   );
 }
+
+type PopoverCoords =
+  | { left: number; top: number }
+  | { left: number; bottom: number };
 
 function Popover({
   coords,
@@ -91,12 +118,14 @@ function Popover({
   view,
   setView,
   track,
+  showQueueActions,
 }: {
-  coords: { top: number; left: number };
+  coords: PopoverCoords;
   onClose: () => void;
   view: "root" | "playlists";
   setView: (v: "root" | "playlists") => void;
   track: Track;
+  showQueueActions: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const sync = useSync();
@@ -184,23 +213,36 @@ function Popover({
     }
   }
 
-  return (
+  // Portal into <body>: any ancestor with `backdrop-filter`, `transform`,
+  // `filter`, `perspective`, `will-change`, or `contain` becomes the
+  // containing block for `position: fixed` descendants — overriding the
+  // viewport. The PlayerBar uses `backdrop-filter: blur(20px)` and would
+  // otherwise re-anchor this popover off-screen. Portaling sidesteps the
+  // trap entirely and also flattens z-index across all consumers.
+  return createPortal(
     <div
       ref={ref}
       className="row-menu"
       role="menu"
-      style={{ top: coords.top, left: coords.left }}
+      style={{
+        left: coords.left,
+        ...("top" in coords ? { top: coords.top } : { bottom: coords.bottom }),
+      }}
     >
       {view === "root" && (
         <>
-          <button className="row-menu-item" onClick={playNext}>
-            <Plus size={14} strokeWidth={1.5} />
-            <span>play next</span>
-          </button>
-          <button className="row-menu-item" onClick={addToQueue}>
-            <Plus size={14} strokeWidth={1.5} />
-            <span>add to queue</span>
-          </button>
+          {showQueueActions && (
+            <>
+              <button className="row-menu-item" onClick={playNext}>
+                <Plus size={14} strokeWidth={1.5} />
+                <span>play next</span>
+              </button>
+              <button className="row-menu-item" onClick={addToQueue}>
+                <Plus size={14} strokeWidth={1.5} />
+                <span>add to queue</span>
+              </button>
+            </>
+          )}
           <button
             className="row-menu-item"
             onClick={() => setView("playlists")}
@@ -209,7 +251,9 @@ function Popover({
             <span>add to playlist…</span>
             <ChevronRight size={14} strokeWidth={1.5} className="ml-auto" />
           </button>
-          <div className="row-menu-sep" />
+          {(track.albumId || track.artistId) && (
+            <div className="row-menu-sep" />
+          )}
           {track.albumId && (
             <button
               className="row-menu-item"
@@ -245,7 +289,8 @@ function Popover({
           onBack={() => setView("root")}
         />
       )}
-    </div>
+    </div>,
+    document.body
   );
 }
 

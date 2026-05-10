@@ -17,6 +17,7 @@
 import { ChevronDown, ChevronUp, Play, Trash2, X } from "lucide-react";
 import { coverArtUrl } from "../api/client";
 import { Layout } from "../components/Layout";
+import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link } from "../router";
 import { useSync } from "../sync/SyncContext";
 import { fmtDuration } from "../utils/format";
@@ -181,6 +182,10 @@ function NowPlayingCard({ track }: { track: Track }) {
             )}
           </div>
         </div>
+        {/* Same shape as the player bar: this track is by definition
+            already in the queue, so the queue actions are hidden.
+            Remaining: add to playlist, go to album, go to artist. */}
+        <TrackRowMenu track={track} showQueueActions={false} />
       </div>
     </div>
   );
@@ -265,6 +270,12 @@ function QueueRow({
           >
             <X size={14} strokeWidth={1.5} />
           </button>
+          {/* The menu's queue actions ("play next", "add to queue") are
+              hidden — the track is already queued. What's left: add to
+              playlist, go to album, go to artist. Only renders when we
+              have track metadata in the local cache; without it, the
+              menu has nothing meaningful to act on. */}
+          {track && <TrackRowMenu track={track} showQueueActions={false} />}
         </div>
       </td>
     </tr>
