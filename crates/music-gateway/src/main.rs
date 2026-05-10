@@ -13,11 +13,14 @@ use clap::Parser;
 use music_cache::Cache;
 use music_gateway::diagnostics::{TraceLayer, TraceStore, spawn_drainer};
 use music_gateway::embedder::{EmbedderHandle, boot_probe};
-use music_gateway::ingest::{SubsonicAudioFetcher, spawn_ingest_worker};
+use music_gateway::ingest::{
+    SubsonicAudioFetcher, SubsonicMetadataFetcher, spawn_ingest_worker, spawn_metadata_backfill,
+};
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use music_recommend::ann::AnnIndex;
-use music_recommend::ingest::{AudioFetcher, rebuild_ann_from_store};
+use music_recommend::ingest::{AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store};
+use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use std::time::Duration;
@@ -55,6 +58,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // boot path; decomposing further would obscure the order of operations
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -146,12 +150,27 @@ async fn main() -> Result<()> {
         SubsonicAudioFetcher::new(&config.upstream)
             .context("building Subsonic ingest fetcher")?,
     );
+    let metadata_fetcher: Arc<dyn MetadataFetcher> = Arc::new(
+        SubsonicMetadataFetcher::new(&config.upstream)
+            .context("building Subsonic metadata fetcher")?,
+    );
+    let metadata_ingest = MetadataIngest {
+        store: recommend.metadata_store.clone(),
+        fetcher: Arc::clone(&metadata_fetcher),
+    };
     let _ingest_handles = spawn_ingest_worker(
         recommend.embedding_store.clone(),
         recommend.ann.clone(),
         embedder.client().cloned(),
         fetcher,
+        Some(metadata_ingest),
         &recommend.model_version,
+    );
+
+    let _backfill_handle = spawn_metadata_backfill(
+        recommend.metadata_store.clone(),
+        metadata_fetcher,
+        recommend.model_version.clone(),
     );
 
     let state = AppState::new(
@@ -178,6 +197,7 @@ async fn main() -> Result<()> {
 
 struct RecommenderState {
     embedding_store: EmbeddingStore,
+    metadata_store: MetadataStore,
     ann: Arc<AnnIndex>,
     model_version: ModelVersion,
 }
@@ -231,8 +251,16 @@ async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<
         }
     }
 
+    // Metadata store shares the same SQLite pool — they're sibling
+    // tables under the same migration set (0001 embeddings, 0002 events,
+    // 0003 track_metadata). One file, one pool, two stores.
+    let metadata_store = MetadataStore::new(embedding_store.pool().clone());
+    let metadata_count = metadata_store.count().await?;
+    tracing::info!(rows = metadata_count, "recommend: metadata cache loaded");
+
     Ok(RecommenderState {
         embedding_store,
+        metadata_store,
         ann: Arc::new(ann),
         model_version,
     })

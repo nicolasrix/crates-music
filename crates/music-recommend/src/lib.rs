@@ -15,11 +15,16 @@ pub mod ann;
 pub mod embedder;
 pub mod events;
 pub mod ingest;
+pub mod metadata;
 pub mod store;
 pub mod types;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
+pub use ingest::{MetadataFetcher, MetadataIngest};
+pub use metadata::{
+    BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
+};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
 

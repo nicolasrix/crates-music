@@ -29,6 +29,7 @@ use sqlx::Row;
 
 use crate::ann::{AnnError, AnnIndex};
 use crate::embedder::{EmbedderClient, EmbedderError};
+use crate::metadata::{MetadataStore, TrackMetadata};
 use crate::store::EmbeddingStore;
 use crate::types::{Embedding, EmbeddingKey, ModelVersion};
 
@@ -49,6 +50,29 @@ pub trait AudioFetcher: Send + Sync {
     /// container format to send (CLAP-side decoding is format-agnostic
     /// — soundfile + librosa).
     async fn fetch_clip(&self, track_id: &TrackId) -> Result<Bytes, FetchError>;
+}
+
+/// Side-channel: pull display metadata (artist, album, title, …) for a
+/// track from the upstream catalog. Decoupled from `AudioFetcher` so
+/// each trait implementor stays single-purpose; both can be backed by
+/// the same Subsonic client without coupling at the trait layer.
+#[async_trait]
+pub trait MetadataFetcher: Send + Sync {
+    async fn fetch_metadata(&self, track_id: &TrackId) -> Result<TrackMetadata, FetchError>;
+}
+
+/// Pair of (store, fetcher) the worker needs to populate metadata as
+/// a side-effect of ingest. Wrapped together so adding it to
+/// `IngestWorkerConfig` is one optional field rather than two.
+pub struct MetadataIngest {
+    pub store: MetadataStore,
+    pub fetcher: Arc<dyn MetadataFetcher>,
+}
+
+impl std::fmt::Debug for MetadataIngest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataIngest").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +109,16 @@ pub struct IngestWorkerConfig {
     pub embedder: EmbedderClient,
     pub fetcher: Arc<dyn AudioFetcher>,
     pub model_version: ModelVersion,
+    /// Optional metadata-cache hook. When `Some`, every successful
+    /// ingest also fetches + persists track metadata (artist, album,
+    /// title, …). `None` keeps the worker as a pure embedding pipeline,
+    /// which is what existing tests expect.
+    ///
+    /// Population happens *before* audio fetch, so that even tracks
+    /// whose audio fetch ultimately fails still leave a metadata row
+    /// for downstream rerank logic to use. Metadata-fetch failures are
+    /// logged and ignored — they never tank the embedding work.
+    pub metadata: Option<MetadataIngest>,
 }
 
 impl std::fmt::Debug for IngestWorkerConfig {
@@ -119,6 +153,33 @@ impl IngestWorker {
         let Some(key) = self.cfg.store.claim_next(&self.cfg.model_version).await? else {
             return Ok(IngestOutcome::Idle);
         };
+
+        // Best-effort metadata fetch. Runs before audio so that a
+        // metadata row exists even if the audio fetch later fails — the
+        // failure handler downstream still benefits from knowing the
+        // artist/title for retry-decision logging and surfaces from
+        // recommend handlers in degraded mode. Failures are logged and
+        // swallowed; metadata is not on the critical path.
+        if let Some(metadata) = &self.cfg.metadata {
+            match metadata.fetcher.fetch_metadata(&key.track_id).await {
+                Ok(m) => {
+                    if let Err(e) = metadata.store.upsert(&m).await {
+                        tracing::warn!(
+                            track = %key.track_id,
+                            error = %e,
+                            "metadata upsert failed; continuing"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        track = %key.track_id,
+                        error = %e,
+                        "metadata fetch failed; continuing without metadata row"
+                    );
+                }
+            }
+        }
 
         match self.embed_one(&key).await {
             Ok(vector) => {

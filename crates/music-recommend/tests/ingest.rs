@@ -118,6 +118,7 @@ async fn process_one_pending_track_succeeds() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     let outcome = worker.process_next().await.expect("worker step");
@@ -150,6 +151,7 @@ async fn process_next_returns_idle_when_queue_empty() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     let outcome = worker.process_next().await.expect("worker step");
@@ -180,6 +182,7 @@ async fn fetch_failure_marks_failed_and_continues() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     let outcome = worker.process_next().await.expect("worker step");
@@ -230,6 +233,7 @@ async fn embedder_503_marks_failed_and_is_retryable() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     // First step: embedder returns 503 → row marked failed.
@@ -277,6 +281,7 @@ async fn worker_skips_other_model_versions() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     let outcome = worker.process_next().await.unwrap();
@@ -313,6 +318,7 @@ async fn drains_until_idle() {
         embedder,
         fetcher,
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     let processed = worker.drain().await.expect("drain");
@@ -362,6 +368,7 @@ async fn concurrent_drainers_split_queue_without_double_processing() {
         embedder,
         fetcher,
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     }));
 
     let mut handles = Vec::with_capacity(WORKERS);
@@ -412,6 +419,7 @@ async fn rebuild_ann_from_store_repopulates_index() {
         embedder,
         fetcher: fetcher.clone(),
         model_version: ModelVersion::from("stub-v1"),
+        metadata: None,
     });
 
     for i in 0..3 {
