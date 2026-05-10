@@ -113,23 +113,54 @@ interface FromAnyResponse {
   results: RecommendItem[];
 }
 
+/** Queue snapshot the gateway uses for diversity filtering (artist
+ *  cap + cross-edition title dedup). Wire shape mirrors the server's
+ *  `QueueContext`. Optional knobs default to the server's own
+ *  defaults (`max_per_artist=2`, `dedup_titles=true`). */
+export interface QueueContext {
+  queueTrackIds: readonly string[];
+  nowPlayingTrackId?: string;
+  /** `0` disables the per-artist cap. */
+  maxPerArtist?: number;
+  /** `false` disables (artist, normalized-title) dedup. */
+  dedupTitles?: boolean;
+}
+
+function serializeQueueContext(qc: QueueContext): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    queue_track_ids: [...qc.queueTrackIds],
+  };
+  if (qc.nowPlayingTrackId) body.now_playing_track_id = qc.nowPlayingTrackId;
+  if (qc.maxPerArtist !== undefined) body.max_per_artist = qc.maxPerArtist;
+  if (qc.dedupTitles !== undefined) body.dedup_titles = qc.dedupTitles;
+  return body;
+}
+
 /** Try `candidates` in order, returning the first that has an ANN
  *  entry plus its top-N similar tracks. The seed-by-seed fallthrough
  *  runs server-side now: one POST instead of one GET-per-candidate.
+ *
+ *  When `queueContext` is supplied, the gateway applies an artist cap
+ *  + title dedup against the queue snapshot before returning, so the
+ *  caller can blindly enqueue the response without re-filtering.
  *
  *  Throws SeedNotEmbeddedError on the *last* candidate if none are
  *  indexed (mirrors the previous client-side semantics so callers
  *  don't need to change). */
 export async function startStationFromAny(
   candidates: readonly string[],
-  n = 20
+  n = 20,
+  queueContext?: QueueContext
 ): Promise<{ seed: string; tracks: Track[] }> {
   if (candidates.length === 0) throw new Error("no candidate seeds");
 
-  const res = await postJson("/v1/recommend/from-any", {
+  const body: Record<string, unknown> = {
     candidate_seeds: [...candidates],
     n,
-  });
+  };
+  if (queueContext) body.queue_context = serializeQueueContext(queueContext);
+
+  const res = await postJson("/v1/recommend/from-any", body);
   if (res.status === 404) {
     // Mirror the old behavior: throw with the last seed as the
     // "blamed" id so existing UI copy (\"$id isn't indexed yet\") still
@@ -137,9 +168,9 @@ export async function startStationFromAny(
     throw new SeedNotEmbeddedError(candidates[candidates.length - 1]!);
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = (await res.json()) as FromAnyResponse;
-  const tracks = await hydrateTracks(body.results.map((r) => r.track_id));
-  return { seed: body.seed_used, tracks };
+  const parsed = (await res.json()) as FromAnyResponse;
+  const tracks = await hydrateTracks(parsed.results.map((r) => r.track_id));
+  return { seed: parsed.seed_used, tracks };
 }
 
 export interface PlaylistSuggestionResult {

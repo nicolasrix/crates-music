@@ -1,7 +1,7 @@
 // AutoplayContext: owns the "autoplay" toggle and the queue-refill
 // effect. When autoplay is on, the effect tops up the upcoming queue
 // to MIN_UPCOMING tracks by pulling recommendations from the gateway's
-// /v1/recommend/next endpoint.
+// /v1/recommend/from-any endpoint.
 //
 // Why a separate context (rather than folding into PlayerContext):
 // autoplay is a recommendation-policy concern, not a playback concern,
@@ -11,6 +11,14 @@
 // Persistence: the flag is stored in localStorage so it survives
 // reloads. SSR is not in play (this is a Vite SPA) so the lazy
 // initializer reading localStorage on first render is safe.
+//
+// Diversity filtering (artist cap, cross-edition title dedup) used to
+// live here. It now runs server-side: every refill posts the current
+// queue snapshot as `queue_context` and the gateway returns results
+// that already honor the cap. We only retain a tiny exact-id dedup
+// against the local queue as a defense against WS-fanout lag (the
+// optimistic local push lands a beat before the snapshot reaches
+// other devices).
 
 import {
   createContext,
@@ -23,14 +31,11 @@ import {
 } from "react";
 import { startStationFromAny } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
-import type { Track } from "../api/types";
 
-// Threshold the queue refill targets. The gateway returns up to N
-// recommendations; we ask for more than we strictly need so dedup
-// against the existing queue, the artist cap, and occasional `getSong`
-// 404s don't leave us short.
+// Threshold the queue refill targets. The server applies the artist
+// cap + dedup, so we ask for exactly `need` candidates per refill
+// (the server's internal buffer factor handles cap rejects).
 const MIN_UPCOMING = 5;
-const FETCH_BUFFER = MIN_UPCOMING * 4;
 const STORAGE_KEY = "crates-music.autoplay";
 // Hold the in-flight lock for a beat after pushing so the gateway WS
 // round-trip can land before the effect re-evaluates. Without this the
@@ -42,35 +47,6 @@ const REFILL_COOLDOWN_MS = 1500;
 // queue), bumping the cooldown prevents a busy loop. The next natural
 // cursor advance will change the seed pool and unblock progress.
 const UNDERDELIVERY_COOLDOWN_MS = 30_000;
-// Cap on tracks per artist in the queue. Keeps autoplay from
-// converging on a single artist's catalog when the user has many
-// records by them (recommender naturally clusters on similar tracks,
-// which for a heavily-represented artist means more of the same).
-const MAX_PER_ARTIST = 2;
-
-function normalizeTitle(title: string): string {
-  // Lowercase + strip parentheticals/brackets ("(Album Version)",
-  // "[Remastered]", etc.). Catches single-vs-album dupes that share
-  // a base title and differ only in the version qualifier.
-  return title
-    .toLowerCase()
-    .replace(/\s*[(\[][^)\]]*[)\]]\s*/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function artistKey(t: Track | undefined): string | null {
-  if (!t) return null;
-  if (t.artistId) return `id:${t.artistId}`;
-  const name = (t.artist ?? "").trim().toLowerCase();
-  return name ? `name:${name}` : null;
-}
-
-function dedupeKey(t: Track): string | null {
-  const a = artistKey(t);
-  if (!a) return null;
-  return `${a}|${normalizeTitle(t.title)}`;
-}
 
 interface AutoplayCtx {
   autoplay: boolean;
@@ -96,7 +72,7 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const { state, pushTrack, trackMeta } = useSync();
+  const { state, pushTrack } = useSync();
   const { queue, now_playing_index } = state.playback;
 
   // Lock: true while a refill is in flight. We deliberately leave it
@@ -126,49 +102,30 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     }
     if (seedCandidates.length === 0) return;
 
-    // Local dedup state, all derived from the current queue snapshot:
-    //   - queuedIds: exact track-id collisions (cheapest filter)
-    //   - queuedKeys: (artist, normalized-title) — catches album/single
-    //     versions of the same song
-    //   - artistCounts: enforces the per-artist cap below
-    // trackMeta is populated as we pushTrack, so it covers everything
-    // autoplay has added; first-seed tracks pushed by the user before
-    // mounting may be missing meta and will be skipped from the
-    // artist-count denominator (treated as no signal).
     const queuedIds = new Set<string>(items.map((it) => it.track_id));
-    const queuedKeys = new Set<string>();
-    const artistCounts = new Map<string, number>();
-    for (const it of items) {
-      const meta = trackMeta.get(it.track_id);
-      if (!meta) continue;
-      const k = dedupeKey(meta);
-      if (k) queuedKeys.add(k);
-      const a = artistKey(meta);
-      if (a) artistCounts.set(a, (artistCounts.get(a) ?? 0) + 1);
-    }
     const need = MIN_UPCOMING - upcomingCount;
+    const nowPlayingTrackId = items[now_playing_index]?.track_id;
 
     isRefillingRef.current = true;
     let cancelled = false;
     void (async () => {
       let added = 0;
       try {
-        const { tracks } = await startStationFromAny(
-          seedCandidates,
-          FETCH_BUFFER
-        );
+        const { tracks } = await startStationFromAny(seedCandidates, need, {
+          queueTrackIds: items.map((it) => it.track_id),
+          ...(nowPlayingTrackId ? { nowPlayingTrackId } : {}),
+        });
         if (cancelled) return;
         for (const t of tracks) {
           if (added >= need) break;
+          // Defense against WS lag: the optimistic local push has
+          // already updated `items` but the server's view (and so its
+          // exclusion set) might be one snapshot behind. A duplicate
+          // that slips through here would be a re-add of a track we
+          // just played; cheap to guard against.
           if (queuedIds.has(t.id)) continue;
-          const k = dedupeKey(t);
-          if (k && queuedKeys.has(k)) continue;
-          const a = artistKey(t);
-          if (a && (artistCounts.get(a) ?? 0) >= MAX_PER_ARTIST) continue;
           pushTrack(t);
           queuedIds.add(t.id);
-          if (k) queuedKeys.add(k);
-          if (a) artistCounts.set(a, (artistCounts.get(a) ?? 0) + 1);
           added++;
         }
       } catch {
@@ -186,10 +143,10 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
         // (5+ times during a single refill) and `cancelled` would
         // already be true by the time this timeout runs.
         //
-        // Underdelivery → bump the cooldown. Means the diversity filters
-        // ate most candidates; retrying immediately with the same seeds
-        // would yield the same results. Hold off until the cursor moves
-        // and the seed pool freshens.
+        // Underdelivery → bump the cooldown. Means the server's
+        // diversity filter ate most candidates; retrying immediately
+        // with the same seeds + queue would yield the same results.
+        // Hold off until the cursor moves and the seed pool freshens.
         const cooldown =
           added < need ? UNDERDELIVERY_COOLDOWN_MS : REFILL_COOLDOWN_MS;
         setTimeout(() => {
@@ -200,7 +157,7 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [autoplay, queue.items, now_playing_index, pushTrack, trackMeta]);
+  }, [autoplay, queue.items, now_playing_index, pushTrack]);
 
   return (
     <Ctx.Provider value={{ autoplay, setAutoplay }}>{children}</Ctx.Provider>
