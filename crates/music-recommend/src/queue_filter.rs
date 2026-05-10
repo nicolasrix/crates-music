@@ -62,24 +62,61 @@ impl FilterDecision {
     }
 }
 
+/// How the slate is selected from the over-fetched ANN candidate pool.
+///
+/// - [`Self::HardCap`] — current/legacy behaviour. The candidate stream
+///   is walked in ANN-similarity order; each survivor is admitted unless
+///   the per-artist cap or title dedup fires. **Default.**
+/// - [`Self::Mmr`] — Maximal Marginal Relevance re-ranks the post-
+///   exclusion candidate pool, balancing relevance against diversity
+///   via [`QueueFilterConfig::mmr_lambda`]. The artist cap and title
+///   dedup still run downstream as a safety net.
+/// - [`Self::Off`] — admit candidates in input order until `top_n` is
+///   reached, with no diversity gating beyond the queue exclusion list.
+///   Useful for A/B comparisons; not recommended for everyday use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiversityMode {
+    #[default]
+    HardCap,
+    Mmr,
+    Off,
+}
+
 /// Knobs controlling filter strictness. Sensible defaults match the
 /// web client's old `MAX_PER_ARTIST = 2` + `dedupeKey` behavior so
 /// switching to server-side filtering is behavior-preserving.
 #[derive(Clone, Copy, Debug)]
 pub struct QueueFilterConfig {
+    /// Selection algorithm for the slate. See [`DiversityMode`].
+    pub diversity_mode: DiversityMode,
+    /// MMR relevance/novelty tradeoff in `[0, 1]`. Only consulted when
+    /// `diversity_mode == DiversityMode::Mmr`. `1.0` = pure relevance
+    /// (equivalent to `Off`); `0.0` = pure novelty after the
+    /// relevance-driven first pick.
+    pub mmr_lambda: f32,
     /// Max tracks per artist key in the resulting queue. `0` disables
     /// the cap entirely (useful for test stations / one-artist
     /// playlists).
+    ///
+    /// Under [`DiversityMode::HardCap`] this is the primary diversity
+    /// mechanism. Under [`DiversityMode::Mmr`] it acts as a safety net
+    /// — MMR shapes the slate softly, but an extreme λ (or a degenerate
+    /// embedding distribution) shouldn't produce 8 tracks by the same
+    /// artist. Set to `0` to make MMR the sole diversity controller.
     pub max_per_artist: u32,
     /// When `true`, drop candidates whose `(artist_key,
     /// title_normalized)` is already present in the queue or already
-    /// accepted earlier in this call.
+    /// accepted earlier in this call. Runs orthogonally to the
+    /// diversity mode — title dedup answers a different question (cross-
+    /// edition redundancy) than per-artist diversity.
     pub dedup_titles: bool,
 }
 
 impl Default for QueueFilterConfig {
     fn default() -> Self {
         Self {
+            diversity_mode: DiversityMode::HardCap,
+            mmr_lambda: 0.7,
             max_per_artist: 2,
             dedup_titles: true,
         }
@@ -285,6 +322,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 2,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         // ar1 is already at cap (2). Any new ar1 candidate is rejected.
@@ -304,6 +342,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 2,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c1", Some("ar1"), "Queen", "Killer Queen");
@@ -327,6 +366,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 2,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         // ar1 has 2 entries (now-playing + q2) → at cap.
@@ -347,6 +387,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
@@ -366,6 +407,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 2,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c1", None, "QUEEN", "Don't Stop Me Now");
@@ -383,6 +425,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 1,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let c1 = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
@@ -405,6 +448,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0, // disable artist cap to isolate dedup
                 dedup_titles: true,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track(
@@ -428,6 +472,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0,
                 dedup_titles: true,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c1", Some("ar2"), "Other", "Crazy Little Thing");
@@ -446,6 +491,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track(
@@ -469,6 +515,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0,
                 dedup_titles: true,
+                ..QueueFilterConfig::default()
             },
         );
         let c1 = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
@@ -498,6 +545,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 1,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         assert!(f.is_excluded(&TrackId::from("q1")));
@@ -527,6 +575,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 2,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
@@ -547,6 +596,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 0,
                 dedup_titles: true,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track(
@@ -582,6 +632,7 @@ mod tests {
             QueueFilterConfig {
                 max_per_artist: 1,
                 dedup_titles: false,
+                ..QueueFilterConfig::default()
             },
         );
         let cand = track("c2", None, "Queen", "Killer Queen");

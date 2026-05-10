@@ -59,8 +59,9 @@ use music_gateway::Config;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::{MetadataStore, TrackMetadata};
 use music_recommend::queue_filter::{
-    FilterDecision, QueueFilter, QueueFilterConfig,
+    DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
+use music_recommend::{MmrCandidate, mmr_rerank};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use rand::SeedableRng;
@@ -87,6 +88,27 @@ enum QueueMode {
     /// Pre-fill the queue with same-artist tracks so the cap is at
     /// saturation. Forces the diversity filter to engage.
     Saturated,
+}
+
+/// CLI mirror of [`DiversityMode`]. Lives here (not in the recommend
+/// crate) so the bench owns its `clap` derive without forcing the
+/// library to take a `clap` dependency.
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiversityModeArg {
+    HardCap,
+    Mmr,
+    Off,
+}
+
+impl From<DiversityModeArg> for DiversityMode {
+    fn from(a: DiversityModeArg) -> Self {
+        match a {
+            DiversityModeArg::HardCap => DiversityMode::HardCap,
+            DiversityModeArg::Mmr => DiversityMode::Mmr,
+            DiversityModeArg::Off => DiversityMode::Off,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -119,6 +141,17 @@ struct Args {
     /// Whether title dedup is enabled (matches production default).
     #[arg(long, default_value_t = true)]
     dedup_titles: bool,
+
+    /// Slate selection algorithm. `hard_cap` reproduces the legacy
+    /// behaviour and is the default. `mmr` re-ranks using
+    /// [`MmrCandidate`] vectors. `off` disables diversity gating
+    /// (queue exclusion still runs).
+    #[arg(long, value_enum, default_value_t = DiversityModeArg::HardCap)]
+    diversity_mode: DiversityModeArg,
+
+    /// MMR λ in [0, 1]. Only consulted when `diversity_mode == mmr`.
+    #[arg(long, default_value_t = 0.7)]
+    lambda: f32,
 
     /// Override the model version. Defaults to the version with the
     /// most `done` rows in `track_embeddings` — i.e. the active one.
@@ -172,6 +205,8 @@ async fn main() -> Result<()> {
     }
 
     let cfg = QueueFilterConfig {
+        diversity_mode: args.diversity_mode.into(),
+        mmr_lambda: args.lambda,
         max_per_artist: args.max_per_artist,
         dedup_titles: args.dedup_titles,
     };
@@ -307,8 +342,42 @@ async fn run_one(
     needed.extend(candidates.iter().map(|c| c.track_id.clone()));
     let metadata_map = metadata.get_many(&needed).await?;
 
-    // 7. Apply the filter exactly like `apply_queue_filter_to_ann`.
-    let mut filter = QueueFilter::build(&queue_track_ids, now_playing.as_ref(), &metadata_map, cfg);
+    // 7. Apply the filter exactly like `apply_queue_filter_*` in the
+    //    handler — but split here per `diversity_mode` so the bench
+    //    measures whichever path it was asked about. Path layout
+    //    mirrors `walk_hard_cap` / `walk_mmr` / `walk_off`; keeping
+    //    them in sync is a deliberate manual concern (the harness
+    //    can't reuse the gateway's private helpers without exporting
+    //    them, and exposing those for a bench doesn't pay off).
+    let filter = QueueFilter::build(&queue_track_ids, now_playing.as_ref(), &metadata_map, cfg);
+    let (admitted_sims, dropped_sims, dropped_artist, dropped_dedup) = match cfg.diversity_mode {
+        DiversityMode::HardCap => walk_hard_cap_bench(&candidates, &metadata_map, filter, top_n),
+        DiversityMode::Mmr => walk_mmr_bench(&candidates, &metadata_map, filter, ann, cfg, top_n),
+        DiversityMode::Off => walk_off_bench(&candidates, &filter, top_n),
+    };
+
+    let elapsed_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+    // --- timer ends ---
+
+    Ok(IterOutcome::Recorded(IterRecord {
+        admitted_sims,
+        dropped_sims,
+        dropped_artist,
+        dropped_dedup,
+        elapsed_us,
+    }))
+}
+
+/// Hard-cap walk — same shape as `walk_hard_cap` in the handler.
+/// Returns `(admitted_sims, dropped_sims, dropped_artist, dropped_dedup)`
+/// as a tuple so the caller can plug the values straight into
+/// `IterRecord`.
+fn walk_hard_cap_bench(
+    candidates: &[music_recommend::ann::AnnQueryResult],
+    metadata_map: &std::collections::HashMap<TrackId, TrackMetadata>,
+    mut filter: QueueFilter,
+    top_n: usize,
+) -> (Vec<f32>, Vec<f32>, u32, u32) {
     let mut admitted_sims = Vec::with_capacity(top_n);
     let mut dropped_sims = Vec::new();
     let mut dropped_artist = 0u32;
@@ -332,17 +401,80 @@ async fn run_one(
             }
         }
     }
+    (admitted_sims, dropped_sims, dropped_artist, dropped_dedup)
+}
 
-    let elapsed_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
-    // --- timer ends ---
+/// MMR walk — mirrors `walk_mmr` in the handler. Vectors come from the
+/// ANN, missing ones leave the diversity term at 0.
+fn walk_mmr_bench(
+    candidates: &[music_recommend::ann::AnnQueryResult],
+    metadata_map: &std::collections::HashMap<TrackId, TrackMetadata>,
+    mut filter: QueueFilter,
+    ann: &AnnIndex,
+    cfg: QueueFilterConfig,
+    top_n: usize,
+) -> (Vec<f32>, Vec<f32>, u32, u32) {
+    // Drop excluded up front; no point hydrating their vectors.
+    let surviving: Vec<&music_recommend::ann::AnnQueryResult> = candidates
+        .iter()
+        .filter(|c| !filter.is_excluded(&c.track_id))
+        .collect();
 
-    Ok(IterOutcome::Recorded(IterRecord {
-        admitted_sims,
-        dropped_sims,
-        dropped_artist,
-        dropped_dedup,
-        elapsed_us,
-    }))
+    let mmr_inputs: Vec<MmrCandidate> = surviving
+        .iter()
+        .map(|c| MmrCandidate {
+            track_id: c.track_id.clone(),
+            sim_to_seed: c.similarity,
+            vector: ann.get_vector(&c.track_id).ok().flatten(),
+        })
+        .collect();
+
+    let want = top_n.saturating_mul(2);
+    let order = mmr_rerank(&mmr_inputs, cfg.mmr_lambda, want);
+
+    let mut admitted_sims = Vec::with_capacity(top_n);
+    let mut dropped_sims = Vec::new();
+    let mut dropped_artist = 0u32;
+    let mut dropped_dedup = 0u32;
+    for idx in order {
+        if admitted_sims.len() >= top_n {
+            break;
+        }
+        let c = surviving[idx];
+        match filter.try_accept(metadata_map.get(&c.track_id)) {
+            FilterDecision::Accept => admitted_sims.push(c.similarity),
+            FilterDecision::RejectArtistCap => {
+                dropped_artist += 1;
+                dropped_sims.push(c.similarity);
+            }
+            FilterDecision::RejectDedup => {
+                dropped_dedup += 1;
+                dropped_sims.push(c.similarity);
+            }
+        }
+    }
+    (admitted_sims, dropped_sims, dropped_artist, dropped_dedup)
+}
+
+/// Off walk — admit candidates in input order until `top_n`. Queue
+/// exclusion still runs so the slate doesn't repeat what's already in
+/// the queue.
+fn walk_off_bench(
+    candidates: &[music_recommend::ann::AnnQueryResult],
+    filter: &QueueFilter,
+    top_n: usize,
+) -> (Vec<f32>, Vec<f32>, u32, u32) {
+    let mut admitted_sims = Vec::with_capacity(top_n);
+    for c in candidates {
+        if admitted_sims.len() >= top_n {
+            break;
+        }
+        if filter.is_excluded(&c.track_id) {
+            continue;
+        }
+        admitted_sims.push(c.similarity);
+    }
+    (admitted_sims, Vec::new(), 0, 0)
 }
 
 /// Pre-fill the queue with the seed track plus up to
@@ -506,6 +638,11 @@ struct ReportConfig {
     top_n: usize,
     max_per_artist: u32,
     dedup_titles: bool,
+    diversity_mode: DiversityModeArg,
+    /// Recorded regardless of `diversity_mode` so saved JSON reports
+    /// remain self-describing — `λ=0.7` for a hard-cap run is harmless
+    /// and removes the "did the bench use the right λ?" ambiguity.
+    lambda: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -623,6 +760,8 @@ fn build_report(
             top_n: args.top_n,
             max_per_artist: args.max_per_artist,
             dedup_titles: args.dedup_titles,
+            diversity_mode: args.diversity_mode,
+            lambda: args.lambda,
         },
         population: ReportPopulation {
             model_version: model_version.to_string(),
@@ -767,8 +906,13 @@ fn print_table(r: &Report) {
 
     println!();
     println!("=== recommend-bench ===");
+    let mode_label = match r.config.diversity_mode {
+        DiversityModeArg::HardCap => "hard_cap",
+        DiversityModeArg::Mmr => "mmr",
+        DiversityModeArg::Off => "off",
+    };
     println!(
-        "config:    iters={} (recorded {}) seed={} mode={} top_n={} cap={} dedup={}",
+        "config:    iters={} (recorded {}) seed={} mode={} top_n={} cap={} dedup={} diversity={} λ={:.2}",
         r.config.iterations_requested,
         r.totals.iterations_recorded,
         r.config.rng_seed,
@@ -776,6 +920,8 @@ fn print_table(r: &Report) {
         r.config.top_n,
         r.config.max_per_artist,
         r.config.dedup_titles,
+        mode_label,
+        r.config.lambda,
     );
     println!(
         "population: ann={} seed_pool={} skipped(no_meta={}, no_vec={})",

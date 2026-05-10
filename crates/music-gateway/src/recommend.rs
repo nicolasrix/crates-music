@@ -8,7 +8,7 @@
 //!   model_version): duplicates collapse via the store's
 //!   INSERT-OR-IGNORE.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json,
@@ -19,7 +19,9 @@ use axum::{
 use music_core::TrackId;
 use music_recommend::aggregate::{aggregate_seed_results, sample_indices};
 use music_recommend::metadata::MetadataStore;
-use music_recommend::queue_filter::{FilterDecision, QueueFilter, QueueFilterConfig};
+use music_recommend::queue_filter::{
+    DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
+};
 use music_recommend::types::ModelVersion;
 use music_recommend::{EmbeddingKey, EmbeddingStore, ann::AnnIndex};
 use rand::SeedableRng;
@@ -210,12 +212,49 @@ pub struct QueueContext {
     /// `None` ⇒ default true.
     #[serde(default)]
     pub dedup_titles: Option<bool>,
+    /// Selection algorithm. `None` ⇒ default (`hard_cap`). Accepted
+    /// values match [`DiversityMode`] in lower-snake-case form.
+    /// Marker is the `Option` itself, not the inner enum's `Default`,
+    /// so a future redefinition of the default doesn't silently
+    /// migrate old clients off the existing behaviour.
+    #[serde(default)]
+    pub diversity_mode: Option<DiversityModeWire>,
+    /// MMR λ in [0, 1]. Only consulted when `diversity_mode == "mmr"`.
+    /// Out-of-range values are clamped server-side rather than rejected.
+    #[serde(default)]
+    pub mmr_lambda: Option<f32>,
+}
+
+/// Wire-format mirror of [`DiversityMode`]. Lives in the HTTP layer so
+/// the recommend crate doesn't take a serde dependency for a single
+/// enum.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiversityModeWire {
+    #[default]
+    HardCap,
+    Mmr,
+    Off,
+}
+
+impl From<DiversityModeWire> for DiversityMode {
+    fn from(w: DiversityModeWire) -> Self {
+        match w {
+            DiversityModeWire::HardCap => DiversityMode::HardCap,
+            DiversityModeWire::Mmr => DiversityMode::Mmr,
+            DiversityModeWire::Off => DiversityMode::Off,
+        }
+    }
 }
 
 impl QueueContext {
     fn config(&self) -> QueueFilterConfig {
         let defaults = QueueFilterConfig::default();
         QueueFilterConfig {
+            diversity_mode: self
+                .diversity_mode
+                .map_or(defaults.diversity_mode, Into::into),
+            mmr_lambda: self.mmr_lambda.unwrap_or(defaults.mmr_lambda),
             max_per_artist: self.max_per_artist.unwrap_or(defaults.max_per_artist),
             dedup_titles: self.dedup_titles.unwrap_or(defaults.dedup_titles),
         }
@@ -253,6 +292,11 @@ pub struct FromSeedsResponse {
         filter_dropped_sims_json = tracing::field::Empty,
     ),
 )]
+#[allow(clippy::too_many_lines)] // Validation + ANN fan-out + filter
+                                 // dispatch + serialization are tightly
+                                 // coupled at the HTTP boundary and
+                                 // splitting them obscures the request
+                                 // lifecycle.
 pub async fn from_seeds(
     State(state): State<AppState>,
     payload: Result<Json<FromSeedsRequest>, JsonRejection>,
@@ -358,7 +402,14 @@ pub async fn from_seeds(
 
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
-            apply_queue_filter_to_aggregate(state.metadata_store(), qc, aggregated, top_n).await
+            apply_queue_filter_to_aggregate(
+                state.metadata_store(),
+                state.ann(),
+                qc,
+                aggregated,
+                top_n,
+            )
+            .await
         }
         None => (aggregated, FilterStats::default()),
     };
@@ -496,7 +547,9 @@ pub async fn from_any(
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
         let (filtered, filter_stats) = match &req.queue_context {
-            Some(qc) => apply_queue_filter_to_ann(state.metadata_store(), qc, results, n).await,
+            Some(qc) => {
+                apply_queue_filter_to_ann(state.metadata_store(), state.ann(), qc, results, n).await
+            }
             None => (results, FilterStats::default()),
         };
 
@@ -711,11 +764,184 @@ fn record_filter_stats(stats: &FilterStats) {
     }
 }
 
+/// Field-name-agnostic view over the two recommendation candidate
+/// types. Lets [`apply_queue_filter_generic`] handle both
+/// `AggregatedResult` (multi-seed `from-seeds`) and `AnnQueryResult`
+/// (single-seed `from-any`) without duplicating the diversity-mode
+/// match for each.
+trait CandidateLike: Clone {
+    fn track_id(&self) -> &TrackId;
+    fn sim(&self) -> f32;
+}
+
+impl CandidateLike for music_recommend::aggregate::AggregatedResult {
+    fn track_id(&self) -> &TrackId {
+        &self.track_id
+    }
+    fn sim(&self) -> f32 {
+        self.score
+    }
+}
+
+impl CandidateLike for music_recommend::ann::AnnQueryResult {
+    fn track_id(&self) -> &TrackId {
+        &self.track_id
+    }
+    fn sim(&self) -> f32 {
+        self.similarity
+    }
+}
+
+/// How much of the over-fetched candidate pool MMR is allowed to consider.
+/// MMR runs greedy on `top_n × this_factor` post-exclusion candidates so
+/// the artist-cap safety net (run *after* MMR) has room to drop without
+/// starving the slate. Kept conservative — MMR is `O(top_n × pool ×
+/// dim)`, so a too-large pool would dominate the per-call latency. With
+/// `top_n=20`, `dim=512`, factor=2, pool=40, the inner loop is ~400 K
+/// float ops, still well under the 1.5 ms budget.
+const MMR_POOL_BUFFER_FACTOR: usize = 2;
+
+/// Diversity-mode-aware slate selection. Owns the `match` over
+/// [`DiversityMode`] so the two HTTP handlers don't each re-implement
+/// the dispatch.
+async fn apply_queue_filter_generic<C: CandidateLike>(
+    metadata_store: &MetadataStore,
+    ann: &AnnIndex,
+    qc: &QueueContext,
+    candidates: Vec<C>,
+    top_n: usize,
+) -> (Vec<C>, FilterStats) {
+    let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id().clone()).collect();
+    let (filter, metadata) =
+        build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
+    let cfg = qc.config();
+
+    match cfg.diversity_mode {
+        DiversityMode::HardCap => walk_hard_cap(candidates, &metadata, filter, top_n),
+        DiversityMode::Mmr => walk_mmr(candidates, &metadata, filter, ann, cfg.mmr_lambda, top_n),
+        DiversityMode::Off => walk_off(candidates, &filter, top_n),
+    }
+}
+
+/// Hard-cap (legacy) path: walk candidates in input/relevance order,
+/// admit each that survives [`QueueFilter::try_accept`]. Behaviourally
+/// identical to the pre-MMR implementation — kept as the default.
+fn walk_hard_cap<C: CandidateLike>(
+    candidates: Vec<C>,
+    metadata: &HashMap<TrackId, music_recommend::TrackMetadata>,
+    mut filter: QueueFilter,
+    top_n: usize,
+) -> (Vec<C>, FilterStats) {
+    let mut out = Vec::with_capacity(top_n);
+    let mut stats = FilterStats::default();
+    for c in candidates {
+        if out.len() >= top_n {
+            break;
+        }
+        if filter.is_excluded(c.track_id()) {
+            continue;
+        }
+        match filter.try_accept(metadata.get(c.track_id())) {
+            FilterDecision::Accept => {
+                stats.record_admit(c.sim());
+                out.push(c);
+            }
+            d => stats.record_drop(d, c.sim()),
+        }
+    }
+    (out, stats)
+}
+
+/// MMR path: re-rank surviving candidates, then run them through the
+/// queue filter as a safety net so a degenerate λ or embedding cluster
+/// can't violate the per-artist cap.
+///
+/// Vector lookup is per-id via [`AnnIndex::get_vector`] — a missed
+/// lookup leaves the candidate's diversity term at 0, scoring on
+/// relevance alone. That's the same fail-open behaviour the cap path
+/// has for missing metadata.
+fn walk_mmr<C: CandidateLike>(
+    candidates: Vec<C>,
+    metadata: &HashMap<TrackId, music_recommend::TrackMetadata>,
+    mut filter: QueueFilter,
+    ann: &AnnIndex,
+    lambda: f32,
+    top_n: usize,
+) -> (Vec<C>, FilterStats) {
+    // 1. Drop excluded candidates up front. No point spending the
+    //    vector lookup on tracks the user already has queued.
+    let surviving: Vec<C> = candidates
+        .into_iter()
+        .filter(|c| !filter.is_excluded(c.track_id()))
+        .collect();
+
+    // 2. Hydrate vectors. ANN holds them in mmap'd HNSW, so each
+    //    lookup is a hash + memcpy of `dim` f32s. At the typical
+    //    `surviving.len() ≤ top_n × buffer × cap_buffer` (≤ 80) this
+    //    is ~80 µs per call — under the latency budget.
+    let mmr_inputs: Vec<music_recommend::MmrCandidate> = surviving
+        .iter()
+        .map(|c| music_recommend::MmrCandidate {
+            track_id: c.track_id().clone(),
+            sim_to_seed: c.sim(),
+            vector: ann.get_vector(c.track_id()).ok().flatten(),
+        })
+        .collect();
+
+    // 3. Re-rank. Ask for `top_n × MMR_POOL_BUFFER_FACTOR` so the
+    //    safety-net try_accept walk below has spare candidates to skip
+    //    past on a cap/dedup hit.
+    let want = top_n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
+    let order = music_recommend::mmr_rerank(&mmr_inputs, lambda, want);
+
+    // 4. Apply cap + dedup safety net in MMR-ordered sequence.
+    let mut out = Vec::with_capacity(top_n);
+    let mut stats = FilterStats::default();
+    for idx in order {
+        if out.len() >= top_n {
+            break;
+        }
+        let c = &surviving[idx];
+        match filter.try_accept(metadata.get(c.track_id())) {
+            FilterDecision::Accept => {
+                stats.record_admit(c.sim());
+                out.push(c.clone());
+            }
+            d => stats.record_drop(d, c.sim()),
+        }
+    }
+    (out, stats)
+}
+
+/// Off path: no diversity gating beyond the queue exclusion list.
+/// Useful as an A/B baseline when measuring whether MMR or HardCap is
+/// pulling its weight.
+fn walk_off<C: CandidateLike>(
+    candidates: Vec<C>,
+    filter: &QueueFilter,
+    top_n: usize,
+) -> (Vec<C>, FilterStats) {
+    let mut out = Vec::with_capacity(top_n);
+    let mut stats = FilterStats::default();
+    for c in candidates {
+        if out.len() >= top_n {
+            break;
+        }
+        if filter.is_excluded(c.track_id()) {
+            continue;
+        }
+        stats.record_admit(c.sim());
+        out.push(c);
+    }
+    (out, stats)
+}
+
 /// Apply the [`QueueFilter`] to aggregated `from-seeds` results. Returns
 /// the surviving items truncated to `top_n`, plus per-request
 /// [`FilterStats`] for the request span.
 async fn apply_queue_filter_to_aggregate(
     metadata_store: &MetadataStore,
+    ann: &AnnIndex,
     qc: &QueueContext,
     candidates: Vec<music_recommend::aggregate::AggregatedResult>,
     top_n: usize,
@@ -723,62 +949,19 @@ async fn apply_queue_filter_to_aggregate(
     Vec<music_recommend::aggregate::AggregatedResult>,
     FilterStats,
 ) {
-    let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id.clone()).collect();
-    let (mut filter, metadata) =
-        build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
-
-    let mut out = Vec::with_capacity(top_n);
-    let mut stats = FilterStats::default();
-    for c in candidates {
-        if out.len() >= top_n {
-            break;
-        }
-        if filter.is_excluded(&c.track_id) {
-            // Already in queue — already counted toward `excluded` at
-            // request build, so no separate metric needed.
-            continue;
-        }
-        match filter.try_accept(metadata.get(&c.track_id)) {
-            FilterDecision::Accept => {
-                stats.record_admit(c.score);
-                out.push(c);
-            }
-            d => stats.record_drop(d, c.score),
-        }
-    }
-    (out, stats)
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
 }
 
 /// Apply the [`QueueFilter`] to ANN `from-any` results. Same shape as
 /// [`apply_queue_filter_to_aggregate`] but typed for `AnnQueryResult`.
 async fn apply_queue_filter_to_ann(
     metadata_store: &MetadataStore,
+    ann: &AnnIndex,
     qc: &QueueContext,
     candidates: Vec<music_recommend::ann::AnnQueryResult>,
     top_n: usize,
 ) -> (Vec<music_recommend::ann::AnnQueryResult>, FilterStats) {
-    let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id.clone()).collect();
-    let (mut filter, metadata) =
-        build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
-
-    let mut out = Vec::with_capacity(top_n);
-    let mut stats = FilterStats::default();
-    for c in candidates {
-        if out.len() >= top_n {
-            break;
-        }
-        if filter.is_excluded(&c.track_id) {
-            continue;
-        }
-        match filter.try_accept(metadata.get(&c.track_id)) {
-            FilterDecision::Accept => {
-                stats.record_admit(c.similarity);
-                out.push(c);
-            }
-            d => stats.record_drop(d, c.similarity),
-        }
-    }
-    (out, stats)
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
 }
 
 /// Look up the seed's embedding. The ANN owns query-time state, so we
