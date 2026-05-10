@@ -180,6 +180,7 @@ async fn main() -> Result<()> {
         setup_token,
         embedder,
         recommend.embedding_store,
+        recommend.metadata_store,
         recommend.ann,
         recommend.model_version,
         trace_store.clone(),

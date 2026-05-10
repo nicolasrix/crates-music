@@ -12,6 +12,7 @@ use std::time::Instant;
 use music_cache::Cache;
 use music_recommend::EventStore;
 use music_recommend::ann::AnnIndex;
+use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 
@@ -37,6 +38,7 @@ struct Inner {
     sync: SyncStore,
     embedder: EmbedderHandle,
     embedding_store: EmbeddingStore,
+    metadata_store: MetadataStore,
     event_store: EventStore,
     ann: Arc<AnnIndex>,
     /// The model_version the recommender stamps on enqueue + ANN
@@ -77,6 +79,7 @@ impl AppState {
         setup_token: SetupToken,
         embedder: EmbedderHandle,
         embedding_store: EmbeddingStore,
+        metadata_store: MetadataStore,
         ann: Arc<AnnIndex>,
         recommend_model_version: ModelVersion,
         trace_store: TraceStore,
@@ -94,6 +97,7 @@ impl AppState {
                 sync: SyncStore::new(),
                 embedder,
                 embedding_store,
+                metadata_store,
                 event_store,
                 ann,
                 recommend_model_version,
@@ -142,6 +146,10 @@ impl AppState {
 
     pub fn embedding_store(&self) -> &EmbeddingStore {
         &self.inner.embedding_store
+    }
+
+    pub fn metadata_store(&self) -> &MetadataStore {
+        &self.inner.metadata_store
     }
 
     pub fn event_store(&self) -> &EventStore {

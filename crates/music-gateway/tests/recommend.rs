@@ -7,6 +7,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use music_core::TrackId;
 use music_gateway::build_router;
+use music_recommend::TrackMetadata;
+use music_recommend::normalize_title;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -451,6 +453,501 @@ async fn from_any_caps_n_at_max() {
     let body = read_json(resp).await;
     let results = body["results"].as_array().expect("results");
     assert!(results.len() <= 100);
+}
+
+// --- queue_context filtering (from-seeds + from-any) ---
+//
+// These tests seed the ANN with a uniform fan of unit vectors AND
+// stamp matching metadata onto the metadata cache. The ANN gives us
+// "all 8 tracks are similar to anything"; the metadata cache lets the
+// QueueFilter actually do work. Asserting filter behavior in isolation
+// from rerank by setting the artist explicitly per track.
+
+fn meta(id: &str, artist_id: &str, artist: &str, title: &str) -> TrackMetadata {
+    TrackMetadata {
+        track_id: TrackId::from(id),
+        artist_id: Some(artist_id.into()),
+        artist: artist.into(),
+        album_id: None,
+        album: None,
+        title: title.into(),
+        title_normalized: normalize_title(title),
+        duration_seconds: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        bpm: None,
+        musical_key: None,
+    }
+}
+
+#[tokio::test]
+async fn from_seeds_artist_cap_drops_third_track_by_same_artist() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    // 8 tracks, all by "ar1". Without a cap, all 8 are recommendable.
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    // Queue contains nothing else. Cap = 2 ⇒ at most 2 results survive.
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": [],
+                "max_per_artist": 2,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(
+        results.len() <= 2,
+        "artist cap should have shrunk results to <= 2, got {}",
+        results.len()
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_now_playing_counts_against_cap_but_not_excluded() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    // Queue contains the now-playing track t1 only. Cap = 1, so the
+    // now_playing already saturates the artist count → zero ar1 results.
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": ["t1"],
+                "now_playing_track_id": "t1",
+                "max_per_artist": 1,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(
+        results.is_empty(),
+        "now-playing track at cap=1 should have blocked all ar1 candidates"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_excludes_queue_tracks_other_than_now_playing() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    // Different artists per track so the artist cap doesn't fire.
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                &format!("ar{i}"),
+                &format!("Artist {i}"),
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    // t1 is now-playing (NOT excluded — eligible to surface as a result).
+    // t2 and t3 are in the queue and should NOT come back.
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": ["t1", "t2", "t3"],
+                "now_playing_track_id": "t1",
+                "max_per_artist": 0,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&"t2"), "queued t2 leaked into results");
+    assert!(!ids.contains(&"t3"), "queued t3 leaked into results");
+    // t1 is now-playing; the seed exclusion in `from-seeds` blocks
+    // explicit seed ids but t1 wasn't a seed — the contract is that
+    // it's not in the exclusion set. Whether the ANN surfaces it is
+    // up to the vector geometry, so we don't assert presence — only
+    // that it's not artificially blocked. (No-op check.)
+}
+
+#[tokio::test]
+async fn from_seeds_title_dedup_blocks_remaster_when_original_in_queue() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    // t-orig is the queue's original; t1 is its remaster (same
+    // artist, same normalized title). Different artists for the rest
+    // so the cap doesn't ambiguously fire.
+    state
+        .metadata_store()
+        .upsert(&meta("t-orig", "ar1", "Queen", "Bohemian Rhapsody"))
+        .await
+        .unwrap();
+    state
+        .metadata_store()
+        .upsert(&meta(
+            "t1",
+            "ar1",
+            "Queen",
+            "Bohemian Rhapsody (Remastered 2011)",
+        ))
+        .await
+        .unwrap();
+    for i in [0_usize, 2, 3, 4, 5, 6, 7] {
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                &format!("other{i}"),
+                &format!("Other Artist {i}"),
+                &format!("Other Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": ["t-orig"],
+                "max_per_artist": 0,
+                "dedup_titles": true,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&"t1"),
+        "remaster t1 should have been deduped against original in queue"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_max_per_artist_zero_disables_cap() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": [],
+                "max_per_artist": 0,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    // With cap = 0 (disabled), all 7 ar1 tracks (DIM-1 = 7, t0 excluded
+    // as its own seed) should survive.
+    assert_eq!(
+        results.len(),
+        DIM - 1,
+        "max_per_artist=0 should disable the cap"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_no_queue_context_skips_filter() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        // Metadata is present, but no queue_context → filter is bypassed.
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    // No queue_context → no cap → all 7 same-artist tracks come back.
+    assert_eq!(results.len(), DIM - 1);
+}
+
+#[tokio::test]
+async fn from_seeds_rejects_oversized_queue() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+
+    let big_queue: Vec<String> = (0..401).map(|i| format!("q{i}")).collect();
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "queue_context": { "queue_track_ids": big_queue }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn from_seeds_filter_admits_candidate_with_no_metadata() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    // Metadata for the queue track only; candidates have no metadata
+    // cached. The filter has no signal to gate on → admit.
+    state
+        .metadata_store()
+        .upsert(&meta("q1", "ar1", "Queen", "Bohemian Rhapsody"))
+        .await
+        .unwrap();
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 100,
+            "top_n": 20,
+            "queue_context": {
+                "queue_track_ids": ["q1"],
+                "max_per_artist": 1,
+                "dedup_titles": true,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    // None of the candidates have metadata → filter passes them all.
+    // Seven survive (t0 is the seed, excluded by from-seeds itself).
+    assert_eq!(
+        results.len(),
+        DIM - 1,
+        "candidates without metadata should not be blocked by the cap"
+    );
+}
+
+#[tokio::test]
+async fn from_any_artist_cap_filters_results() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 20,
+            "queue_context": {
+                "queue_track_ids": [],
+                "max_per_artist": 2,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(
+        results.len() <= 2,
+        "from-any should cap to 2 ar1 tracks; got {}",
+        results.len()
+    );
+}
+
+#[tokio::test]
+async fn from_any_excludes_queue_ids_at_ann_layer() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                &format!("ar{i}"),
+                &format!("Artist {i}"),
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 20,
+            "queue_context": {
+                "queue_track_ids": ["t2", "t3", "t4"],
+                "max_per_artist": 0,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap())
+        .collect();
+    for blocked in ["t2", "t3", "t4"] {
+        assert!(
+            !ids.contains(&blocked),
+            "queued {blocked} should have been excluded at the ANN layer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn from_any_rejects_oversized_queue() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+
+    let big_queue: Vec<String> = (0..401).map(|i| format!("q{i}")).collect();
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 5,
+            "queue_context": { "queue_track_ids": big_queue }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

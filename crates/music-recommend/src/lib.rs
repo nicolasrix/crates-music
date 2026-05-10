@@ -16,6 +16,7 @@ pub mod embedder;
 pub mod events;
 pub mod ingest;
 pub mod metadata;
+pub mod queue_filter;
 pub mod store;
 pub mod types;
 
@@ -25,6 +26,7 @@ pub use ingest::{MetadataFetcher, MetadataIngest};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };
+pub use queue_filter::{QueueFilter, QueueFilterConfig};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
 
