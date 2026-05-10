@@ -74,13 +74,20 @@ class ClapEmbedder:
 
         stages: dict[str, float] = {}
 
-        # Decode to mono float32.
+        # Decode to mono float32. soundfile (libsndfile) is the fast path —
+        # works for ~99% of MP3/FLAC/OGG/WAV. It can fail with
+        # `LibsndfileError: Format not recognised` on tracks where the
+        # truncated byte slice doesn't begin on a clean MPEG frame
+        # boundary, or on files with off-by-more-than-1% Xing/LAME headers
+        # (we see a stderr warning for those even when decode succeeds).
+        # Fall back to librosa.load(), which routes through audioread →
+        # ffmpeg and tolerates a much wider set of broken containers.
         t0 = time.perf_counter()
-        with io.BytesIO(raw_bytes) as buf:
-            audio, sr = soundfile.read(buf, dtype="float32", always_2d=False)
+        audio, sr = _decode_audio(raw_bytes)
         if audio.ndim == 2:
             audio = audio.mean(axis=1)
         stages["decode"] = (time.perf_counter() - t0) * 1000.0
+        del soundfile  # Imported only to surface ImportError early.
 
         # Resample to 48 kHz if needed.
         t0 = time.perf_counter()
@@ -133,3 +140,61 @@ def _detect_device() -> str:
 def _l2_normalize(v: np.ndarray) -> np.ndarray:
     norm = float(np.linalg.norm(v))
     return v / norm if norm > 0 else v
+
+
+def _decode_audio(raw_bytes: bytes) -> tuple[np.ndarray, int]:
+    """Decode encoded audio bytes to (samples, sample_rate).
+
+    Tries soundfile first (libsndfile) and falls back to librosa.load on
+    `LibsndfileError`. The fallback writes bytes to a NamedTemporaryFile
+    because audioread (librosa's non-soundfile path) needs a real path —
+    it shells out to ffmpeg, which doesn't read from BytesIO.
+    """
+    import soundfile  # type: ignore[import-not-found]
+
+    try:
+        with io.BytesIO(raw_bytes) as buf:
+            audio, sr = soundfile.read(buf, dtype="float32", always_2d=False)
+        return audio, int(sr)
+    except soundfile.LibsndfileError as primary:
+        logger.warning(
+            "soundfile decode failed (%s); falling back to librosa/ffmpeg",
+            primary,
+        )
+        return _decode_via_librosa(raw_bytes, primary)
+
+
+def _decode_via_librosa(
+    raw_bytes: bytes, primary_error: Exception
+) -> tuple[np.ndarray, int]:
+    """librosa.load via a temporary file. Re-raises with the original
+    libsndfile error context so failures stay debuggable."""
+    import os
+    import tempfile
+
+    import librosa  # type: ignore[import-not-found]
+
+    fd, path = tempfile.mkstemp(suffix=".audio")
+    os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            f.write(raw_bytes)
+        # sr=None preserves the source rate so the resample step decides
+        # the target. mono=True so we hand back a 1-D array — librosa's
+        # mono fold uses the librosa convention. soundfile would have
+        # returned (samples, channels) for stereo and the caller folds
+        # via mean(axis=1); librosa's stereo shape is the transpose
+        # (channels, samples), so we let librosa do the fold for us
+        # instead of replicating that shape gymnastic here.
+        audio, sr = librosa.load(path, sr=None, mono=True)
+        return audio, int(sr)
+    except Exception as fallback_err:
+        raise RuntimeError(
+            f"audio decode failed via both soundfile ({primary_error}) "
+            f"and librosa fallback ({fallback_err})"
+        ) from fallback_err
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

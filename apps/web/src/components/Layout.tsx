@@ -1,33 +1,31 @@
-import { ReactNode } from "react";
-import { useAuth } from "../auth/AuthContext";
-import { Link } from "../router";
+// Two-column shell: sidebar + main, with the player bar fixed at the bottom
+// (rendered as a sibling in App.tsx, not inside Layout — so detail pages
+// can mount their own --art-* on <main> without affecting the chrome).
+//
+// `breadcrumb` is shown in the topbar; pages set it from their own data.
 
-export function Layout({ children }: { children: ReactNode }) {
-  const { logout } = useAuth();
+import { ReactNode } from "react";
+import { Sidebar } from "./Sidebar";
+import { Topbar } from "./Topbar";
+import { useArtworkOnMain, type Palette } from "./ArtworkPalette";
+
+interface LayoutProps {
+  children: ReactNode;
+  breadcrumb?: string;
+  /** When set, four CSS variables are written to <main> from this palette,
+   *  driving the per-page artwork tint. Pass null on chrome-only pages. */
+  palette?: Palette | null;
+}
+
+export function Layout({ children, breadcrumb, palette }: LayoutProps) {
+  useArtworkOnMain(palette ?? null);
   return (
-    <div className="min-h-screen pb-24">
-      <header className="sticky top-0 z-10 border-b border-stone-800 bg-stone-950/80 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link to="/" className="text-lg font-medium">
-              music
-            </Link>
-            <Link
-              to="/diagnostics"
-              className="text-sm text-stone-400 hover:text-stone-100"
-            >
-              diagnostics
-            </Link>
-          </div>
-          <button
-            onClick={() => void logout()}
-            className="text-sm text-stone-400 hover:text-stone-100"
-          >
-            sign out
-          </button>
-        </div>
-      </header>
-      <main className="max-w-5xl mx-auto px-4 py-6">{children}</main>
-    </div>
+    <>
+      <Sidebar />
+      <main>
+        <Topbar breadcrumb={breadcrumb} />
+        {children}
+      </main>
+    </>
   );
 }

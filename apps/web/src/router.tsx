@@ -1,36 +1,62 @@
-// Tiny URL-driven router. Three routes today (home, album detail,
-// OAuth callback) — TanStack Router would be overkill; this is fewer
-// than 30 lines and has no third-party surface to learn.
+// Tiny URL-driven router. Multiple components can call useRoute() — they
+// all subscribe to the same external store, so navigate() re-renders every
+// consumer. The earlier single-`setter` design only updated whichever
+// component mounted last, leaving the others stale.
 
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useSyncExternalStore } from "react";
 
-interface RouteState {
-  path: string;
-  navigate: (to: string) => void;
+const subscribers = new Set<() => void>();
+
+// Snapshot is pathname + search so navigating between /search?q=a and
+// /search?q=b re-renders consumers. We return a string (not an object)
+// so React's referential bail-out check works without memoization.
+function getSnapshot(): string {
+  return location.pathname + location.search;
 }
 
-let setter: ((p: string) => void) | null = null;
+function subscribe(cb: () => void): () => void {
+  subscribers.add(cb);
+  const onPop = () => cb();
+  window.addEventListener("popstate", onPop);
+  return () => {
+    subscribers.delete(cb);
+    window.removeEventListener("popstate", onPop);
+  };
+}
+
+function notify() {
+  for (const cb of subscribers) cb();
+}
 
 export function navigate(to: string) {
   history.pushState(null, "", to);
-  setter?.(to);
+  notify();
 }
 
-export function useRoute(): RouteState {
-  const [path, setPath] = useState(location.pathname);
-  useEffect(() => {
-    setter = setPath;
-    const onPop = () => setPath(location.pathname);
-    window.addEventListener("popstate", onPop);
-    return () => {
-      setter = null;
-      window.removeEventListener("popstate", onPop);
-    };
-  }, []);
-  return { path, navigate };
+export function useRoute(): {
+  path: string;
+  search: string;
+  pathname: string;
+  navigate: (to: string) => void;
+} {
+  const full = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const qIdx = full.indexOf("?");
+  const pathname = qIdx === -1 ? full : full.slice(0, qIdx);
+  const search = qIdx === -1 ? "" : full.slice(qIdx);
+  // `path` kept for back-compat with existing callers (App.tsx route matcher,
+  // Sidebar.isActive). New code should prefer `pathname` + `search`.
+  return { path: pathname, pathname, search, navigate };
 }
 
-export function Link({ to, children, className }: { to: string; children: ReactNode; className?: string }) {
+export function Link({
+  to,
+  children,
+  className,
+}: {
+  to: string;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
     <a
       href={to}

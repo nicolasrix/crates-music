@@ -1,6 +1,14 @@
+// Data-dense diagnostics page — mirrors the schema in api/diagnostics.ts
+// exactly. Four sections: ingest queue tiles, span histogram with inline
+// 3-segment box-bar (p99 danger / p95 warning / p50 success layered, plus
+// a 1-px max marker), client-events RUM, and recent traces grouped by
+// trace_id with an expandable waterfall.
+//
+// 5-second TanStack Query refetchInterval keeps the page "live enough"
+// for a human watching ingest progress without hammering the gateway.
+
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-
 import {
   ClientEventEntry,
   HistogramBucket,
@@ -11,10 +19,8 @@ import {
   fetchTraces,
 } from "../api/diagnostics";
 import { Layout } from "../components/Layout";
+import { fmtMs } from "../utils/format";
 
-// 5 s refresh keeps the page "live enough" for a human watching ingest
-// progress without hammering the gateway. Slow enough that the SQLite
-// reads remain noise-level (~ms per query at 100 k-row ring cap).
 const REFRESH_MS = 5_000;
 const TRACES_LIMIT = 200;
 
@@ -24,81 +30,82 @@ export function Diagnostics() {
     queryFn: () => fetchQueueDepth({}),
     refetchInterval: REFRESH_MS,
   });
-
   const histogram = useQuery({
     queryKey: ["diag", "histogram"],
     queryFn: () => fetchHistogram({}),
     refetchInterval: REFRESH_MS,
   });
-
   const [nameFilter, setNameFilter] = useState<string>("");
   const traces = useQuery({
     queryKey: ["diag", "traces", nameFilter],
     queryFn: () =>
-      // exactOptionalPropertyTypes: a missing key and `undefined` are
-      // not interchangeable. Build the arg object without `name` when
-      // the filter is empty.
-      fetchTraces(nameFilter ? { limit: TRACES_LIMIT, name: nameFilter } : { limit: TRACES_LIMIT }),
+      fetchTraces(
+        nameFilter
+          ? { limit: TRACES_LIMIT, name: nameFilter }
+          : { limit: TRACES_LIMIT }
+      ),
     refetchInterval: REFRESH_MS,
   });
 
   return (
-    <Layout>
-      <h1 className="text-2xl font-semibold mb-6">Diagnostics</h1>
-
-      <Section title="Ingest queue">
-        {queue.error && <ErrorLine error={queue.error} />}
-        {queue.data && <QueueDepth data={queue.data} />}
-      </Section>
-
-      <Section title="Span duration histogram">
-        {histogram.error && <ErrorLine error={histogram.error} />}
-        {histogram.data && <HistogramTable buckets={histogram.data.buckets} />}
-      </Section>
-
-      <Section title="Client events (RUM)">
-        <ClientEventsSection />
-      </Section>
-
-      <Section title="Recent traces">
-        <div className="mb-3 flex items-center gap-2">
-          <label className="text-sm text-stone-400">filter by name:</label>
-          <select
-            className="bg-stone-900 border border-stone-800 rounded px-2 py-1 text-sm"
-            value={nameFilter}
-            onChange={(e) => setNameFilter(e.target.value)}
-          >
-            <option value="">(all)</option>
-            {(histogram.data?.buckets ?? []).map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name}
-              </option>
-            ))}
-          </select>
-          <span className="text-xs text-stone-500">
-            limit {TRACES_LIMIT}, refresh {REFRESH_MS / 1000}s
-          </span>
+    <Layout breadcrumb="diagnostics">
+      <div className="section">
+        <div className="section-head">
+          <h2>diagnostics</h2>
+          <span className="count">refresh {REFRESH_MS / 1000}s</span>
         </div>
-        {traces.error && <ErrorLine error={traces.error} />}
-        {traces.data && <TraceList entries={traces.data.traces} />}
-      </Section>
+
+        <DiagSection title="ingest queue">
+          {queue.error && <ErrorLine error={queue.error} />}
+          {queue.data && <QueueDepth data={queue.data} />}
+        </DiagSection>
+
+        <DiagSection title="span duration histogram">
+          {histogram.error && <ErrorLine error={histogram.error} />}
+          {histogram.data && <HistogramTable buckets={histogram.data.buckets} />}
+        </DiagSection>
+
+        <DiagSection title="client events (RUM)">
+          <ClientEventsSection />
+        </DiagSection>
+
+        <DiagSection title="recent traces">
+          <div className="flex items-center gap-2 mb-3">
+            <label className="text-fg-muted text-sm">filter by name:</label>
+            <select
+              className="search-input"
+              style={{ width: "auto", paddingLeft: 12 }}
+              value={nameFilter}
+              onChange={(e) => setNameFilter(e.target.value)}
+            >
+              <option value="">(all)</option>
+              {(histogram.data?.buckets ?? []).map((b) => (
+                <option key={b.name} value={b.name}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+            <span className="text-fg-faint text-xs">limit {TRACES_LIMIT}</span>
+          </div>
+          {traces.error && <ErrorLine error={traces.error} />}
+          {traces.data && <TraceList entries={traces.data.traces} />}
+        </DiagSection>
+      </div>
     </Layout>
   );
 }
 
-// --- layout helpers --------------------------------------------------------
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function DiagSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="mb-10">
-      <h2 className="text-lg font-medium mb-3 text-stone-200">{title}</h2>
+    <section style={{ marginBottom: "var(--space-7)" }}>
+      <h3 className="text-lg font-medium mb-3">{title}</h3>
       {children}
     </section>
   );
 }
 
 function ErrorLine({ error }: { error: unknown }) {
-  return <p className="text-red-400 text-sm">error: {(error as Error).message}</p>;
+  return <p className="text-danger text-sm">error: {(error as Error).message}</p>;
 }
 
 // --- queue depth -----------------------------------------------------------
@@ -109,24 +116,27 @@ function QueueDepth({
   data: { model_version: string; not_started: number; in_progress: number; done: number; failed: number };
 }) {
   const tiles = [
-    { label: "not started", value: data.not_started, tone: "text-stone-200" },
-    { label: "in progress", value: data.in_progress, tone: "text-amber-300" },
-    { label: "done", value: data.done, tone: "text-emerald-300" },
-    { label: "failed", value: data.failed, tone: data.failed > 0 ? "text-red-400" : "text-stone-500" },
+    { label: "not started", value: data.not_started, tone: "" },
+    {
+      label: "in progress",
+      value: data.in_progress,
+      tone: data.in_progress > 0 ? "is-warn" : "",
+    },
+    { label: "done", value: data.done, tone: "" },
+    {
+      label: "failed",
+      value: data.failed,
+      tone: data.failed > 0 ? "is-danger" : "",
+    },
   ];
   return (
     <div>
-      <p className="text-xs text-stone-500 mb-2">model: {data.model_version}</p>
+      <p className="text-fg-faint text-xs mb-2">model: {data.model_version}</p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {tiles.map((t) => (
-          <div
-            key={t.label}
-            className="border border-stone-800 rounded p-3 bg-stone-900/40"
-          >
-            <p className="text-xs text-stone-500 uppercase tracking-wide">
-              {t.label}
-            </p>
-            <p className={`text-2xl font-semibold ${t.tone}`}>{t.value}</p>
+          <div key={t.label} className={`tile-stat ${t.tone}`}>
+            <span className="stat-label">{t.label}</span>
+            <span className="stat-value">{t.value}</span>
           </div>
         ))}
       </div>
@@ -138,44 +148,41 @@ function QueueDepth({
 
 function HistogramTable({ buckets }: { buckets: HistogramBucket[] }) {
   if (buckets.length === 0) {
-    return <p className="text-sm text-stone-500">no spans recorded yet</p>;
+    return <p className="text-fg-faint text-sm">no spans recorded yet.</p>;
   }
-  // Scale all bars against the widest span across all buckets — makes
-  // an "embedder.embed_audio" at p99=8000ms visibly tower over a
-  // "trace_store.insert_batch" at p99=1ms. Per-row scaling would hide
-  // that.
+  // Scale all bars against the widest span across all buckets — makes a
+  // p99=8000ms span visibly tower over a p99=1ms one. Per-row scaling would
+  // mask the difference.
   const maxMs = Math.max(...buckets.map((b) => b.max_ms), 1);
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="text-xs text-stone-500 uppercase tracking-wide">
+      <table className="tracks tabular" style={{ fontFamily: "var(--font-mono)" }}>
+        <thead>
           <tr>
-            <th className="text-left pb-2">name</th>
-            <th className="text-right pb-2 px-3">count</th>
-            <th className="text-right pb-2 px-3">min</th>
-            <th className="text-right pb-2 px-3">p50</th>
-            <th className="text-right pb-2 px-3">p95</th>
-            <th className="text-right pb-2 px-3">p99</th>
-            <th className="text-right pb-2 px-3">max</th>
-            <th className="text-left pb-2 pl-4 w-1/3">distribution (p50/p95/p99 / max)</th>
+            <th>name</th>
+            <th style={{ textAlign: "right" }}>count</th>
+            <th style={{ textAlign: "right" }}>min</th>
+            <th style={{ textAlign: "right" }}>p50</th>
+            <th style={{ textAlign: "right" }}>p95</th>
+            <th style={{ textAlign: "right" }}>p99</th>
+            <th style={{ textAlign: "right" }}>max</th>
+            <th style={{ width: "30%" }}>distribution</th>
           </tr>
         </thead>
         <tbody>
           {buckets.map((b) => (
-            <tr key={b.name} className="border-t border-stone-800">
-              <td className="py-2 font-mono text-stone-200">{b.name}</td>
-              <td className="py-2 px-3 text-right tabular-nums">{b.count}</td>
-              <td className="py-2 px-3 text-right tabular-nums text-stone-400">
-                {fmtMs(b.min_ms)}
+            <tr key={b.name} style={{ cursor: "default" }}>
+              <td className="col-title" style={{ fontFamily: "var(--font-mono)" }}>
+                {b.name}
               </td>
-              <td className="py-2 px-3 text-right tabular-nums">{fmtMs(b.p50_ms)}</td>
-              <td className="py-2 px-3 text-right tabular-nums">{fmtMs(b.p95_ms)}</td>
-              <td className="py-2 px-3 text-right tabular-nums">{fmtMs(b.p99_ms)}</td>
-              <td className="py-2 px-3 text-right tabular-nums text-stone-400">
-                {fmtMs(b.max_ms)}
-              </td>
-              <td className="py-2 pl-4">
-                <BoxPlot
+              <td className="col-time">{b.count}</td>
+              <td className="col-time">{fmtMs(b.min_ms)}</td>
+              <td className="col-time">{fmtMs(b.p50_ms)}</td>
+              <td className="col-time">{fmtMs(b.p95_ms)}</td>
+              <td className="col-time">{fmtMs(b.p99_ms)}</td>
+              <td className="col-time">{fmtMs(b.max_ms)}</td>
+              <td>
+                <BoxBar
                   p50={b.p50_ms}
                   p95={b.p95_ms}
                   p99={b.p99_ms}
@@ -191,7 +198,7 @@ function HistogramTable({ buckets }: { buckets: HistogramBucket[] }) {
   );
 }
 
-function BoxPlot({
+function BoxBar({
   p50,
   p95,
   p99,
@@ -206,20 +213,16 @@ function BoxPlot({
 }) {
   const pct = (v: number) => `${Math.max(0, Math.min(100, (v / scaleMax) * 100))}%`;
   return (
-    <div className="relative h-4 bg-stone-900 rounded overflow-hidden">
-      <div className="absolute inset-y-0 left-0 bg-emerald-700/60" style={{ width: pct(p50) }} />
-      <div className="absolute inset-y-0 left-0 bg-amber-600/40" style={{ width: pct(p95) }} />
-      <div className="absolute inset-y-0 left-0 bg-red-600/30" style={{ width: pct(p99) }} />
-      <div
-        className="absolute top-0 bottom-0 w-px bg-stone-300"
-        style={{ left: pct(max) }}
-        title={`max ${fmtMs(max)}`}
-      />
+    <div className="hist-bar" title={`max ${fmtMs(max)}`}>
+      <div className="seg p99" style={{ width: pct(p99) }} />
+      <div className="seg p95" style={{ width: pct(p95) }} />
+      <div className="seg p50" style={{ width: pct(p50) }} />
+      <div className="marker-max" style={{ left: pct(max) }} />
     </div>
   );
 }
 
-// --- trace list / waterfall ------------------------------------------------
+// --- traces ----------------------------------------------------------------
 
 interface Group {
   trace_id: string;
@@ -240,17 +243,16 @@ function groupByTrace(entries: TraceEntry[]): Group[] {
     if (e.start_ms < g.start_ms) g.start_ms = e.start_ms;
     if (e.end_ms > g.end_ms) g.end_ms = e.end_ms;
   }
-  // Newest trace first (by latest end_ms).
   return [...map.values()].sort((a, b) => b.end_ms - a.end_ms);
 }
 
 function TraceList({ entries }: { entries: TraceEntry[] }) {
   const groups = useMemo(() => groupByTrace(entries), [entries]);
   if (groups.length === 0) {
-    return <p className="text-sm text-stone-500">no traces in window</p>;
+    return <p className="text-fg-faint text-sm">no traces in window.</p>;
   }
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       {groups.map((g) => (
         <TraceCard key={g.trace_id} group={g} />
       ))}
@@ -261,20 +263,26 @@ function TraceList({ entries }: { entries: TraceEntry[] }) {
 function TraceCard({ group }: { group: Group }) {
   const [open, setOpen] = useState(false);
   const totalMs = Math.max(group.end_ms - group.start_ms, 1);
-  // Sort spans by start so the waterfall reads top-down chronologically.
   const sorted = [...group.spans].sort((a, b) => a.start_ms - b.start_ms);
   return (
-    <div className="border border-stone-800 rounded bg-stone-900/40">
+    <div
+      style={{
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-2)",
+        background: "color-mix(in oklab, var(--surface-1) 60%, transparent)",
+      }}
+    >
       <button
         className="w-full flex items-center justify-between px-3 py-2 text-left"
         onClick={() => setOpen((v) => !v)}
+        style={{ background: "transparent", border: 0, cursor: "pointer", color: "inherit" }}
       >
-        <span className="font-mono text-xs text-stone-400">{group.trace_id}</span>
-        <span className="text-xs text-stone-500">
+        <span className="font-mono text-fg-muted text-xs">{group.trace_id}</span>
+        <span className="text-fg-faint text-xs">
           {sorted.length} span{sorted.length === 1 ? "" : "s"} · {fmtMs(totalMs)}
         </span>
       </button>
-      <div className="px-3 pb-3 space-y-1">
+      <div className="px-3 pb-3 flex flex-col gap-1">
         {sorted.map((s) => (
           <SpanBar
             key={s.span_id}
@@ -301,31 +309,55 @@ function SpanBar({
   expanded: boolean;
 }) {
   const offsetPct = ((span.start_ms - traceStart) / totalMs) * 100;
-  const widthPct = Math.max((span.duration_ms / totalMs) * 100, 0.3); // floor so 0-ms spans stay visible
+  const widthPct = Math.max((span.duration_ms / totalMs) * 100, 0.3);
   const color = nameToHsl(span.name);
   return (
     <div>
       <div className="flex items-center gap-2 text-xs">
-        <span className="font-mono text-stone-300 w-56 truncate" title={span.name}>
+        <span
+          className="font-mono text-fg-muted truncate"
+          style={{ width: 224 }}
+          title={span.name}
+        >
           {span.name}
         </span>
-        <div className="flex-1 relative h-4 bg-stone-950/60 rounded overflow-hidden">
+        <div
+          className="flex-1 relative"
+          style={{
+            height: 16,
+            background: "color-mix(in oklab, var(--surface-0) 70%, transparent)",
+            borderRadius: "var(--radius-1)",
+            overflow: "hidden",
+          }}
+        >
           <div
-            className="absolute inset-y-0 rounded"
+            className="absolute top-0 bottom-0"
             style={{
               left: `${offsetPct}%`,
               width: `${widthPct}%`,
               backgroundColor: color,
+              borderRadius: "var(--radius-1)",
             }}
             title={`${span.name}: ${fmtMs(span.duration_ms)}`}
           />
         </div>
-        <span className="tabular-nums text-stone-400 w-16 text-right">
+        <span
+          className="tabular text-fg-muted text-right"
+          style={{ width: 64, fontFamily: "var(--font-mono)" }}
+        >
           {fmtMs(span.duration_ms)}
         </span>
       </div>
       {expanded && Object.keys(span.fields).length > 0 && (
-        <pre className="mt-1 ml-56 text-[11px] text-stone-500 bg-stone-950/60 px-2 py-1 rounded overflow-x-auto">
+        <pre
+          className="text-fg-faint mt-1 px-2 py-1 overflow-x-auto"
+          style={{
+            marginLeft: 224,
+            fontSize: 11,
+            background: "color-mix(in oklab, var(--surface-0) 70%, transparent)",
+            borderRadius: "var(--radius-1)",
+          }}
+        >
           {JSON.stringify(span.fields, null, 0)}
         </pre>
       )}
@@ -344,19 +376,19 @@ function ClientEventsSection() {
   if (events.error) return <ErrorLine error={events.error} />;
   if (!events.data) return null;
   if (events.data.events.length === 0) {
-    return <p className="text-sm text-stone-500">no client events yet</p>;
+    return <p className="text-fg-faint text-sm">no client events yet.</p>;
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="text-xs text-stone-500 uppercase tracking-wide">
+      <table className="tracks tabular" style={{ fontFamily: "var(--font-mono)" }}>
+        <thead>
           <tr>
-            <th className="text-left pb-2">received</th>
-            <th className="text-left pb-2">name</th>
-            <th className="text-right pb-2 px-3">value</th>
-            <th className="text-left pb-2 pl-3">rating</th>
-            <th className="text-left pb-2 pl-3">page</th>
-            <th className="text-left pb-2 pl-3">session</th>
+            <th>received</th>
+            <th>name</th>
+            <th style={{ textAlign: "right" }}>value</th>
+            <th>rating</th>
+            <th>page</th>
+            <th>session</th>
           </tr>
         </thead>
         <tbody>
@@ -371,15 +403,21 @@ function ClientEventsSection() {
 
 function ClientEventRow({ event }: { event: ClientEventEntry }) {
   return (
-    <tr className="border-t border-stone-800">
-      <td className="py-1 text-stone-400 tabular-nums">{fmtRecentTime(event.received_ms)}</td>
-      <td className="py-1 font-mono text-stone-200">{event.name}</td>
-      <td className="py-1 px-3 text-right tabular-nums">
+    <tr style={{ cursor: "default" }}>
+      <td className="col-time" style={{ textAlign: "left", fontFamily: "var(--font-mono)" }}>
+        {fmtRecentTime(event.received_ms)}
+      </td>
+      <td className="col-title" style={{ fontFamily: "var(--font-mono)" }}>
+        {event.name}
+      </td>
+      <td className="col-time">
         {event.value_ms === null ? "—" : fmtMs(event.value_ms)}
       </td>
-      <td className="py-1 pl-3">{event.rating ? <RatingPill rating={event.rating} /> : "—"}</td>
-      <td className="py-1 pl-3 text-stone-400 font-mono text-xs">{event.page_path}</td>
-      <td className="py-1 pl-3 text-stone-500 font-mono text-xs">
+      <td>{event.rating ? <RatingPill rating={event.rating} /> : "—"}</td>
+      <td className="col-artist" style={{ fontFamily: "var(--font-mono)" }}>
+        {event.page_path}
+      </td>
+      <td className="col-artist" style={{ fontFamily: "var(--font-mono)" }}>
         {event.session_id.slice(0, 8)}
       </td>
     </tr>
@@ -387,17 +425,8 @@ function ClientEventRow({ event }: { event: ClientEventEntry }) {
 }
 
 function RatingPill({ rating }: { rating: "good" | "needs-improvement" | "poor" }) {
-  // Color tracks the web-vitals convention: green / amber / red. We
-  // don't render it inline as a bar because most rows are non-timing
-  // marks anyway; the pill is enough to spot regressions at a glance.
-  const tone = {
-    good: "bg-emerald-700/40 text-emerald-200",
-    "needs-improvement": "bg-amber-700/40 text-amber-200",
-    poor: "bg-red-700/40 text-red-200",
-  }[rating];
-  return (
-    <span className={`px-2 py-0.5 rounded text-[11px] ${tone}`}>{rating}</span>
-  );
+  const cls = rating === "good" ? "is-good" : rating === "poor" ? "is-poor" : "is-warn";
+  return <span className={`pill ${cls}`}>{rating}</span>;
 }
 
 function fmtRecentTime(unixMs: number): string {
@@ -405,16 +434,7 @@ function fmtRecentTime(unixMs: number): string {
   return d.toLocaleTimeString();
 }
 
-// --- helpers ---------------------------------------------------------------
-
-function fmtMs(n: number): string {
-  if (n < 1) return "<1ms";
-  if (n < 1000) return `${Math.round(n)}ms`;
-  return `${(n / 1000).toFixed(2)}s`;
-}
-
-// Stable color per span name. djb2 hash → HSL with fixed S/L so every
-// bar has comparable saturation regardless of name length.
+// Stable color per span name for the waterfall. djb2 hash → HSL.
 function nameToHsl(name: string): string {
   let h = 5381;
   for (let i = 0; i < name.length; i++) {

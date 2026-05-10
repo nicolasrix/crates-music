@@ -1,0 +1,1338 @@
+/* Component classes — composed from tokens.css. Lifted from
+   design_handoff_crates_web/prototype/kit.css and trimmed to the
+   primitives the production app uses today.
+
+   Convention: per-component CSS lives here when it would be awkward
+   to express as a one-shot Tailwind utility chain (animations, multi-
+   layer gradients, table internals, the artwork-tint cascade). Trivial
+   spacing/colors stay in JSX as Tailwind utilities. */
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--surface-0);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden; /* shell scroll containers handle overflow per area */
+}
+
+/* App shell — sidebar + main + bottom-fixed player. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: 1fr var(--player-h);
+  grid-template-areas: "side main" "player player";
+  height: 100vh;
+}
+.shell > .sidebar {
+  grid-area: side;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-3) var(--space-5);
+}
+.shell > main {
+  grid-area: main;
+  overflow-y: auto;
+  position: relative;
+}
+.shell > .player { grid-area: player; }
+
+/* Topbar inside main — sticky 56px. */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--header-h);
+  padding: 0 var(--space-5);
+  background: color-mix(in oklab, var(--surface-0) 85%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.topbar .arrow {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+  border: 0;
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out-soft), background var(--dur-1) var(--ease-out-soft);
+}
+.topbar .arrow:hover { color: var(--fg); background: var(--surface-3); }
+.topbar .arrow:disabled { opacity: 0.3; cursor: default; }
+.topbar .breadcrumb {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+/* Brand row inside the sidebar. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-5);
+}
+.brand .word {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 22px;
+  letter-spacing: var(--tracking-display);
+  color: var(--fg);
+}
+.nav-group {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  padding: var(--space-3) var(--space-3) var(--space-1);
+}
+.search-box { padding: var(--space-3); }
+.search-input {
+  width: 100%;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border-subtle);
+  padding: 8px 12px 8px 32px;
+  border-radius: var(--radius-2);
+  font-size: var(--text-sm);
+  outline: none;
+  transition: border-color var(--dur-1) var(--ease-out-soft);
+}
+.search-input:focus { border-color: var(--border-strong); }
+
+/* Detail-page hero. */
+.hero {
+  padding: var(--space-7) var(--space-7) var(--space-6);
+  background:
+    radial-gradient(120% 80% at 0% 0%, color-mix(in oklab, var(--art-bg) 60%, transparent) 0%, transparent 70%),
+    var(--surface-0);
+  display: flex;
+  gap: var(--space-6);
+  align-items: flex-end;
+  position: relative;
+  z-index: 1;
+}
+.hero .cover-lg {
+  width: 240px;
+  height: 240px;
+  border-radius: var(--radius-3);
+  box-shadow: var(--shadow-pop);
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.hero .cover-lg.is-circle { border-radius: var(--radius-full); }
+.hero .meta-stack { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.hero .kind {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--art-mute);
+}
+.hero h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: var(--text-display-md);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  margin: 0;
+  color: var(--art-fg);
+}
+.hero .sub {
+  color: var(--art-mute);
+  font-size: var(--text-sm);
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* Inline link in the sub-meta row (e.g. artist name). Picks up the row's
+ * tinted color and brightens to --art-fg on hover, since the row uses
+ * --art-mute and the rest of the page palette is per-album. */
+.hero .sub .sub-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color var(--dur-1) var(--ease-out-soft),
+              border-color var(--dur-1) var(--ease-out-soft);
+}
+.hero .sub .sub-link:hover {
+  color: var(--art-fg);
+  border-bottom-color: currentColor;
+}
+.hero .actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  align-items: center;
+}
+
+/* Section header inside main (used by Albums / Tracks / Artists). */
+.section {
+  padding: var(--space-5) var(--space-7);
+  position: relative;
+  z-index: 1;
+}
+.section .section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.section h2 {
+  margin: 0;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+}
+.section .count {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+}
+.section .section-more {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color var(--dur-1) var(--ease-out-soft),
+              border-color var(--dur-1) var(--ease-out-soft);
+}
+.section .section-more:hover {
+  color: var(--fg);
+  border-bottom-color: currentColor;
+}
+.section .lead {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  margin: -4px 0 var(--space-4);
+}
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+.t-hero-album {
+  font-family: var(--font-display);
+  font-size: var(--text-display-md);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+}
+.t-hero-artist {
+  font-family: var(--font-display);
+  font-size: var(--text-display-lg);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+}
+.t-display-sm {
+  font-family: var(--font-display);
+  font-size: var(--text-display-sm);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+}
+.t-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--art-accent, var(--focus));
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Album / artist tile grid — the README pins minmax(160px, 1fr). */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-5);
+}
+
+/* Album / artist tile. No card border, no shadow at rest. */
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  position: relative;
+}
+.tile-cover {
+  aspect-ratio: 1;
+  background: var(--surface-2);
+  border-radius: var(--radius-3);
+  overflow: hidden;
+  position: relative;
+  transition:
+    transform var(--dur-2) var(--ease-out-soft),
+    box-shadow var(--dur-2) var(--ease-out-soft);
+}
+.tile:hover .tile-cover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-pop);
+}
+.tile-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile-cover.is-circle { border-radius: var(--radius-full); }
+
+/* Cover component (img or generated SVG placeholder). One rule covers
+   every wrapper — .tile-cover, .search-hero-cover, .now-playing-cover,
+   .hero .cover-lg, .np .cover, .suggestion-cover. */
+.cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.tile .tile-title {
+  font-weight: var(--weight-medium);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .tile-sub {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Slide-in play overlay on the cover. */
+.tile-play {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--on-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(8px);
+  transition:
+    opacity var(--dur-2) var(--ease-out-soft),
+    transform var(--dur-2) var(--ease-out-soft),
+    background var(--dur-1) var(--ease-out-soft);
+  box-shadow: var(--shadow-pop);
+}
+.tile:hover .tile-play { opacity: 1; transform: translateY(0); }
+.tile-play:hover { background: var(--accent-hover); }
+
+/* 2x2 quilt cover used by playlists. */
+.cover-quilt {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  width: 100%;
+  height: 100%;
+}
+.cover-quilt > * {
+  background-size: cover;
+  background-position: center;
+  background-color: var(--surface-2);
+}
+
+/* Tinted wash on detail pages — vertical fade from --art-bg to transparent. */
+.tinted-wash {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 320px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--art-bg) 60%, transparent) 0%,
+    transparent 100%
+  );
+  z-index: 0;
+}
+
+/* Hero filled play disc on detail pages. Reads --art-accent so it tints. */
+.play-disc {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-2);
+  background: var(--art-accent, var(--accent));
+  color: var(--on-accent);
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur-1) var(--ease-out-soft), transform var(--dur-1) var(--ease-out-soft);
+  box-shadow: var(--shadow-pop);
+}
+.play-disc:hover { transform: scale(1.04); }
+
+/* Tracklist — used by Album, Playlist, all-Tracks. Sticky thead, hairline
+   row dividers, hover row swap. */
+.tracks {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.tracks thead th {
+  position: sticky;
+  top: var(--header-h);
+  background: color-mix(in oklab, var(--surface-0) 92%, transparent);
+  backdrop-filter: blur(8px);
+  text-align: left;
+  font-weight: var(--weight-medium);
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  font-size: var(--text-xs);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tracks tbody td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.tracks tbody tr {
+  transition: background var(--dur-1) var(--ease-out-soft);
+  cursor: pointer;
+}
+.tracks tbody tr:hover { background: color-mix(in oklab, var(--surface-2) 60%, transparent); }
+.tracks .col-num { width: 48px; color: var(--fg-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tracks .col-title { color: var(--fg); }
+.tracks .col-artist { color: var(--fg-muted); }
+.tracks .col-album { color: var(--fg-muted); }
+/* When the artist or album cell wraps a navigation link, mirror the
+   hero card's affordance: inherit the muted cell color at rest,
+   underline + brighten on hover. Tailwind's preflight already strips
+   the default anchor underline, so we only need to add it for the
+   hover state. */
+.tracks .col-artist a,
+.tracks .col-album a {
+  color: inherit;
+  text-decoration: none;
+}
+.tracks .col-artist a:hover,
+.tracks .col-album a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.tracks .col-time {
+  width: 64px;
+  text-align: right;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.tracks .col-menu {
+  width: 36px;
+  text-align: right;
+  padding-right: 4px;
+}
+.row-menu-trigger {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--fg-faint);
+  border: 0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out-soft),
+              background var(--dur-1) var(--ease-out-soft),
+              color var(--dur-1) var(--ease-out-soft);
+}
+.tracks tbody tr:hover .row-menu-trigger,
+.tracks tbody tr.is-playing .row-menu-trigger { opacity: 1; }
+.row-menu-trigger:hover { background: var(--surface-3); color: var(--fg); }
+.row-menu-trigger[aria-expanded="true"] {
+  opacity: 1;
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+/* Track row context menu — fixed-positioned popover, computed in JS. */
+.row-menu {
+  position: fixed;
+  width: 220px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-pop);
+  padding: 4px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+.row-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-1);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out-soft);
+}
+.row-menu-item:hover { background: var(--surface-2); }
+.row-menu-item.is-back { color: var(--fg-muted); }
+.row-menu-item .truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.row-menu-sep {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 6px;
+}
+.row-menu-meta {
+  padding: 8px 10px;
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+}
+
+/* Queue row's per-item action cluster (move-up / move-down / remove). */
+.queue-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out-soft);
+}
+.tracks tbody tr:hover .queue-row-actions,
+.tracks tbody tr.is-playing .queue-row-actions { opacity: 1; }
+.queue-row-actions .row-menu-trigger { opacity: 1; }
+.queue-row-actions .row-menu-trigger:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Player-bar queue button — pill-style with the count badge. */
+.icon-btn.queue-btn {
+  position: relative;
+  width: auto;
+  padding: 0 12px 0 10px;
+  gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.icon-btn.queue-btn .queue-count {
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+}
+.icon-btn.queue-btn.is-on {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+/* "Now playing" hero card on the queue page. The blurred cover sits in
+   its own absolutely-positioned layer so we can dim/blur it without
+   affecting the foreground text. */
+.now-playing-card {
+  position: relative;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: var(--space-6);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  isolation: isolate;
+}
+.now-playing-backdrop {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(36px) saturate(1.2);
+  opacity: 0.35;
+  transform: scale(1.15);
+  z-index: 0;
+  pointer-events: none;
+}
+.now-playing-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--bg) 25%, transparent) 0%,
+    color-mix(in oklab, var(--bg) 65%, transparent) 100%
+  );
+  z-index: 1;
+  pointer-events: none;
+}
+.now-playing-body {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-5);
+}
+.now-playing-cover {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 96px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  background: var(--surface-2);
+}
+.now-playing-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+/* Same reasoning as `.np .row-menu-trigger`: the now-playing card is
+   persistent chrome, not a hover surface, so the default fade-on-hover
+   leaves the affordance invisible. The trigger sits adjacent to the
+   meta block (one body-gap of separation) rather than being pushed to
+   the card's right edge — closer to the song it acts on. */
+.now-playing-body > .row-menu-trigger {
+  opacity: 1;
+  flex-shrink: 0;
+}
+.now-playing-kind {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.now-playing-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.now-playing-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  flex-wrap: wrap;
+}
+.now-playing-sub .sub-link:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.tracks tbody tr:hover .col-num .num-text { display: none; }
+.tracks tbody tr:hover .col-num .num-play { display: inline-flex; }
+.col-num .num-play { display: none; align-items: center; color: var(--fg); }
+
+/* Click-to-play affordance on number + title cells. The whole row already
+ * shows a hover background; this just nudges the cursor and brightens the
+ * title to --fg-strong on hover so the click target is unambiguous. */
+.tracks .col-num.is-clickable,
+.tracks .col-title.is-clickable { cursor: pointer; }
+.tracks tbody tr:hover .col-title.is-clickable { color: var(--fg-strong, var(--fg)); }
+.tracks .col-num.is-clickable:focus-visible {
+  outline: 2px solid var(--art-accent, var(--accent));
+  outline-offset: -2px;
+  border-radius: var(--radius-1);
+}
+
+/* Currently-playing row — tints to art-accent and shows an animated equalizer. */
+.tracks tbody tr.is-playing { color: var(--art-accent, var(--accent)); }
+.tracks tbody tr.is-playing .col-title { color: var(--art-accent, var(--accent)); font-weight: var(--weight-medium); }
+.tracks tbody tr.is-playing .col-num .num-text,
+.tracks tbody tr.is-playing .col-num .num-play { display: none; }
+.tracks tbody tr.is-playing .col-num .num-eq { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; }
+.col-num .num-eq { display: none; }
+.col-num .num-eq span {
+  display: block;
+  width: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  animation: eq-bar 900ms infinite ease-in-out;
+}
+.col-num .num-eq span:nth-child(1) { animation-delay: 0ms;   height: 60%; }
+.col-num .num-eq span:nth-child(2) { animation-delay: 120ms; height: 90%; }
+.col-num .num-eq span:nth-child(3) { animation-delay: 240ms; height: 70%; }
+@keyframes eq-bar {
+  0%, 100% { transform: scaleY(0.4); }
+  50%      { transform: scaleY(1); }
+}
+
+/* Player bar — fixed-position bottom strip, three-column grid. */
+.player {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+  background: color-mix(in oklab, var(--surface-0) 88%, transparent);
+  backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border-subtle);
+  height: var(--player-h);
+}
+.np {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+}
+.np .cover {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-2);
+  flex-shrink: 0;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.np .meta { min-width: 0; }
+.np .title {
+  font-weight: var(--weight-medium);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np .sub {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np .sub a {
+  color: inherit;
+  text-decoration: none;
+}
+.np .sub a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.np .sub .sep { color: var(--fg-faint); }
+/* Always show the player's row-menu trigger — the player is persistent
+   chrome, not a hover surface, so the default "fade in on row hover"
+   pattern leaves the affordance invisible. Same reasoning as the
+   queue-row-actions override. */
+.np .row-menu-trigger { opacity: 1; flex-shrink: 0; }
+.transport-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: center;
+  /* Wider middle column → wider scrubber (which is flex:1 inside .scrub).
+   * The grid column is `auto`, so this min-width sets the actual column
+   * width on typical viewports. Side cells (np, right-cluster) flex with
+   * the remaining 1fr each. */
+  min-width: 560px;
+  width: 100%;
+  max-width: 720px;
+}
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--fg-muted);
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur-1) var(--ease-out-soft), color var(--dur-1) var(--ease-out-soft);
+}
+.icon-btn:hover { background: var(--surface-2); color: var(--fg); }
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn:disabled:hover { background: transparent; color: var(--fg-muted); }
+.icon-btn.is-on { color: var(--accent); }
+.icon-btn.play-bar {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-2);
+  background: var(--fg);
+  color: var(--surface-0);
+}
+.icon-btn.play-bar:hover { background: var(--fg-strong); color: var(--surface-0); }
+.scrub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.scrub .time {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+}
+.scrub .time:last-child { text-align: left; }
+.right-cluster {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+/* Player-bar scrubber — reads --art-accent on the wrapper.
+ *
+ * flex:1 makes the bar fill the middle column of .scrub (between the two
+ * time labels). Without it the bar collapses to 0 width and the whole
+ * indicator is invisible. */
+.scrub-bar {
+  position: relative;
+  flex: 1 1 auto;
+  height: 4px;
+  background: var(--surface-3);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  touch-action: none;
+}
+/* Invisible hit-area extension. Visible track stays 4px so the player
+ * bar doesn't grow taller, but pointer events land anywhere within
+ * ±10px vertically — much easier to hit, especially on touchpads. */
+.scrub-bar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -10px;
+  bottom: -10px;
+}
+.scrub-bar.is-dragging { cursor: grabbing; }
+.scrub-bar .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--art-accent, var(--fg));
+  border-radius: inherit;
+  pointer-events: none;
+}
+.scrub-bar .thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--art-accent, var(--fg));
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out-soft);
+  pointer-events: none;
+}
+.scrub-bar:hover .thumb,
+.scrub-bar.is-dragging .thumb { opacity: 1; }
+
+/* Volume control — same visual language as the scrubber but compact:
+ * speaker icon + 80px track. Lives in .right-cluster; the bar's
+ * fill/thumb classes mirror .scrub-bar so we'd happily share rules
+ * if we ever wanted to merge them. Kept separate for now since the
+ * volume bar wants its own (unaccented) fill color and a smaller
+ * pointer-hit zone. */
+.volume {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.volume-btn { color: var(--fg-muted); }
+.volume-btn:hover { color: var(--fg); }
+.volume-bar {
+  position: relative;
+  width: 80px;
+  height: 4px;
+  background: var(--surface-3);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  touch-action: none;
+}
+/* Same hit-area trick as .scrub-bar — clickable beyond the visible
+ * track for easier pointer targeting. */
+.volume-bar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  bottom: -8px;
+}
+.volume-bar.is-dragging { cursor: grabbing; }
+.volume-bar .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--fg);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.volume-bar .thumb {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--fg);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out-soft);
+  pointer-events: none;
+}
+.volume-bar:hover .thumb,
+.volume-bar.is-dragging .thumb { opacity: 1; }
+
+/* Pill for diagnostics ratings, badges. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+}
+.pill.is-good    { background: color-mix(in oklab, var(--success) 18%, transparent); color: var(--success); }
+.pill.is-warn    { background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning); }
+.pill.is-poor    { background: color-mix(in oklab, var(--danger)  18%, transparent); color: var(--danger);  }
+
+/* Tag chip (FLAC, 48 kHz, etc) */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+}
+
+/* Sidebar nav-item (active state has the offset amber rule on the left). */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 7px 10px;
+  border-radius: var(--radius-1);
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-size: var(--text-base);
+  position: relative;
+  transition: background var(--dur-1) var(--ease-out-soft), color var(--dur-1) var(--ease-out-soft);
+}
+.nav-item:hover { background: var(--surface-2); color: var(--fg); }
+/* The <button> variant resets the browser defaults so it renders identical
+ * to the <a className="nav-item"> rows. */
+.nav-item-button {
+  background: transparent;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.nav-item-button:disabled { cursor: default; opacity: 0.6; }
+.nav-item.is-active {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.nav-item.is-active::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+/* Sub-row variant (recently added / most played / random under each
+ * browse section). Indented under the parent icon, smaller and muted by
+ * default; active state still picks up the parent .is-active treatment. */
+.nav-subs {
+  display: flex;
+  flex-direction: column;
+}
+.nav-item.is-sub {
+  padding-left: 38px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+.nav-item.is-sub:hover { color: var(--fg-muted); background: transparent; }
+.nav-item.is-sub.is-active {
+  color: var(--fg);
+  background: transparent;
+}
+.nav-item.is-sub.is-active::before {
+  /* Match the parent rule but shorter — 2px line aligned with the row. */
+  top: 3px;
+  bottom: 3px;
+}
+
+/* Diagnostics histogram inline 3-segment box-bar. */
+.hist-bar {
+  position: relative;
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.hist-bar .seg {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  border-radius: inherit;
+}
+.hist-bar .seg.p50 { background: color-mix(in oklab, var(--success) 50%, transparent); }
+.hist-bar .seg.p95 { background: color-mix(in oklab, var(--warning) 35%, transparent); }
+.hist-bar .seg.p99 { background: color-mix(in oklab, var(--danger)  30%, transparent); }
+.hist-bar .marker-max {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 1px;
+  background: var(--fg-faint);
+}
+
+/* Diagnostics stat tile. */
+.tile-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-4);
+  background: var(--surface-1);
+  border-radius: var(--radius-3);
+  border: 1px solid var(--border-subtle);
+}
+.tile-stat .stat-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-faint);
+}
+.tile-stat .stat-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xl);
+  color: var(--fg);
+}
+.tile-stat.is-warn .stat-value  { color: var(--warning); }
+.tile-stat.is-danger .stat-value { color: var(--danger); }
+
+/* "Load more" — centered button shown below paginated lists. Subtle
+   surface tile that matches the table-row aesthetic; not a primary CTA. */
+.load-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-5) 0 var(--space-3);
+}
+.load-more {
+  background: var(--surface-1);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-5);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition:
+    color var(--dur-1) var(--ease-out-soft),
+    background var(--dur-1) var(--ease-out-soft),
+    border-color var(--dur-1) var(--ease-out-soft);
+}
+.load-more:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+  border-color: var(--border-strong, var(--border));
+}
+.load-more:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* IntersectionObserver target for prefetch. 1×1 layout box sits next to
+   the load-more button; the observer fires when it crosses into the
+   viewport's expanded margin. */
+.load-more-sentinel {
+  width: 1px;
+  height: 1px;
+}
+
+/* Search page two-column layout — artists side-by-side with albums.
+   Each child .section retains its own internal layout; the wrapper
+   just allocates two equal columns. Collapses to a stack on narrow
+   viewports where the columns would be too cramped to render the
+   hero strip's three tiles. */
+.search-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6);
+}
+@media (max-width: 1100px) {
+  .search-grid {
+    grid-template-columns: 1fr;
+  }
+}
+/* Search "top results" strip — three featured items per section. All
+   three buckets (artists / albums / tracks) use the .search-hero card
+   shape (horizontal: cover + meta column), so a uniform 3×1fr grid
+   works for both the full-width tracks strip and the half-width
+   artists/albums strips inside .search-grid. */
+.hero-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+@media (max-width: 768px) {
+  .hero-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Featured search-result card. Cover on the left, metadata on the
+   right. Used by ArtistHeroCard, AlbumHeroCard, and TrackHeroCard.
+   Each variant differs only in:
+     - cover shape (artists use .is-circle)
+     - whether the cover is a button (tracks: yes, plays the track)
+       or a plain div inside a Link wrapper (artists/albums: whole
+       card navigates). */
+.search-hero {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border-radius: var(--radius-3);
+  transition: background var(--dur-2) var(--ease-out-soft);
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.search-hero:hover {
+  background: var(--surface-3);
+}
+.search-hero-cover {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  position: relative;
+  border: none;
+  padding: 0;
+  background: var(--surface-3);
+  color: var(--fg);
+}
+button.search-hero-cover {
+  cursor: pointer;
+}
+.search-hero-cover.is-circle {
+  border-radius: var(--radius-full);
+}
+.search-hero-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out-soft);
+}
+.search-hero:hover .search-hero-play,
+.search-hero-cover:focus-visible .search-hero-play {
+  opacity: 1;
+}
+.search-hero-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.search-hero-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* When the title is itself a link (album hero), strip the default
+   anchor underline; rely on hover for affordance. */
+a.search-hero-title {
+  text-decoration: none;
+}
+a.search-hero-title:hover {
+  text-decoration: underline;
+}
+.search-hero-sub {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-hero-sub a {
+  color: inherit;
+  text-decoration: none;
+}
+.search-hero-sub a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.search-hero-sep {
+  margin: 0 6px;
+  color: var(--fg-faint);
+}
+
+/* Suggestion list — used on Playlist page for recommender output.
+ * One row per candidate: cover (clickable, plays the track), title +
+ * artist · album, "add" button on the right. Visual language is
+ * intentionally close to .search-hero so the page feels coherent
+ * across discovery surfaces, but rows here are denser since the
+ * panel typically renders ≥10 of them. */
+.suggestion-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.suggestion-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-1);
+  border-radius: var(--radius-2);
+  min-width: 0;
+  transition: background var(--dur-1) var(--ease-out-soft);
+}
+.suggestion-row:hover {
+  background: var(--surface-2);
+}
+.suggestion-cover {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: var(--radius-1);
+  overflow: hidden;
+  background: var(--surface-3);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--fg);
+}
+.suggestion-cover-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out-soft);
+}
+.suggestion-row:hover .suggestion-cover-play,
+.suggestion-cover:focus-visible .suggestion-cover-play {
+  opacity: 1;
+}
+.suggestion-meta {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.suggestion-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.suggestion-sub {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.suggestion-add {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  border: 0;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out-soft),
+              color var(--dur-1) var(--ease-out-soft);
+}
+.suggestion-add:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.suggestion-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.search-hero-time {
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+  margin-top: 2px;
+}
