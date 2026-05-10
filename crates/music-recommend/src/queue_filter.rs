@@ -34,6 +34,34 @@ use music_core::TrackId;
 
 use crate::metadata::TrackMetadata;
 
+/// Outcome of [`QueueFilter::try_accept`]. Carries enough detail for
+/// the handlers to split rejection counts by reason in the trace
+/// store (artist cap vs cross-edition dedup), so /diagnostics can
+/// show which knob is doing the work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterDecision {
+    /// Candidate survived all checks and was admitted into the slate.
+    /// Internal counts (artist + dedup) are now bumped.
+    Accept,
+    /// Candidate was rejected because the artist's queue footprint is
+    /// at the per-artist cap. State unchanged.
+    RejectArtistCap,
+    /// Candidate was rejected because `(artist_key, title_normalized)`
+    /// matches an entry already in the queue or already accepted in
+    /// this call. State unchanged.
+    RejectDedup,
+}
+
+impl FilterDecision {
+    /// Convenience for the common boolean question "was this admitted?".
+    /// Tests and call sites that only care about the binary outcome
+    /// should use this; sites that record diagnostics should match on
+    /// the full enum.
+    pub fn is_accept(self) -> bool {
+        matches!(self, Self::Accept)
+    }
+}
+
 /// Knobs controlling filter strictness. Sensible defaults match the
 /// web client's old `MAX_PER_ARTIST = 2` + `dedupeKey` behavior so
 /// switching to server-side filtering is behavior-preserving.
@@ -123,9 +151,10 @@ impl QueueFilter {
         self.excluded.contains(id)
     }
 
-    /// Try to accept a candidate. Returns `true` if it survives all
-    /// filters and updates internal state to reflect its acceptance;
-    /// `false` if a filter rejects it (state unchanged).
+    /// Try to accept a candidate. Returns [`FilterDecision::Accept`] if
+    /// it survives all filters (state mutated to reflect the accept),
+    /// otherwise the specific [`FilterDecision`] variant that fired
+    /// (state unchanged).
     ///
     /// Candidates without metadata in the cache pass the artist-cap
     /// and dedup checks (we have no signal to constrain them with),
@@ -133,29 +162,29 @@ impl QueueFilter {
     /// run [`Self::is_excluded`] first — `try_accept` does *not*
     /// re-check exclusion, since handlers benefit from a span-friendly
     /// breakdown of exclusion vs. cap-rejection.
-    pub fn try_accept(&mut self, meta: Option<&TrackMetadata>) -> bool {
+    pub fn try_accept(&mut self, meta: Option<&TrackMetadata>) -> FilterDecision {
         let Some(m) = meta else {
             // No metadata → we have no artist or title to gate on.
             // Pass through; a follow-up backfill will eventually fill
             // the row in and the next refill will gate on it.
-            return true;
+            return FilterDecision::Accept;
         };
         let ak = artist_key(m);
         if self.cfg.max_per_artist > 0
             && self.artist_counts.get(&ak).copied().unwrap_or(0) >= self.cfg.max_per_artist
         {
-            return false;
+            return FilterDecision::RejectArtistCap;
         }
         let dk = format!("{ak}|{}", m.title_normalized);
         if self.cfg.dedup_titles && self.dedup_keys.contains(&dk) {
-            return false;
+            return FilterDecision::RejectDedup;
         }
         // Accept: bump counts.
         *self.artist_counts.entry(ak).or_insert(0) += 1;
         if self.cfg.dedup_titles {
             self.dedup_keys.insert(dk);
         }
-        true
+        FilterDecision::Accept
     }
 }
 
@@ -260,7 +289,7 @@ mod tests {
         );
         // ar1 is already at cap (2). Any new ar1 candidate is rejected.
         let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
-        assert!(!f.try_accept(Some(&cand)));
+        assert!(!f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -278,10 +307,10 @@ mod tests {
             },
         );
         let cand = track("c1", Some("ar1"), "Queen", "Killer Queen");
-        assert!(f.try_accept(Some(&cand)));
+        assert!(f.try_accept(Some(&cand)).is_accept());
         // Now at cap; next ar1 rejected.
         let cand2 = track("c2", Some("ar1"), "Queen", "Don't Stop Me Now");
-        assert!(!f.try_accept(Some(&cand2)));
+        assert!(!f.try_accept(Some(&cand2)).is_accept());
     }
 
     #[test]
@@ -302,7 +331,7 @@ mod tests {
         );
         // ar1 has 2 entries (now-playing + q2) → at cap.
         let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
-        assert!(!f.try_accept(Some(&cand)));
+        assert!(!f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -321,7 +350,7 @@ mod tests {
             },
         );
         let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
-        assert!(f.try_accept(Some(&cand)));
+        assert!(f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -340,7 +369,7 @@ mod tests {
             },
         );
         let cand = track("c1", None, "QUEEN", "Don't Stop Me Now");
-        assert!(!f.try_accept(Some(&cand)));
+        assert!(!f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -358,20 +387,15 @@ mod tests {
         );
         let c1 = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
         let c2 = track("c2", Some("ar1"), "Queen", "Killer Queen");
-        assert!(f.try_accept(Some(&c1)));
-        assert!(!f.try_accept(Some(&c2)));
+        assert!(f.try_accept(Some(&c1)).is_accept());
+        assert!(!f.try_accept(Some(&c2)).is_accept());
     }
 
     // --- title dedup ---
 
     #[test]
     fn title_dedup_blocks_remaster_when_original_is_queued() {
-        let q1 = track(
-            "q1",
-            Some("ar1"),
-            "Queen",
-            "Bohemian Rhapsody",
-        );
+        let q1 = track("q1", Some("ar1"), "Queen", "Bohemian Rhapsody");
         let metadata = meta_map(std::slice::from_ref(&q1));
         let queue = ids(&["q1"]);
         let mut f = QueueFilter::build(
@@ -389,7 +413,7 @@ mod tests {
             "Queen",
             "Bohemian Rhapsody (Remastered 2011)",
         );
-        assert!(!f.try_accept(Some(&cand)));
+        assert!(!f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -407,7 +431,7 @@ mod tests {
             },
         );
         let cand = track("c1", Some("ar2"), "Other", "Crazy Little Thing");
-        assert!(f.try_accept(Some(&cand)));
+        assert!(f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -430,7 +454,7 @@ mod tests {
             "Queen",
             "Bohemian Rhapsody (Remastered 2011)",
         );
-        assert!(f.try_accept(Some(&cand)));
+        assert!(f.try_accept(Some(&cand)).is_accept());
     }
 
     #[test]
@@ -448,14 +472,9 @@ mod tests {
             },
         );
         let c1 = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
-        let c2 = track(
-            "c2",
-            Some("ar1"),
-            "Queen",
-            "Bohemian Rhapsody (Live)",
-        );
-        assert!(f.try_accept(Some(&c1)));
-        assert!(!f.try_accept(Some(&c2)));
+        let c2 = track("c2", Some("ar1"), "Queen", "Bohemian Rhapsody (Live)");
+        assert!(f.try_accept(Some(&c1)).is_accept());
+        assert!(!f.try_accept(Some(&c2)).is_accept());
     }
 
     // --- missing metadata ---
@@ -463,13 +482,8 @@ mod tests {
     #[test]
     fn candidate_without_metadata_passes_through() {
         // Cache miss → no signal to gate on. Pass through.
-        let mut f = QueueFilter::build(
-            &[],
-            None,
-            &HashMap::new(),
-            QueueFilterConfig::default(),
-        );
-        assert!(f.try_accept(None));
+        let mut f = QueueFilter::build(&[], None, &HashMap::new(), QueueFilterConfig::default());
+        assert!(f.try_accept(None).is_accept());
     }
 
     #[test]
@@ -488,17 +502,69 @@ mod tests {
         );
         assert!(f.is_excluded(&TrackId::from("q1")));
         let cand = track("c1", Some("ar1"), "Queen", "Killer Queen");
-        assert!(f.try_accept(Some(&cand)));
+        assert!(f.try_accept(Some(&cand)).is_accept());
+    }
+
+    // --- decision-reason reporting ---
+
+    #[test]
+    fn try_accept_returns_accept_for_admitted_candidate() {
+        let mut f = QueueFilter::build(&[], None, &HashMap::new(), QueueFilterConfig::default());
+        let c = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
+        assert_eq!(f.try_accept(Some(&c)), FilterDecision::Accept);
+    }
+
+    #[test]
+    fn try_accept_returns_reject_artist_cap_when_at_cap() {
+        let q1 = track("q1", Some("ar1"), "Queen", "Bohemian Rhapsody");
+        let q2 = track("q2", Some("ar1"), "Queen", "Killer Queen");
+        let metadata = meta_map(&[q1.clone(), q2.clone()]);
+        let queue = ids(&["q1", "q2"]);
+        let mut f = QueueFilter::build(
+            &queue,
+            None,
+            &metadata,
+            QueueFilterConfig {
+                max_per_artist: 2,
+                dedup_titles: false,
+            },
+        );
+        let cand = track("c1", Some("ar1"), "Queen", "Don't Stop Me Now");
+        assert_eq!(f.try_accept(Some(&cand)), FilterDecision::RejectArtistCap,);
+    }
+
+    #[test]
+    fn try_accept_returns_reject_dedup_when_title_collides() {
+        // Title dedup must be the firing reason, so disable artist cap
+        // entirely — otherwise we couldn't tell which check fired first.
+        let q1 = track("q1", Some("ar1"), "Queen", "Bohemian Rhapsody");
+        let metadata = meta_map(std::slice::from_ref(&q1));
+        let queue = ids(&["q1"]);
+        let mut f = QueueFilter::build(
+            &queue,
+            None,
+            &metadata,
+            QueueFilterConfig {
+                max_per_artist: 0,
+                dedup_titles: true,
+            },
+        );
+        let cand = track(
+            "c1",
+            Some("ar1"),
+            "Queen",
+            "Bohemian Rhapsody (Remastered 2011)",
+        );
+        assert_eq!(f.try_accept(Some(&cand)), FilterDecision::RejectDedup);
     }
 
     // --- empty/edge ---
 
     #[test]
     fn empty_queue_with_default_config_admits_first_candidate() {
-        let mut f =
-            QueueFilter::build(&[], None, &HashMap::new(), QueueFilterConfig::default());
+        let mut f = QueueFilter::build(&[], None, &HashMap::new(), QueueFilterConfig::default());
         let c = track("c1", Some("ar1"), "Queen", "Bohemian Rhapsody");
-        assert!(f.try_accept(Some(&c)));
+        assert!(f.try_accept(Some(&c)).is_accept());
     }
 
     #[test]
@@ -519,6 +585,6 @@ mod tests {
             },
         );
         let cand = track("c2", None, "Queen", "Killer Queen");
-        assert!(!f.try_accept(Some(&cand)));
+        assert!(!f.try_accept(Some(&cand)).is_accept());
     }
 }

@@ -19,7 +19,7 @@ use axum::{
 use music_core::TrackId;
 use music_recommend::aggregate::{aggregate_seed_results, sample_indices};
 use music_recommend::metadata::MetadataStore;
-use music_recommend::queue_filter::{QueueFilter, QueueFilterConfig};
+use music_recommend::queue_filter::{FilterDecision, QueueFilter, QueueFilterConfig};
 use music_recommend::types::ModelVersion;
 use music_recommend::{EmbeddingKey, EmbeddingStore, ann::AnnIndex};
 use rand::SeedableRng;
@@ -243,6 +243,12 @@ pub struct FromSeedsResponse {
         seeds_indexed = tracing::field::Empty,
         results = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
+        filter_dropped_artist = tracing::field::Empty,
+        filter_dropped_dedup = tracing::field::Empty,
+        filter_dropped_max_sim = tracing::field::Empty,
+        filter_admitted_min_sim = tracing::field::Empty,
+        filter_admitted_max_sim = tracing::field::Empty,
+        filter_sim_gap = tracing::field::Empty,
     ),
 )]
 pub async fn from_seeds(
@@ -300,8 +306,11 @@ pub async fn from_seeds(
     // Queue ids also flow into the same set so the aggregator never
     // even surfaces them; the QueueFilter then enforces the artist
     // cap + title dedup on what survives.
-    let mut exclude: HashSet<TrackId> =
-        req.seeds.iter().map(|s| TrackId::from(s.as_str())).collect();
+    let mut exclude: HashSet<TrackId> = req
+        .seeds
+        .iter()
+        .map(|s| TrackId::from(s.as_str()))
+        .collect();
     for id in &req.exclude_track_ids {
         exclude.insert(TrackId::from(id.as_str()));
     }
@@ -345,14 +354,14 @@ pub async fn from_seeds(
 
     let aggregated = aggregate_seed_results(&per_seed_results, &exclude, internal_top_n);
 
-    let (filtered, capped) = match &req.queue_context {
+    let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(state.metadata_store(), qc, aggregated, top_n).await
         }
-        None => (aggregated, 0u32),
+        None => (aggregated, FilterStats::default()),
     };
     tracing::Span::current().record("results", filtered.len());
-    tracing::Span::current().record("filter_capped", capped);
+    record_filter_stats(&filter_stats);
 
     Ok(Json(FromSeedsResponse {
         model_version: Some(model_version.as_str().to_string()),
@@ -402,6 +411,12 @@ pub struct FromAnyResponse {
         seed_used = tracing::field::Empty,
         results = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
+        filter_dropped_artist = tracing::field::Empty,
+        filter_dropped_dedup = tracing::field::Empty,
+        filter_dropped_max_sim = tracing::field::Empty,
+        filter_admitted_min_sim = tracing::field::Empty,
+        filter_admitted_max_sim = tracing::field::Empty,
+        filter_sim_gap = tracing::field::Empty,
     ),
 )]
 pub async fn from_any(
@@ -476,17 +491,15 @@ pub async fn from_any(
             .query_excluding(&vector, internal_n, &excludes_for_query)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
-        let (filtered, capped) = match &req.queue_context {
-            Some(qc) => {
-                apply_queue_filter_to_ann(state.metadata_store(), qc, results, n).await
-            }
-            None => (results, 0u32),
+        let (filtered, filter_stats) = match &req.queue_context {
+            Some(qc) => apply_queue_filter_to_ann(state.metadata_store(), qc, results, n).await,
+            None => (results, FilterStats::default()),
         };
 
         tracing::Span::current().record("candidates_tried", tried);
         tracing::Span::current().record("seed_used", cand.as_str());
         tracing::Span::current().record("results", filtered.len());
-        tracing::Span::current().record("filter_capped", capped);
+        record_filter_stats(&filter_stats);
 
         return Ok(Json(FromAnyResponse {
             seed_used: cand.clone(),
@@ -547,27 +560,104 @@ async fn build_filter_with_metadata(
         });
 
     let now_playing = qc.now_playing_track_id.as_deref().map(TrackId::from);
-    let filter =
-        QueueFilter::build(&queue_ids, now_playing.as_ref(), &metadata, qc.config());
+    let filter = QueueFilter::build(&queue_ids, now_playing.as_ref(), &metadata, qc.config());
     (filter, metadata)
 }
 
+/// Per-request filter telemetry. Captured during the post-filter walk
+/// and recorded onto the request span so /diagnostics can show "did
+/// the filter cost us anything in this slate?".
+///
+/// The headline number is [`Self::sim_gap`]: when positive, the filter
+/// rejected a candidate stronger than the worst we admitted — a direct
+/// proxy for the "genre jump" symptom we're trying to characterise
+/// before tuning the algorithm.
+#[derive(Debug, Default, Clone, Copy)]
+struct FilterStats {
+    dropped_artist: u32,
+    dropped_dedup: u32,
+    /// Highest similarity rejected by artist cap or dedup. `None` when
+    /// nothing was dropped this request.
+    dropped_max_sim: Option<f32>,
+    /// Lowest similarity in the admitted slate. `None` when no admits.
+    admitted_min_sim: Option<f32>,
+    /// Highest similarity in the admitted slate. Mostly for context —
+    /// pair with `admitted_min_sim` to see the spread of what we kept.
+    admitted_max_sim: Option<f32>,
+}
+
+impl FilterStats {
+    fn total_dropped(&self) -> u32 {
+        self.dropped_artist + self.dropped_dedup
+    }
+
+    fn record_admit(&mut self, sim: f32) {
+        self.admitted_min_sim = Some(self.admitted_min_sim.map_or(sim, |v| v.min(sim)));
+        self.admitted_max_sim = Some(self.admitted_max_sim.map_or(sim, |v| v.max(sim)));
+    }
+
+    fn record_drop(&mut self, decision: FilterDecision, sim: f32) {
+        match decision {
+            FilterDecision::RejectArtistCap => self.dropped_artist += 1,
+            FilterDecision::RejectDedup => self.dropped_dedup += 1,
+            // Accept never reaches here — the apply loop only forwards
+            // rejection decisions to `record_drop`. Defensive no-op.
+            FilterDecision::Accept => return,
+        }
+        self.dropped_max_sim = Some(self.dropped_max_sim.map_or(sim, |v| v.max(sim)));
+    }
+
+    /// Spread between best dropped and worst admitted. Positive when
+    /// the filter forced a worse pick than something it rejected.
+    fn sim_gap(&self) -> Option<f32> {
+        match (self.dropped_max_sim, self.admitted_min_sim) {
+            (Some(d), Some(a)) => Some(d - a),
+            _ => None,
+        }
+    }
+}
+
+/// Push every collected stat onto the current span. Optional fields are
+/// only recorded when populated, so old-shape consumers / empty-result
+/// requests don't see misleading zeros for "best-dropped similarity".
+fn record_filter_stats(stats: &FilterStats) {
+    let span = tracing::Span::current();
+    span.record("filter_capped", stats.total_dropped());
+    span.record("filter_dropped_artist", stats.dropped_artist);
+    span.record("filter_dropped_dedup", stats.dropped_dedup);
+    // tracing's `Value` impl covers f64 but not f32 — cast at the seam.
+    if let Some(v) = stats.dropped_max_sim {
+        span.record("filter_dropped_max_sim", f64::from(v));
+    }
+    if let Some(v) = stats.admitted_min_sim {
+        span.record("filter_admitted_min_sim", f64::from(v));
+    }
+    if let Some(v) = stats.admitted_max_sim {
+        span.record("filter_admitted_max_sim", f64::from(v));
+    }
+    if let Some(v) = stats.sim_gap() {
+        span.record("filter_sim_gap", f64::from(v));
+    }
+}
+
 /// Apply the [`QueueFilter`] to aggregated `from-seeds` results. Returns
-/// the surviving items truncated to `top_n`, plus a count of items
-/// rejected by the artist-cap / dedup filters (exposed as a span field
-/// for diagnostics).
+/// the surviving items truncated to `top_n`, plus per-request
+/// [`FilterStats`] for the request span.
 async fn apply_queue_filter_to_aggregate(
     metadata_store: &MetadataStore,
     qc: &QueueContext,
     candidates: Vec<music_recommend::aggregate::AggregatedResult>,
     top_n: usize,
-) -> (Vec<music_recommend::aggregate::AggregatedResult>, u32) {
+) -> (
+    Vec<music_recommend::aggregate::AggregatedResult>,
+    FilterStats,
+) {
     let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id.clone()).collect();
     let (mut filter, metadata) =
         build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
 
     let mut out = Vec::with_capacity(top_n);
-    let mut capped = 0u32;
+    let mut stats = FilterStats::default();
     for c in candidates {
         if out.len() >= top_n {
             break;
@@ -577,13 +667,15 @@ async fn apply_queue_filter_to_aggregate(
             // request build, so no separate metric needed.
             continue;
         }
-        if filter.try_accept(metadata.get(&c.track_id)) {
-            out.push(c);
-        } else {
-            capped += 1;
+        match filter.try_accept(metadata.get(&c.track_id)) {
+            FilterDecision::Accept => {
+                stats.record_admit(c.score);
+                out.push(c);
+            }
+            d => stats.record_drop(d, c.score),
         }
     }
-    (out, capped)
+    (out, stats)
 }
 
 /// Apply the [`QueueFilter`] to ANN `from-any` results. Same shape as
@@ -593,13 +685,13 @@ async fn apply_queue_filter_to_ann(
     qc: &QueueContext,
     candidates: Vec<music_recommend::ann::AnnQueryResult>,
     top_n: usize,
-) -> (Vec<music_recommend::ann::AnnQueryResult>, u32) {
+) -> (Vec<music_recommend::ann::AnnQueryResult>, FilterStats) {
     let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id.clone()).collect();
     let (mut filter, metadata) =
         build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
 
     let mut out = Vec::with_capacity(top_n);
-    let mut capped = 0u32;
+    let mut stats = FilterStats::default();
     for c in candidates {
         if out.len() >= top_n {
             break;
@@ -607,13 +699,15 @@ async fn apply_queue_filter_to_ann(
         if filter.is_excluded(&c.track_id) {
             continue;
         }
-        if filter.try_accept(metadata.get(&c.track_id)) {
-            out.push(c);
-        } else {
-            capped += 1;
+        match filter.try_accept(metadata.get(&c.track_id)) {
+            FilterDecision::Accept => {
+                stats.record_admit(c.similarity);
+                out.push(c);
+            }
+            d => stats.record_drop(d, c.similarity),
         }
     }
-    (out, capped)
+    (out, stats)
 }
 
 /// Look up the seed's embedding. The ANN owns query-time state, so we
