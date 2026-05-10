@@ -37,6 +37,15 @@ import { useSync } from "../sync/SyncContext";
 // (the server's internal buffer factor handles cap rejects).
 const MIN_UPCOMING = 5;
 const STORAGE_KEY = "crates-music.autoplay";
+
+// Slate selection knobs. We opted into MMR after the λ-sweep at
+// `bench-results/lambda-sweep/` showed λ=0.8 is the only point on the
+// curve that doesn't trade off admit_mean for the worst-case-tax win.
+// Hard-cap is still available server-side as a fallback if a user-level
+// override ever lands; for now the value is hard-coded to the swept
+// default.
+const DIVERSITY_MODE = "mmr" as const;
+const MMR_LAMBDA = 0.8;
 // Hold the in-flight lock for a beat after pushing so the gateway WS
 // round-trip can land before the effect re-evaluates. Without this the
 // effect can re-fire while the new items haven't shown up in local
@@ -114,6 +123,8 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
         const { tracks } = await startStationFromAny(seedCandidates, need, {
           queueTrackIds: items.map((it) => it.track_id),
           ...(nowPlayingTrackId ? { nowPlayingTrackId } : {}),
+          diversityMode: DIVERSITY_MODE,
+          mmrLambda: MMR_LAMBDA,
         });
         if (cancelled) return;
         for (const t of tracks) {

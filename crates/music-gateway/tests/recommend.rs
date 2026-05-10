@@ -965,3 +965,170 @@ async fn from_any_requires_auth() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// --- diversity_mode dispatch (Phase 2 wire) ---
+
+#[tokio::test]
+async fn from_any_diversity_mode_mmr_returns_slate() {
+    // Smoke: the gateway accepts `diversity_mode: "mmr"` + `mmr_lambda`
+    // on the wire and routes through `walk_mmr` without erroring. The
+    // detailed correctness of the MMR ranking lives in the unit tests
+    // for `mmr_rerank` — here we only verify the dispatch path is wired
+    // up and the slate is non-empty.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                &format!("ar{i}"),
+                &format!("Artist {i}"),
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 5,
+            "queue_context": {
+                "queue_track_ids": [],
+                "diversity_mode": "mmr",
+                "mmr_lambda": 0.8,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(!results.is_empty(), "MMR mode returned an empty slate");
+}
+
+#[tokio::test]
+async fn from_any_diversity_mode_off_skips_artist_cap() {
+    // `off` should bypass *all* diversity gating — same-artist tracks
+    // come back unconstrained. Mirrors `from_seeds_max_per_artist_zero
+    // _disables_cap` but proves the wire toggles the right path: when
+    // we ALSO send `max_per_artist: 2`, `off` mode should still admit
+    // every track (cap is part of HardCap, not a separate filter).
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 20,
+            "queue_context": {
+                "queue_track_ids": [],
+                "diversity_mode": "off",
+                "max_per_artist": 2,  // would normally cap at 2; off ignores it
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results.len(),
+        DIM - 1,
+        "diversity_mode=off should bypass max_per_artist; got {} of {}",
+        results.len(),
+        DIM - 1
+    );
+}
+
+#[tokio::test]
+async fn from_any_diversity_mode_default_preserves_hard_cap() {
+    // No `diversity_mode` field → server default (HardCap). Must reproduce
+    // the cap-enforcing behaviour byte-for-byte: with max_per_artist=2
+    // and 7 same-artist tracks in a single-seed station, exactly 2 come
+    // back. Regression guard for the default-preserving claim in the
+    // QueueContext deserializer.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "ar1",
+                "Queen",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 20,
+            "queue_context": {
+                "queue_track_ids": [],
+                // diversity_mode omitted; should default to hard_cap
+                "max_per_artist": 2,
+                "dedup_titles": false,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results.len(),
+        2,
+        "default diversity_mode should preserve HardCap (cap=2)"
+    );
+}
+
+#[tokio::test]
+async fn from_any_unknown_diversity_mode_rejected() {
+    // Unknown enum variant → JsonRejection → 400. Catches typos at
+    // request time rather than silently falling through to the default.
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 5,
+            "queue_context": {
+                "queue_track_ids": [],
+                "diversity_mode": "fancy_new_algorithm",
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

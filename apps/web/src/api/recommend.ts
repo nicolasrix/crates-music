@@ -113,10 +113,18 @@ interface FromAnyResponse {
   results: RecommendItem[];
 }
 
+/** Slate-selection algorithm. Mirrors `DiversityMode` in the gateway —
+ *  `hard_cap` is the legacy cap-only behaviour, `mmr` is Maximal
+ *  Marginal Relevance over the candidate vectors, `off` disables
+ *  diversity gating entirely. Server default is `hard_cap`; the web
+ *  client opts into `mmr` from `AutoplayContext`. */
+export type DiversityMode = "hard_cap" | "mmr" | "off";
+
 /** Queue snapshot the gateway uses for diversity filtering (artist
  *  cap + cross-edition title dedup). Wire shape mirrors the server's
  *  `QueueContext`. Optional knobs default to the server's own
- *  defaults (`max_per_artist=2`, `dedup_titles=true`). */
+ *  defaults (`max_per_artist=2`, `dedup_titles=true`,
+ *  `diversity_mode="hard_cap"`, `mmr_lambda=0.7`). */
 export interface QueueContext {
   queueTrackIds: readonly string[];
   nowPlayingTrackId?: string;
@@ -124,6 +132,11 @@ export interface QueueContext {
   maxPerArtist?: number;
   /** `false` disables (artist, normalized-title) dedup. */
   dedupTitles?: boolean;
+  /** Slate selection algorithm. Omit to use the server default. */
+  diversityMode?: DiversityMode;
+  /** MMR relevance/novelty tradeoff in [0, 1]. Only consulted when
+   *  `diversityMode === "mmr"`. */
+  mmrLambda?: number;
 }
 
 function serializeQueueContext(qc: QueueContext): Record<string, unknown> {
@@ -133,6 +146,8 @@ function serializeQueueContext(qc: QueueContext): Record<string, unknown> {
   if (qc.nowPlayingTrackId) body.now_playing_track_id = qc.nowPlayingTrackId;
   if (qc.maxPerArtist !== undefined) body.max_per_artist = qc.maxPerArtist;
   if (qc.dedupTitles !== undefined) body.dedup_titles = qc.dedupTitles;
+  if (qc.diversityMode !== undefined) body.diversity_mode = qc.diversityMode;
+  if (qc.mmrLambda !== undefined) body.mmr_lambda = qc.mmrLambda;
   return body;
 }
 
