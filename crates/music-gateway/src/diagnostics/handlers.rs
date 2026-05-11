@@ -26,7 +26,7 @@ use music_recommend::types::ModelVersion;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::diagnostics::{ClientEventRecord, HistogramBucket, SpanRecord};
+use crate::diagnostics::{ClientEventRecord, HistogramBucket, RecommendSummary, SpanRecord};
 use crate::state::AppState;
 
 const DEFAULT_TRACE_LIMIT: usize = 100;
@@ -354,6 +354,561 @@ pub async fn list_client_events(
         .map_err(db_error)?;
     Ok(Json(ClientEventsResponse {
         events: rows.into_iter().map(ClientEventEntry::from).collect(),
+    }))
+}
+
+// --- /v1/diagnostics/recently_played ---------------------------------------
+
+const DEFAULT_RECENTLY_PLAYED_LIMIT: u32 = 100;
+const MAX_RECENTLY_PLAYED_LIMIT: u32 = 1_000;
+
+#[derive(Debug, Deserialize)]
+pub struct RecentlyPlayedQuery {
+    limit: Option<u32>,
+    /// Inclusive lower bound on `occurred_at` (unix-ms). Useful when
+    /// eyeballing recency-window candidates: pass `now - window_ms` and
+    /// see how many distinct tracks the user replayed inside that
+    /// window.
+    since_ms: Option<i64>,
+}
+
+/// One scrobble row, joined against the gateway's `track_metadata`
+/// cache so the diagnostics panel can show "title — artist — album · year"
+/// instead of opaque track ids. Metadata fields are `Option` because the
+/// cache may not yet contain a row for tracks that haven't been embedded
+/// (recommend ingest is what populates `track_metadata`); the UI falls
+/// back to the raw `track_id` in that case.
+#[derive(Debug, Serialize)]
+pub struct RecentlyPlayedEntry {
+    track_id: String,
+    /// Client-supplied scrobble timestamp.
+    occurred_at_ms: i64,
+    /// Gateway-stamped persist time. Difference from `occurred_at_ms`
+    /// = client clock skew + offline batch delay.
+    received_at_ms: i64,
+    title: Option<String>,
+    artist: Option<String>,
+    artist_id: Option<String>,
+    album: Option<String>,
+    album_id: Option<String>,
+    year: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentlyPlayedResponse {
+    events: Vec<RecentlyPlayedEntry>,
+}
+
+pub async fn recently_played(
+    State(state): State<AppState>,
+    Query(q): Query<RecentlyPlayedQuery>,
+) -> Result<Json<RecentlyPlayedResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_RECENTLY_PLAYED_LIMIT)
+        .clamp(1, MAX_RECENTLY_PLAYED_LIMIT);
+    let rows = state
+        .event_store()
+        .recently_played(limit, q.since_ms)
+        .await
+        .map_err(db_error)?;
+
+    // Batched metadata join: one query for the whole page, not N. The
+    // deduplication via .collect() into a HashSet→Vec keeps the round
+    // trip linear in *unique* tracks, not events — matters when a user
+    // has played the same track several times in the window.
+    let unique_ids: Vec<music_core::TrackId> = rows
+        .iter()
+        .map(|e| e.track_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let metadata = state
+        .metadata_store()
+        .get_many(&unique_ids)
+        .await
+        .map_err(db_error)?;
+
+    let events = rows
+        .into_iter()
+        .map(|e| {
+            let md = metadata.get(&e.track_id);
+            RecentlyPlayedEntry {
+                track_id: e.track_id.as_str().to_string(),
+                occurred_at_ms: e.occurred_at,
+                received_at_ms: e.received_at,
+                title: md.map(|m| m.title.clone()),
+                artist: md.map(|m| m.artist.clone()),
+                artist_id: md.and_then(|m| m.artist_id.clone()),
+                album: md.and_then(|m| m.album.clone()),
+                album_id: md.and_then(|m| m.album_id.clone()),
+                year: md.and_then(|m| m.year),
+            }
+        })
+        .collect();
+    Ok(Json(RecentlyPlayedResponse { events }))
+}
+
+// --- /v1/diagnostics/recommend/* ------------------------------------------
+//
+// Four aggregations over recommend spans. They share an upstream
+// (`TraceStore::recommend_summaries`) and a since_ms filter; each
+// handler turns the raw rows into one chart's worth of JSON.
+
+#[derive(Debug, Deserialize)]
+pub struct RecommendQuery {
+    /// Inclusive lower bound on the span's `end_ms`. `None` ⇒ scan the
+    /// whole ring (still bounded by `trim_to_capacity`).
+    since_ms: Option<i64>,
+}
+
+/// Bucket boundaries for the queue-fill histogram. Six bins for the
+/// shortfall range + a dedicated 100% bin so the "everything is fine"
+/// case stays separable from "we delivered 19/20 occasionally."
+const FILL_BUCKETS: &[(&str, f32, f32)] = &[
+    ("0%", 0.0, 0.0001),
+    ("0-20%", 0.0001, 0.20),
+    ("20-40%", 0.20, 0.40),
+    ("40-60%", 0.40, 0.60),
+    ("60-80%", 0.60, 0.80),
+    ("80-100%", 0.80, 0.999_999),
+    ("100%", 0.999_999, f32::INFINITY),
+];
+
+#[derive(Debug, Serialize)]
+pub struct FillBucket {
+    label: &'static str,
+    count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueueFillResponse {
+    total: u64,
+    buckets: Vec<FillBucket>,
+}
+
+pub async fn recommend_queue_fill(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendQuery>,
+) -> Result<Json<QueueFillResponse>, (StatusCode, Json<Value>)> {
+    let rows = state
+        .trace_store()
+        .recommend_summaries(q.since_ms)
+        .await
+        .map_err(db_error)?;
+
+    let mut buckets: Vec<FillBucket> = FILL_BUCKETS
+        .iter()
+        .map(|(label, ..)| FillBucket {
+            label,
+            count: 0,
+        })
+        .collect();
+    let mut total: u64 = 0;
+    for row in &rows {
+        // Rows without both fields contribute to neither numerator nor
+        // denominator — they're old-shape and uninterpretable here.
+        let (Some(req), Some(res)) = (row.requested_n, row.results) else {
+            continue;
+        };
+        if req == 0 {
+            continue;
+        }
+        total += 1;
+        // Clamp at 1.0 — "over-delivered" lands in the 100% bin alongside
+        // exact-fill, which is the operator's intuition.
+        let ratio = (f32::from(u16::try_from(res.min(req)).unwrap_or(u16::MAX))
+            / f32::from(u16::try_from(req).unwrap_or(u16::MAX)))
+        .clamp(0.0, 1.0);
+        for (i, (_label, lo, hi)) in FILL_BUCKETS.iter().enumerate() {
+            if ratio >= *lo && ratio < *hi {
+                buckets[i].count += 1;
+                break;
+            }
+        }
+    }
+    Ok(Json(QueueFillResponse { total, buckets }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShortfallResponse {
+    total: u64,
+    /// Map of `shortfall_reason` → count. Rows with no reason recorded
+    /// are bucketed under `unknown` so the operator can see "how much of
+    /// the ring is pre-R1?" at a glance.
+    counts: std::collections::BTreeMap<String, u64>,
+}
+
+pub async fn recommend_shortfall(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendQuery>,
+) -> Result<Json<ShortfallResponse>, (StatusCode, Json<Value>)> {
+    let rows = state
+        .trace_store()
+        .recommend_summaries(q.since_ms)
+        .await
+        .map_err(db_error)?;
+    let mut counts: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let key = row
+            .shortfall_reason
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+    Ok(Json(ShortfallResponse { total, counts }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarityResponse {
+    count: u64,
+    /// Quantiles over the *combined* admitted-similarity sample across
+    /// the window. Useful for spotting drift ("everything we recommend
+    /// has crept above 0.95 — we're stuck in a corner").
+    p50: f64,
+    p90: f64,
+    p95: f64,
+    p99: f64,
+    min: f64,
+    max: f64,
+    mean: f64,
+}
+
+pub async fn recommend_similarity(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendQuery>,
+) -> Result<Json<SimilarityResponse>, (StatusCode, Json<Value>)> {
+    let rows = state
+        .trace_store()
+        .recommend_summaries(q.since_ms)
+        .await
+        .map_err(db_error)?;
+    // Flatten everyone's admitted_sims into one population. We could
+    // emit per-row stats, but the chart this feeds plots one quantile
+    // per refresh — the combined sample matches the visual.
+    let mut sims: Vec<f32> = Vec::new();
+    for row in &rows {
+        sims.extend(row.admitted_sims.iter().copied());
+    }
+    if sims.is_empty() {
+        return Ok(Json(SimilarityResponse {
+            count: 0,
+            p50: 0.0,
+            p90: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+        }));
+    }
+    sims.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sims.len();
+    let pick = |p: usize| -> f64 {
+        // Nearest-rank — matches `TraceStore::histogram` for consistency.
+        let idx = (p.saturating_mul(n).div_ceil(100))
+            .saturating_sub(1)
+            .min(n - 1);
+        f64::from(sims[idx])
+    };
+    #[allow(clippy::cast_precision_loss)] // n bounded by ring cap × top_n
+    let mean: f64 = f64::from(sims.iter().sum::<f32>()) / n as f64;
+    Ok(Json(SimilarityResponse {
+        count: u64::try_from(n).unwrap_or(u64::MAX),
+        p50: pick(50),
+        p90: pick(90),
+        p95: pick(95),
+        p99: pick(99),
+        min: f64::from(*sims.first().expect("non-empty")),
+        max: f64::from(*sims.last().expect("non-empty")),
+        mean,
+    }))
+}
+
+const DEFAULT_TOP_RESULTS_LIMIT: usize = 20;
+const MAX_TOP_RESULTS_LIMIT: usize = 200;
+
+#[derive(Debug, Deserialize)]
+pub struct TopResultsQuery {
+    since_ms: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopResultItem {
+    track_id: String,
+    count: u64,
+    /// Title from the gateway metadata cache if present, otherwise
+    /// `None`. The UI falls back to displaying the raw `track_id`.
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopResultsResponse {
+    items: Vec<TopResultItem>,
+}
+
+pub async fn recommend_top_results(
+    State(state): State<AppState>,
+    Query(q): Query<TopResultsQuery>,
+) -> Result<Json<TopResultsResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_TOP_RESULTS_LIMIT)
+        .clamp(1, MAX_TOP_RESULTS_LIMIT);
+    let rows = state
+        .trace_store()
+        .recommend_summaries(q.since_ms)
+        .await
+        .map_err(db_error)?;
+    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for row in &rows {
+        for id in &row.result_track_ids {
+            *counts.entry(id.clone()).or_insert(0) += 1;
+        }
+    }
+    // Sort by count desc, ties broken by track_id asc for determinism.
+    let mut ranked: Vec<(String, u64)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(limit);
+
+    // Single metadata round-trip for the page.
+    let track_ids: Vec<music_core::TrackId> = ranked
+        .iter()
+        .map(|(id, _)| music_core::TrackId::from(id.as_str()))
+        .collect();
+    let metadata = state
+        .metadata_store()
+        .get_many(&track_ids)
+        .await
+        .unwrap_or_default();
+
+    let items = ranked
+        .into_iter()
+        .map(|(track_id, count)| {
+            let tid = music_core::TrackId::from(track_id.as_str());
+            let md = metadata.get(&tid);
+            TopResultItem {
+                track_id,
+                count,
+                title: md.map(|m| m.title.clone()),
+                artist: md.map(|m| m.artist.clone()),
+                album: md.and_then(|m| m.album.clone()),
+            }
+        })
+        .collect();
+    Ok(Json(TopResultsResponse { items }))
+}
+
+/// Suppress the dead-code warning — `RecommendSummary` is re-exported
+/// from `diagnostics::mod` and is the input type for the four handlers
+/// above; some test builds don't see the public re-export as a use.
+#[allow(dead_code)]
+fn _ensure_summary_in_scope(_: RecommendSummary) {}
+
+// --- /v1/diagnostics/recommend/feedback ----------------------------------
+
+const DEFAULT_FEEDBACK_LIMIT: i64 = 50;
+const MAX_FEEDBACK_LIMIT: i64 = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct FeedbackQuery {
+    since_ms: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeedbackItem {
+    track_id: String,
+    up: i64,
+    down: i64,
+    last_voted_ms: i64,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeedbackListResponse {
+    items: Vec<FeedbackItem>,
+}
+
+/// Per-track up/down aggregates over `since_ms`, joined with the
+/// metadata cache. Sorted newest-voted first by `FeedbackStore::aggregate`.
+pub async fn recommend_feedback(
+    State(state): State<AppState>,
+    Query(q): Query<FeedbackQuery>,
+) -> Result<Json<FeedbackListResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_FEEDBACK_LIMIT)
+        .clamp(1, MAX_FEEDBACK_LIMIT);
+    let rows = state
+        .feedback()
+        .aggregate(q.since_ms, limit)
+        .await
+        .map_err(db_error)?;
+
+    let ids: Vec<music_core::TrackId> = rows
+        .iter()
+        .map(|r| music_core::TrackId::from(r.track_id.as_str()))
+        .collect();
+    let metadata = state
+        .metadata_store()
+        .get_many(&ids)
+        .await
+        .unwrap_or_default();
+
+    let items = rows
+        .into_iter()
+        .map(|r| {
+            let tid = music_core::TrackId::from(r.track_id.as_str());
+            let md = metadata.get(&tid);
+            FeedbackItem {
+                track_id: r.track_id,
+                up: r.up,
+                down: r.down,
+                last_voted_ms: r.last_voted_ms,
+                title: md.map(|m| m.title.clone()),
+                artist: md.map(|m| m.artist.clone()),
+                album: md.and_then(|m| m.album.clone()),
+            }
+        })
+        .collect();
+    Ok(Json(FeedbackListResponse { items }))
+}
+
+// --- /v1/diagnostics/recommend/latent_space -------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct LatentSpaceQuery {
+    /// Explicit projection version to render. When omitted, the handler
+    /// picks the projection with the most recent `created_at_ms` for
+    /// the resolved `model_version` — i.e. "whatever the reducer wrote
+    /// last."
+    proj_version: Option<String>,
+    /// Embedding model to scope the lookup to. Defaults to the
+    /// gateway's active `recommend_model_version` (matches what the
+    /// rest of the recommender pipeline writes).
+    model_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentSpacePoint {
+    track_id: String,
+    x: f64,
+    y: f64,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    /// Reported genre from Subsonic's `child` tag, cached in
+    /// `track_metadata`. The web scatter colours clusters by this — a
+    /// rough validation of "does the audio embedding recover the
+    /// human-labelled grouping?"
+    genre: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentSpaceVersionEntry {
+    proj_version: String,
+    point_count: i64,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentSpaceResponse {
+    /// Active model these points belong to. Echoed back so the client
+    /// can label the chart without tracking the request shape.
+    model_version: String,
+    /// The projection actually rendered. `None` when no projection has
+    /// been written yet for this model.
+    proj_version: Option<String>,
+    points: Vec<LatentSpacePoint>,
+    /// Catalogue of all known projections for `model_version`, newest
+    /// first. Populates the proj-version dropdown without a second
+    /// round-trip — the payload is small (one row per UMAP run).
+    versions: Vec<LatentSpaceVersionEntry>,
+}
+
+/// 2-D UMAP scatter for the latent-space diagnostics page.
+///
+/// Two-step resolution:
+///   1. Figure out which `proj_version` to render — explicit param wins,
+///      otherwise pick the newest from `proj_versions_for_model`.
+///   2. Fetch the points, then bulk-join the metadata cache so the UI
+///      can show titles + artists without a per-row round-trip.
+pub async fn recommend_latent_space(
+    State(state): State<AppState>,
+    Query(q): Query<LatentSpaceQuery>,
+) -> Result<Json<LatentSpaceResponse>, (StatusCode, Json<Value>)> {
+    let model_version = q
+        .model_version
+        .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from);
+
+    let versions = state
+        .projection()
+        .proj_versions_for_model(&model_version)
+        .await
+        .map_err(db_error)?;
+
+    // Resolve the active proj_version. Explicit param wins even if no
+    // row matches — that's the user asking "show me pv-X"; we return
+    // an empty point list rather than silently swapping in a different
+    // projection.
+    let proj_version = q.proj_version.or_else(|| versions.first().map(|v| v.proj_version.clone()));
+
+    let points = if let Some(pv) = &proj_version {
+        let raw = state
+            .projection()
+            .list_by_proj_version(pv, &model_version)
+            .await
+            .map_err(db_error)?;
+        let ids: Vec<music_core::TrackId> = raw
+            .iter()
+            .map(|p| music_core::TrackId::from(p.track_id.as_str()))
+            .collect();
+        let metadata = state
+            .metadata_store()
+            .get_many(&ids)
+            .await
+            .unwrap_or_default();
+        raw.into_iter()
+            .map(|p| {
+                let tid = music_core::TrackId::from(p.track_id.as_str());
+                let md = metadata.get(&tid);
+                LatentSpacePoint {
+                    track_id: p.track_id,
+                    x: p.x,
+                    y: p.y,
+                    title: md.map(|m| m.title.clone()),
+                    artist: md.map(|m| m.artist.clone()),
+                    album: md.and_then(|m| m.album.clone()),
+                    genre: md.and_then(|m| m.genre.clone()),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let version_entries = versions
+        .into_iter()
+        .map(|v| LatentSpaceVersionEntry {
+            proj_version: v.proj_version,
+            point_count: v.point_count,
+            created_at_ms: v.created_at_ms,
+        })
+        .collect();
+
+    Ok(Json(LatentSpaceResponse {
+        model_version: model_version.as_str().to_string(),
+        proj_version,
+        points,
+        versions: version_entries,
     }))
 }
 

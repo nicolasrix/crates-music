@@ -54,9 +54,37 @@ pub fn build_router(state: AppState) -> Router {
             get(diagnostics_handlers::queue_depth),
         )
         .route(
+            "/v1/diagnostics/recently_played",
+            get(diagnostics_handlers::recently_played),
+        )
+        .route(
             "/v1/diagnostics/client_events",
             get(diagnostics_handlers::list_client_events)
                 .post(diagnostics_handlers::submit_client_events),
+        )
+        .route(
+            "/v1/diagnostics/recommend/queue_fill",
+            get(diagnostics_handlers::recommend_queue_fill),
+        )
+        .route(
+            "/v1/diagnostics/recommend/shortfall",
+            get(diagnostics_handlers::recommend_shortfall),
+        )
+        .route(
+            "/v1/diagnostics/recommend/similarity",
+            get(diagnostics_handlers::recommend_similarity),
+        )
+        .route(
+            "/v1/diagnostics/recommend/top_results",
+            get(diagnostics_handlers::recommend_top_results),
+        )
+        .route(
+            "/v1/diagnostics/recommend/feedback",
+            get(diagnostics_handlers::recommend_feedback),
+        )
+        .route(
+            "/v1/diagnostics/recommend/latent_space",
+            get(diagnostics_handlers::recommend_latent_space),
         )
         // /rest/scrobble is intercepted to write the recommender's
         // recency clock before delegating to the same proxy used by
