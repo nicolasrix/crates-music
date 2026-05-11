@@ -17,17 +17,20 @@ Cargo.lock.bak
 # Local TLS certs (mkcert-generated, contains private key)
 /certs/
 
-# Gateway runtime state (cache + auth DB with password hash)
-/gateway-cache.sqlite
-/gateway-cache.sqlite-*
-/gateway-state.sqlite
-/gateway-state.sqlite-*
-/gateway-state.recommend.sqlite
-/gateway-state.recommend.sqlite-*
-/gateway-state.traces.sqlite
-/gateway-state.traces.sqlite-*
-/gateway-state.ann
-/gateway-state.ann.keys
+# Gateway runtime state (cache + auth DB with password hash).
+# `**` patterns catch the case where the gateway was launched with a
+# non-repo-root cwd (e.g. from `apps/web/` during dev) and dropped
+# state files into a subdirectory by accident.
+**/gateway-cache.sqlite
+**/gateway-cache.sqlite-*
+**/gateway-state.sqlite
+**/gateway-state.sqlite-*
+**/gateway-state.recommend.sqlite
+**/gateway-state.recommend.sqlite-*
+**/gateway-state.traces.sqlite
+**/gateway-state.traces.sqlite-*
+**/gateway-state.ann
+**/gateway-state.ann.keys
 
 # Local ML model checkpoints (multi-GB; downloaded out-of-band)
 /models/
