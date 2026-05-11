@@ -561,7 +561,19 @@ fn write_and_serve_placeholder(
             tracing::warn!(error = %e, key = %key_for_task, "cover-art placeholder write failed");
         }
     });
-    serve_cover_from_cache(&entry)
+    // Placeholder responses use `no-cache, must-revalidate` (rather than
+    // real art's `max-age=300`). Reason: a placeholder may flip to real
+    // art at any moment — e.g. Navidrome ingests the cover file, or the
+    // gateway's background revalidation populates the cache. Without
+    // forced revalidation, a browser that fetched the placeholder once
+    // would keep showing it for 5 min even after real art is available
+    // server-side. `no-cache` here means "always revalidate"; the etag
+    // makes the steady-state cost a cheap 304.
+    serve_cover_from_cache_with_cc(
+        &entry,
+        &guess_image_content_type(&entry.body),
+        HeaderValue::from_static("no-cache, must-revalidate"),
+    )
 }
 
 /// `true` iff at least [`PLACEHOLDER_DUPLICATE_THRESHOLD`] cover-art
@@ -697,6 +709,19 @@ fn serve_cover_from_cache(entry: &Entry) -> Response {
 }
 
 fn serve_cover_from_cache_with_ct(entry: &Entry, content_type: &HeaderValue) -> Response {
+    // Real-art default: 5-min freshness, then etag revalidate.
+    serve_cover_from_cache_with_cc(
+        entry,
+        content_type,
+        HeaderValue::from_static("public, max-age=300, must-revalidate"),
+    )
+}
+
+fn serve_cover_from_cache_with_cc(
+    entry: &Entry,
+    content_type: &HeaderValue,
+    cache_control: HeaderValue,
+) -> Response {
     let mut response = Response::new(Body::from(entry.body.clone()));
     *response.status_mut() = StatusCode::OK;
     let headers = response.headers_mut();
@@ -704,19 +729,17 @@ fn serve_cover_from_cache_with_ct(entry: &Entry, content_type: &HeaderValue) -> 
         headers.insert(ETAG, value);
     }
     headers.insert(CONTENT_TYPE, content_type.clone());
-    // Short max-age + must-revalidate, *not* `immutable`. We previously
-    // sent `immutable` on the assumption that Navidrome's coverArt ids
-    // are content-derived (and they are for real artwork — file change →
-    // id change). But the same id can flip from "Navidrome default
-    // placeholder" to "real cover" once the user uploads art, and the
-    // gateway can also retroactively rewrite cached bodies once
-    // placeholder detection fires on later requests. Both transitions
-    // must be observable through the browser cache. ETag means
-    // revalidation is a cheap 304 in the steady state.
-    headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=300, must-revalidate"),
-    );
+    // We previously sent `immutable` for everything on the assumption
+    // that Navidrome's coverArt ids are content-derived (and they are
+    // for real artwork — file change → id change). But the same id can
+    // flip from "Navidrome default placeholder" to "real cover" once
+    // the user uploads art, and the gateway can also retroactively
+    // rewrite cached bodies once placeholder detection fires on later
+    // requests. Both transitions must be observable through the browser
+    // cache. Callers pick the directive: real art uses `max-age=300`;
+    // placeholders use `no-cache` so the flip-to-real-art is observed
+    // promptly. ETag means the steady-state cost is a cheap 304 either way.
+    headers.insert(CACHE_CONTROL, cache_control);
     response
 }
 

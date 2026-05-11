@@ -285,6 +285,26 @@ async fn upstream_404_is_rewritten_to_svg_placeholder() {
         ct.starts_with("image/svg+xml"),
         "expected svg content-type, got {ct:?}"
     );
+    // Placeholders must NOT carry the real-art `max-age=300` directive.
+    // If they did, a browser that cached the placeholder once would keep
+    // showing it for 5 min after the underlying art became available
+    // (e.g. user filled in art in Navidrome, or the gateway background-
+    // revalidates and gets real bytes). The etag still makes the
+    // steady-state revalidation cheap (304).
+    let cc = response
+        .headers()
+        .get(CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cc.contains("no-cache"),
+        "placeholder must use no-cache so flip-to-real-art is visible promptly, got {cc:?}"
+    );
+    assert!(
+        !cc.contains("max-age=300"),
+        "placeholder must not use real-art freshness, got {cc:?}"
+    );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body_str = std::str::from_utf8(&body).unwrap();
     assert!(body_str.contains("<svg"), "body should be an SVG");
