@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use music_core::{QueueItemId, TrackId};
+use music_core::{QueueItem, QueueItemId, SessionId, TrackId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -34,6 +34,26 @@ pub enum SyncOp {
     SetPosition { position_ms: u64 },
     /// Set the play/pause flag.
     SetPlaying { is_playing: bool },
-    /// Empty the queue and clear the cursor.
+    /// Empty the queue and clear the cursor. Also clears the
+    /// session anchor — a cleared queue has no session to anchor.
     Clear,
+    /// Atomically replace the queue with `items`, set the cursor to
+    /// `anchor_index`, and start a fresh session. Replaces the old
+    /// 4-op pattern (`Clear` + `Push` * N + `SetNowPlaying` +
+    /// `SetPlaying`) so observers never see an inconsistent
+    /// "queue swapped but no session" intermediate state.
+    ///
+    /// `started_ms` is stamped server-side from the apply-time
+    /// `now_ms` parameter — clients don't supply it.
+    StartSession {
+        items: Vec<QueueItem>,
+        anchor_index: usize,
+        session_id: SessionId,
+    },
+    /// End the current session: nulls `session_anchor` only. Queue,
+    /// cursor, playback position, and `is_playing` are untouched —
+    /// stopping a session is an *intent* signal, not a playback
+    /// command. Idempotent: accepted (and version-bumped) even when
+    /// no session is active.
+    StopSession,
 }

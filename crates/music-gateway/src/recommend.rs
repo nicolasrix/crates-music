@@ -17,7 +17,7 @@ use axum::{
     response::IntoResponse,
 };
 use music_core::TrackId;
-use music_recommend::aggregate::{aggregate_seed_results, sample_indices};
+use music_recommend::aggregate::sample_indices;
 use music_recommend::metadata::MetadataStore;
 use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
@@ -175,6 +175,15 @@ pub async fn enqueue(
 #[derive(Debug, Deserialize)]
 pub struct FromSeedsRequest {
     pub seeds: Vec<String>,
+    /// Optional per-seed weights for Σ-similarity aggregation. When
+    /// supplied, the array length MUST match `seeds.len()` (400 on
+    /// mismatch). Each seed's per-hit similarity is scaled by its
+    /// weight before being folded into the per-track score. Use this
+    /// to bias toward an anchored track (weight 3) over user-picked
+    /// items (weight 2) over scrobbles (weight 1). Negative values
+    /// clamp to 0 server-side; zero-weight seeds contribute nothing.
+    #[serde(default)]
+    pub seed_weights: Option<Vec<f32>>,
     /// Per-seed top-K from the ANN. Defaults to 20.
     pub per_seed_n: Option<usize>,
     /// Max seeds to actually query (random sample). Defaults to 8.
@@ -191,6 +200,13 @@ pub struct FromSeedsRequest {
     /// `None`, results pass through unfiltered (legacy behaviour).
     #[serde(default)]
     pub queue_context: Option<QueueContext>,
+    /// Recommend-session id. When supplied, tracks downvoted within
+    /// this session are added to the exclusion set so the user
+    /// doesn't see them again for the rest of the same session.
+    /// Downvotes in *other* sessions are not consulted — the user
+    /// might have been in a different mood.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Client-supplied queue snapshot for diversity filtering. Sent on
@@ -206,7 +222,9 @@ pub struct QueueContext {
     pub queue_track_ids: Vec<String>,
     #[serde(default)]
     pub now_playing_track_id: Option<String>,
-    /// `None` ⇒ default 2; `Some(0)` disables.
+    /// `None` ⇒ server default (currently 0 = disabled). `Some(0)`
+    /// also disables; non-zero values enable the legacy hard cap as
+    /// an emergency knob alongside the soft penalty.
     #[serde(default)]
     pub max_per_artist: Option<u32>,
     /// `None` ⇒ default true.
@@ -223,6 +241,11 @@ pub struct QueueContext {
     /// Out-of-range values are clamped server-side rather than rejected.
     #[serde(default)]
     pub mmr_lambda: Option<f32>,
+    /// Soft same-artist penalty `μ` applied to the MMR score. `None`
+    /// ⇒ server default (currently 0.15). Negative values are clamped
+    /// to 0 server-side. Only consulted when `diversity_mode == "mmr"`.
+    #[serde(default)]
+    pub artist_penalty_weight: Option<f32>,
 }
 
 /// Wire-format mirror of [`DiversityMode`]. Lives in the HTTP layer so
@@ -255,6 +278,9 @@ impl QueueContext {
                 .diversity_mode
                 .map_or(defaults.diversity_mode, Into::into),
             mmr_lambda: self.mmr_lambda.unwrap_or(defaults.mmr_lambda),
+            artist_penalty_weight: self
+                .artist_penalty_weight
+                .unwrap_or(defaults.artist_penalty_weight),
             max_per_artist: self.max_per_artist.unwrap_or(defaults.max_per_artist),
             dedup_titles: self.dedup_titles.unwrap_or(defaults.dedup_titles),
         }
@@ -280,7 +306,10 @@ pub struct FromSeedsResponse {
         seeds_total = tracing::field::Empty,
         seeds_sampled = tracing::field::Empty,
         seeds_indexed = tracing::field::Empty,
+        requested_n = tracing::field::Empty,
         results = tracing::field::Empty,
+        shortfall_reason = tracing::field::Empty,
+        result_track_ids_json = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
         filter_dropped_artist = tracing::field::Empty,
         filter_dropped_dedup = tracing::field::Empty,
@@ -308,6 +337,14 @@ pub async fn from_seeds(
     }
     if req.seeds.len() > MAX_SEEDS {
         return Err((StatusCode::BAD_REQUEST, "too many seeds"));
+    }
+    if let Some(w) = &req.seed_weights
+        && w.len() != req.seeds.len()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "seed_weights length must match seeds length",
+        ));
     }
     if req.exclude_track_ids.len() > MAX_EXCLUDE {
         return Err((StatusCode::BAD_REQUEST, "too many exclude_track_ids"));
@@ -339,12 +376,19 @@ pub async fn from_seeds(
     let model_version = state.recommend_model_version().clone();
 
     // Pick `sample_size` random seed indices. RNG is request-scoped —
-    // no shared state, no Mutex contention.
+    // no shared state, no Mutex contention. Indices are kept around so
+    // we can pull the matching weight for each sampled seed when the
+    // request supplied a `seed_weights` array.
     let mut rng = SmallRng::from_entropy();
-    let sampled: Vec<&str> = sample_indices(&mut rng, req.seeds.len(), sample_size)
-        .into_iter()
-        .map(|i| req.seeds[i].as_str())
+    let sampled_indices = sample_indices(&mut rng, req.seeds.len(), sample_size);
+    let sampled: Vec<&str> = sampled_indices
+        .iter()
+        .map(|&i| req.seeds[i].as_str())
         .collect();
+    let sampled_weights: Vec<f32> = match &req.seed_weights {
+        Some(w) => sampled_indices.iter().map(|&i| w[i]).collect(),
+        None => vec![1.0; sampled.len()],
+    };
 
     // Build the seed exclusion set up front so it covers BOTH the
     // sampled and the unsampled seeds — a track that's a non-sampled
@@ -370,15 +414,41 @@ pub async fn from_seeds(
             }
         }
     }
+    // Per-session downvote exclusion: tracks the user thumbs-downed in
+    // *this* session don't get re-recommended. Fetched once per
+    // request; SQLite handles it in microseconds for any realistic
+    // downvote count.
+    if let Some(sid) = req.session_id.as_deref()
+        && !sid.is_empty()
+    {
+        match state.feedback().downvoted_in_session(sid).await {
+            Ok(downvoted) => {
+                for id in downvoted {
+                    exclude.insert(id);
+                }
+            }
+            Err(_) => {
+                // Don't fail the recommend request on a feedback lookup
+                // failure — surface fewer "fresh" candidates rather
+                // than nothing. The user's vote is durably stored; the
+                // exclusion just doesn't apply this round.
+            }
+        }
+    }
 
     // Per-seed ANN queries. Each seed lookup is short and CPU-bound,
     // and the ANN takes its own internal RwLock; running these in
     // parallel via tokio tasks would not help. Sequential is simpler
     // and the cost is sample_size × ann.query (~100 µs at N=5000).
+    //
+    // `weights_for_results` is built alongside `per_seed_results` so
+    // the two slices align by position — a seed that isn't indexed
+    // drops out of *both* lists at the same index.
     let mut per_seed_results: Vec<Vec<music_recommend::ann::AnnQueryResult>> =
         Vec::with_capacity(sampled.len());
+    let mut weights_for_results: Vec<f32> = Vec::with_capacity(sampled.len());
     let mut seeds_indexed = 0usize;
-    for seed_str in &sampled {
+    for (idx, seed_str) in sampled.iter().enumerate() {
         let seed_id = TrackId::from(*seed_str);
         let (vec, _src) = lookup_seed_vector(
             state.ann(),
@@ -392,13 +462,21 @@ pub async fn from_seeds(
         };
         seeds_indexed += 1;
         match state.ann().query(&vector, per_seed_n) {
-            Ok(hits) => per_seed_results.push(hits),
+            Ok(hits) => {
+                per_seed_results.push(hits);
+                weights_for_results.push(sampled_weights[idx]);
+            }
             Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "ann query failed")),
         }
     }
     tracing::Span::current().record("seeds_indexed", seeds_indexed);
 
-    let aggregated = aggregate_seed_results(&per_seed_results, &exclude, internal_top_n);
+    let aggregated = music_recommend::aggregate::aggregate_seed_results_weighted(
+        &per_seed_results,
+        &weights_for_results,
+        &exclude,
+        internal_top_n,
+    );
 
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
@@ -415,6 +493,8 @@ pub async fn from_seeds(
     };
     tracing::Span::current().record("results", filtered.len());
     record_filter_stats(&filter_stats);
+    let result_ids: Vec<&str> = filtered.iter().map(|a| a.track_id.as_str()).collect();
+    record_call_summary(top_n, &result_ids, &filter_stats);
 
     Ok(Json(FromSeedsResponse {
         model_version: Some(model_version.as_str().to_string()),
@@ -445,6 +525,9 @@ pub struct FromAnyRequest {
     /// See [`QueueContext`] — same semantics as in [`FromSeedsRequest`].
     #[serde(default)]
     pub queue_context: Option<QueueContext>,
+    /// See `session_id` on [`FromSeedsRequest`].
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -462,7 +545,10 @@ pub struct FromAnyResponse {
         candidates_total = tracing::field::Empty,
         candidates_tried = tracing::field::Empty,
         seed_used = tracing::field::Empty,
+        requested_n = tracing::field::Empty,
         results = tracing::field::Empty,
+        shortfall_reason = tracing::field::Empty,
+        result_track_ids_json = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
         filter_dropped_artist = tracing::field::Empty,
         filter_dropped_dedup = tracing::field::Empty,
@@ -507,9 +593,10 @@ pub async fn from_any(
     let model_version = state.recommend_model_version().clone();
 
     // Build the ANN exclusion list once: the chosen seed *plus* any
-    // queue ids the client gave us (minus now-playing). Snapshot once
-    // — `query_excluding` takes a slice.
-    let queue_excludes: Vec<TrackId> = match &req.queue_context {
+    // queue ids the client gave us (minus now-playing) *plus* any
+    // tracks downvoted in the current recommend-session. Snapshot
+    // once — `query_excluding` takes a slice.
+    let mut queue_excludes: Vec<TrackId> = match &req.queue_context {
         Some(qc) => qc
             .queue_track_ids
             .iter()
@@ -518,6 +605,15 @@ pub async fn from_any(
             .collect(),
         None => Vec::new(),
     };
+    if let Some(sid) = req.session_id.as_deref()
+        && !sid.is_empty()
+    {
+        // Same best-effort policy as in from_seeds: a feedback lookup
+        // failure must not surface to the user.
+        if let Ok(downvoted) = state.feedback().downvoted_in_session(sid).await {
+            queue_excludes.extend(downvoted);
+        }
+    }
 
     // Try candidates in order, return first one with an ANN entry. Mirrors
     // the TS `startStationFromAny` semantics exactly: first-wins.
@@ -557,6 +653,8 @@ pub async fn from_any(
         tracing::Span::current().record("seed_used", cand.as_str());
         tracing::Span::current().record("results", filtered.len());
         record_filter_stats(&filter_stats);
+        let result_ids: Vec<&str> = filtered.iter().map(|r| r.track_id.as_str()).collect();
+        record_call_summary(n, &result_ids, &filter_stats);
 
         return Ok(Json(FromAnyResponse {
             seed_used: cand.clone(),
@@ -643,7 +741,7 @@ async fn build_filter_with_metadata(
 /// proxy for the "genre jump" symptom we're trying to characterise
 /// before tuning the algorithm.
 #[derive(Debug, Default)]
-struct FilterStats {
+pub(crate) struct FilterStats {
     dropped_artist: u32,
     dropped_dedup: u32,
     /// Per-admit similarity-to-seed. Length equals the admitted slate
@@ -723,6 +821,127 @@ fn sims_as_json(sims: &[f32]) -> String {
     }
     out.push(']');
     out
+}
+
+/// Why a recommend call returned fewer results than the caller asked
+/// for. The verdict is computed from the post-walk [`FilterStats`] plus
+/// the requested vs. delivered counts; it's stored verbatim on the
+/// request span as `shortfall_reason` so /diagnostics can `GROUP BY`
+/// without re-deriving the rule.
+///
+/// Three real cases plus the "no shortfall" sentinel:
+/// - `None` — full slate delivered (also: over-delivered, which
+///   shouldn't happen but mustn't mis-classify).
+/// - `PoolExhausted` — ANN/aggregator gave us fewer candidates than
+///   requested; the filter dropped nothing on top of that. The fix lives
+///   on the embedding side: ingest more tracks, or relax the seed
+///   exclusion list.
+/// - `FilterStarvedArtist` / `FilterStarvedDedup` — the candidate pool
+///   was big enough but the diversity filter rejected too many. The
+///   dominant rejection reason names the variant so a glance at the
+///   shortfall chart points at the right knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShortfallReason {
+    None,
+    PoolExhausted,
+    FilterStarvedArtist,
+    FilterStarvedDedup,
+}
+
+impl ShortfallReason {
+    /// Wire form. snake_case so a future serde rename doesn't quietly
+    /// break the diagnostics SQL filter.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PoolExhausted => "pool_exhausted",
+            Self::FilterStarvedArtist => "filter_starved_artist",
+            Self::FilterStarvedDedup => "filter_starved_dedup",
+        }
+    }
+}
+
+/// Classify the shortfall (or lack thereof) for a recommend slate. Pure
+/// function of the already-collected stats — no IO, no clock — so the
+/// caller can record the verdict at the same moment it records the
+/// underlying counters.
+///
+/// Tie-breaker: equal artist vs. dedup drops resolve to artist. Artist
+/// is the user-visible knob being tuned (`artist_penalty_weight` /
+/// `max_per_artist`), so attributing the tie there matches what the
+/// operator will then go investigate.
+pub(crate) fn classify_shortfall(
+    results: usize,
+    requested_n: usize,
+    stats: &FilterStats,
+) -> ShortfallReason {
+    if results >= requested_n {
+        return ShortfallReason::None;
+    }
+    if stats.total_dropped() == 0 {
+        return ShortfallReason::PoolExhausted;
+    }
+    if stats.dropped_artist >= stats.dropped_dedup {
+        ShortfallReason::FilterStarvedArtist
+    } else {
+        ShortfallReason::FilterStarvedDedup
+    }
+}
+
+/// Compact JSON array of track ids. Same formatter rationale as
+/// [`sims_as_json`] — deterministic, dependency-free, and stable enough
+/// for `json_extract` consumers in the diagnostics SQL.
+///
+/// Each id is double-quoted; embedded quotes/backslashes are escaped.
+/// Track ids in this project are Subsonic-style opaque strings (no
+/// control chars in practice) but escaping costs almost nothing and
+/// rules out a class of injection / malformed-JSON bugs at the seam.
+fn ids_as_json(ids: &[&str]) -> String {
+    let mut out = String::with_capacity(
+        // ~38 bytes per id (quotes + comma + 32-char nanoid-ish), plus brackets.
+        ids.iter().map(|s| s.len() + 4).sum::<usize>() + 2,
+    );
+    out.push('[');
+    for (i, id) in ids.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for c in id.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                _ => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
+/// Top-level summary recorder for a recommend call. Sets the three
+/// post-walk fields the diagnostics aggregator looks at: `requested_n`
+/// (so we can compute fill ratio without re-deriving from sibling
+/// fields), `shortfall_reason` (the classifier verdict), and
+/// `result_track_ids_json` (the slate, for the top-results aggregation).
+///
+/// `result_track_ids_json` is omitted when the slate is empty so the
+/// "field present" predicate is meaningful in `json_extract` queries.
+fn record_call_summary(requested_n: usize, result_track_ids: &[&str], stats: &FilterStats) {
+    let span = tracing::Span::current();
+    let results = result_track_ids.len();
+    span.record("requested_n", requested_n);
+    span.record(
+        "shortfall_reason",
+        classify_shortfall(results, requested_n, stats).as_str(),
+    );
+    if !result_track_ids.is_empty() {
+        span.record(
+            "result_track_ids_json",
+            ids_as_json(result_track_ids).as_str(),
+        );
+    }
 }
 
 /// Push every collected stat onto the current span. Optional fields are
@@ -818,7 +1037,15 @@ async fn apply_queue_filter_generic<C: CandidateLike>(
 
     match cfg.diversity_mode {
         DiversityMode::HardCap => walk_hard_cap(candidates, &metadata, filter, top_n),
-        DiversityMode::Mmr => walk_mmr(candidates, &metadata, filter, ann, cfg.mmr_lambda, top_n),
+        DiversityMode::Mmr => walk_mmr(
+            candidates,
+            &metadata,
+            filter,
+            ann,
+            cfg.mmr_lambda,
+            cfg.artist_penalty_weight,
+            top_n,
+        ),
         DiversityMode::Off => walk_off(candidates, &filter, top_n),
     }
 }
@@ -852,20 +1079,26 @@ fn walk_hard_cap<C: CandidateLike>(
     (out, stats)
 }
 
-/// MMR path: re-rank surviving candidates, then run them through the
-/// queue filter as a safety net so a degenerate λ or embedding cluster
-/// can't violate the per-artist cap.
+/// MMR path: re-rank surviving candidates with the soft artist penalty
+/// folded into the score, then run the queue filter as a safety net for
+/// title dedup and (optionally) the hard cap.
 ///
 /// Vector lookup is per-id via [`AnnIndex::get_vector`] — a missed
 /// lookup leaves the candidate's diversity term at 0, scoring on
 /// relevance alone. That's the same fail-open behaviour the cap path
 /// has for missing metadata.
+///
+/// Artist key lookup pulls from the same `metadata` map already used by
+/// the post-rerank filter, so there's no extra DB hit. A candidate with
+/// no cached metadata gets `artist_key = None` and pays no penalty —
+/// which is what the filter would do for the same case anyway.
 fn walk_mmr<C: CandidateLike>(
     candidates: Vec<C>,
     metadata: &HashMap<TrackId, music_recommend::TrackMetadata>,
     mut filter: QueueFilter,
     ann: &AnnIndex,
     lambda: f32,
+    artist_penalty_weight: f32,
     top_n: usize,
 ) -> (Vec<C>, FilterStats) {
     // 1. Drop excluded candidates up front. No point spending the
@@ -875,26 +1108,37 @@ fn walk_mmr<C: CandidateLike>(
         .filter(|c| !filter.is_excluded(c.track_id()))
         .collect();
 
-    // 2. Hydrate vectors. ANN holds them in mmap'd HNSW, so each
-    //    lookup is a hash + memcpy of `dim` f32s. At the typical
-    //    `surviving.len() ≤ top_n × buffer × cap_buffer` (≤ 80) this
-    //    is ~80 µs per call — under the latency budget.
+    // 2. Hydrate vectors + artist keys. ANN holds vectors in mmap'd
+    //    HNSW (~80 µs per call at typical pool sizes); artist key is
+    //    a HashMap lookup against already-loaded metadata.
     let mmr_inputs: Vec<music_recommend::MmrCandidate> = surviving
         .iter()
         .map(|c| music_recommend::MmrCandidate {
             track_id: c.track_id().clone(),
             sim_to_seed: c.sim(),
             vector: ann.get_vector(c.track_id()).ok().flatten(),
+            artist_key: metadata
+                .get(c.track_id())
+                .map(QueueFilter::artist_key_for),
         })
         .collect();
 
     // 3. Re-rank. Ask for `top_n × MMR_POOL_BUFFER_FACTOR` so the
     //    safety-net try_accept walk below has spare candidates to skip
-    //    past on a cap/dedup hit.
+    //    past on a dedup hit.
     let want = top_n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
-    let order = music_recommend::mmr_rerank(&mmr_inputs, lambda, want);
+    let order = music_recommend::mmr_rerank(
+        &mmr_inputs,
+        lambda,
+        want,
+        artist_penalty_weight,
+        filter.artist_counts(),
+    );
 
-    // 4. Apply cap + dedup safety net in MMR-ordered sequence.
+    // 4. Apply dedup (+ optional hard-cap fallback) safety net in
+    //    MMR-ordered sequence. The artist penalty already shaped the
+    //    MMR output, so under the default `max_per_artist=0` the cap
+    //    branch is a no-op; non-zero values still act as a ceiling.
     let mut out = Vec::with_capacity(top_n);
     let mut stats = FilterStats::default();
     for idx in order {
@@ -1108,5 +1352,130 @@ mod tests {
         let mut b = FilterStats::default();
         b.record_drop(FilterDecision::RejectArtistCap, 0.85);
         assert!(b.sim_gap().is_none());
+    }
+
+    // --- shortfall_reason classifier --------------------------------------
+    //
+    // Discriminates *why* a recommend call returned fewer results than
+    // asked for. The classifier is a pure function of what's already on
+    // the span; persisting its verdict instead of recomputing later lets
+    // /diagnostics/recommend/shortfall do a cheap GROUP BY.
+
+    #[test]
+    fn shortfall_none_when_full_slate_delivered() {
+        let stats = FilterStats::default();
+        // requested 20, delivered 20 → no shortfall regardless of drops.
+        let r = classify_shortfall(20, 20, &stats);
+        assert_eq!(r, ShortfallReason::None);
+    }
+
+    #[test]
+    fn shortfall_none_when_over_delivered() {
+        // Defensive: results > requested shouldn't happen but mustn't
+        // mis-classify as a shortfall.
+        let stats = FilterStats::default();
+        let r = classify_shortfall(25, 20, &stats);
+        assert_eq!(r, ShortfallReason::None);
+    }
+
+    #[test]
+    fn shortfall_pool_exhausted_when_filter_dropped_nothing() {
+        // ANN gave us 5 candidates; filter dropped none; user asked 20.
+        // The pool itself was small — that's an ANN-side starvation,
+        // not a filter problem.
+        let mut s = FilterStats::default();
+        for _ in 0..5 {
+            s.record_admit(0.7);
+        }
+        let r = classify_shortfall(5, 20, &s);
+        assert_eq!(r, ShortfallReason::PoolExhausted);
+    }
+
+    #[test]
+    fn shortfall_filter_starved_artist_when_artist_drops_dominate() {
+        // Big artist drops, small dedup drops, came up short.
+        let mut s = FilterStats::default();
+        for _ in 0..3 {
+            s.record_admit(0.7);
+        }
+        for _ in 0..15 {
+            s.record_drop(FilterDecision::RejectArtistCap, 0.8);
+        }
+        s.record_drop(FilterDecision::RejectDedup, 0.75);
+        let r = classify_shortfall(3, 20, &s);
+        assert_eq!(r, ShortfallReason::FilterStarvedArtist);
+    }
+
+    #[test]
+    fn shortfall_filter_starved_dedup_when_dedup_drops_dominate() {
+        let mut s = FilterStats::default();
+        for _ in 0..3 {
+            s.record_admit(0.7);
+        }
+        s.record_drop(FilterDecision::RejectArtistCap, 0.75);
+        for _ in 0..10 {
+            s.record_drop(FilterDecision::RejectDedup, 0.8);
+        }
+        let r = classify_shortfall(3, 20, &s);
+        assert_eq!(r, ShortfallReason::FilterStarvedDedup);
+    }
+
+    #[test]
+    fn shortfall_filter_starved_ties_break_to_artist() {
+        // Ties happen rarely in practice but the tie-breaker has to be
+        // deterministic — artist wins by convention because it's the
+        // user-visible knob being tuned.
+        let mut s = FilterStats::default();
+        s.record_admit(0.7);
+        s.record_drop(FilterDecision::RejectArtistCap, 0.8);
+        s.record_drop(FilterDecision::RejectDedup, 0.8);
+        let r = classify_shortfall(1, 5, &s);
+        assert_eq!(r, ShortfallReason::FilterStarvedArtist);
+    }
+
+    #[test]
+    fn ids_as_json_empty_is_bracket_pair() {
+        assert_eq!(ids_as_json(&[]), "[]");
+    }
+
+    #[test]
+    fn ids_as_json_single_string_is_quoted() {
+        assert_eq!(ids_as_json(&["abc123"]), "[\"abc123\"]");
+    }
+
+    #[test]
+    fn ids_as_json_multiple_are_comma_separated() {
+        assert_eq!(
+            ids_as_json(&["a", "b", "c"]),
+            "[\"a\",\"b\",\"c\"]"
+        );
+    }
+
+    #[test]
+    fn ids_as_json_escapes_quotes_and_backslashes() {
+        // Defensive: track ids are opaque, so we treat them as untrusted
+        // strings at the JSON serialization seam.
+        assert_eq!(
+            ids_as_json(&["a\"b", "c\\d"]),
+            "[\"a\\\"b\",\"c\\\\d\"]"
+        );
+    }
+
+    #[test]
+    fn shortfall_reason_serializes_to_snake_case_str() {
+        // The string form lands in fields_json and SQL `WHERE
+        // shortfall_reason = ?` queries hit it; locking the wire format
+        // here so a future enum rename can't silently break the
+        // diagnostics page.
+        assert_eq!(ShortfallReason::None.as_str(), "none");
+        assert_eq!(ShortfallReason::PoolExhausted.as_str(), "pool_exhausted");
+        assert_eq!(
+            ShortfallReason::FilterStarvedArtist.as_str(),
+            "filter_starved_artist"
+        );
+        assert_eq!(
+            ShortfallReason::FilterStarvedDedup.as_str(),
+            "filter_starved_dedup"
+        );
     }
 }

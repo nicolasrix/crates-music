@@ -20,7 +20,13 @@ import { applyOp } from "./apply";
 import type { ClientMessage, ServerMessage, SyncOp, SyncState } from "./types";
 
 const EMPTY: SyncState = {
-  playback: { queue: { items: [] }, now_playing_index: null, position_ms: 0, is_playing: false },
+  playback: {
+    queue: { items: [] },
+    now_playing_index: null,
+    position_ms: 0,
+    is_playing: false,
+    session_anchor: null,
+  },
   version: 0,
 };
 
@@ -34,6 +40,10 @@ interface SyncCtx {
   /** Push a track and stash its metadata locally so the player bar can
    *  render it without a separate fetch. */
   pushTrack: (track: Track) => string;
+  /** Atomically replace the queue with `tracks` and start a fresh
+   *  recommend-session anchored on `tracks[anchorIndex]`. One op,
+   *  one round-trip — replaces the legacy 4-op pattern. */
+  startSession: (tracks: readonly Track[], anchorIndex: number) => void;
   ready: boolean;
 }
 
@@ -43,6 +53,12 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SyncState>(EMPTY);
   const [ready, setReady] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  // Ops submitted before the WS reaches OPEN are buffered here and
+  // flushed on `onopen`. Without this, a user click that lands during
+  // the connect window (or briefly during reconnect) is silently
+  // dropped — the previous 4-op pattern hid this by sometimes losing
+  // only a subset; start_session makes it a binary "empty queue" miss.
+  const outboxRef = useRef<SyncOp[]>([]);
   const trackMetaRef = useRef<Map<string, Track>>(new Map());
   const [, forceMetaTick] = useState(0);
 
@@ -57,23 +73,32 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     const url = `${wsScheme}://${location.host}/v1/sync?access_token=${encodeURIComponent(accessToken)}`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    ws.onopen = () => {
+      console.log("[sync] ws open, flushing outbox:", outboxRef.current.length);
+      const pending = outboxRef.current;
+      outboxRef.current = [];
+      for (const op of pending) {
+        const msg: ClientMessage = { type: "op", op };
+        ws.send(JSON.stringify(msg));
+      }
+    };
     ws.onmessage = (ev) => {
       let msg: ServerMessage;
       try {
         msg = JSON.parse(ev.data) as ServerMessage;
       } catch {
+        console.warn("[sync] failed to parse ws frame:", ev.data);
         return;
       }
       if (msg.type === "snapshot") {
+        console.log("[sync] snapshot v=" + msg.state.version, "items=" + msg.state.playback.queue.items.length);
         setState(msg.state);
         setReady(true);
       } else if (msg.type === "applied") {
+        console.log("[sync] applied v=" + msg.version, "op=" + msg.op.type);
         setState((s) => applyOp(s, msg.op, msg.version));
-      }
-      // op_error is informational — the local state will not advance,
-      // but we don't have user-facing toasts yet, so just log.
-      else if (msg.type === "op_error") {
-        console.warn("sync op rejected:", msg.message);
+      } else if (msg.type === "op_error") {
+        console.warn("[sync] op rejected:", msg.message);
       }
     };
     ws.onclose = () => {
@@ -87,7 +112,12 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 
   const submit = useCallback((op: SyncOp) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // If the socket isn't open yet (race during connect/reconnect),
+    // buffer the op. `onopen` drains the outbox in submission order.
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      outboxRef.current.push(op);
+      return;
+    }
     const msg: ClientMessage = { type: "op", op };
     ws.send(JSON.stringify(msg));
   }, []);
@@ -103,15 +133,32 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     [submit],
   );
 
+  const startSession = useCallback(
+    (tracks: readonly Track[], anchorIndex: number) => {
+      if (tracks.length === 0) return;
+      for (const t of tracks) trackMetaRef.current.set(t.id, t);
+      forceMetaTick((n) => n + 1);
+      const items = tracks.map((t) => ({ item_id: newItemId(), track_id: t.id }));
+      submit({
+        type: "start_session",
+        items,
+        anchor_index: anchorIndex,
+        session_id: newSessionId(),
+      });
+    },
+    [submit],
+  );
+
   const value = useMemo<SyncCtx>(
     () => ({
       state,
       trackMeta: trackMetaRef.current,
       submit,
       pushTrack,
+      startSession,
       ready,
     }),
-    [state, ready, submit, pushTrack],
+    [state, ready, submit, pushTrack, startSession],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -129,4 +176,13 @@ function newItemId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `${ts}-${rand}`;
+}
+
+// Session ids: prefer crypto.randomUUID() (always available in HTTPS
+// contexts, which we are by gateway constraint), fall back to the
+// same ULID-ish shape so tests in non-secure contexts still work.
+function newSessionId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `sess-${newItemId()}`;
 }

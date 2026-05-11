@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -21,5 +22,12 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  // Vitest config — `node` env keeps pure-function tests fast (no jsdom
+  // boot). Component tests, when they land, will opt into jsdom per-file
+  // via `// @vitest-environment jsdom`.
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

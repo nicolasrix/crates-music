@@ -67,3 +67,12 @@ id_type!(
     /// duplicate `TrackId`s.
     QueueItemId
 );
+id_type!(
+    /// Identifier for a recommend-session: one user-initiated playback
+    /// "context" (the user picked a song or list to play; everything
+    /// played from that anchor until the next direct play / explicit
+    /// stop is the same session). Recommender uses this to scope
+    /// downvotes/exclusions to a single listening session rather than
+    /// the user's entire history. UUID v7 in practice.
+    SessionId
+);

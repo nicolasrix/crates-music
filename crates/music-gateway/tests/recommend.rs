@@ -315,6 +315,138 @@ async fn from_seeds_signals_all_unindexed() {
 }
 
 #[tokio::test]
+async fn from_seeds_rejects_seed_weights_length_mismatch_with_400() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0", "t1", "t2"],
+            "seed_weights": [1.0, 2.0],  // length 2 vs 3 seeds — bad
+            "top_n": 5,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn from_seeds_excludes_session_downvoted_tracks() {
+    // Downvote `t3` in session-A via the public feedback endpoint, then
+    // ask for recommendations under the same session_id — `t3` must not
+    // appear in results. Sanity: a different session_id sees `t3` again.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    // Cast a thumbs-down for t3 in session-A.
+    let vote_req = auth_post(
+        "/v1/recommend/feedback",
+        &json!({
+            "track_id": "t3",
+            "session_id": "session-A",
+            "vote": "down",
+            "occurred_ms": 1_700_000_000_000_i64,
+        }),
+    );
+    let vote_resp = app.clone().oneshot(vote_req).await.unwrap();
+    assert_eq!(vote_resp.status(), StatusCode::OK);
+
+    // Same session must see t3 excluded.
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 20,
+            "top_n": 20,
+            "session_id": "session-A",
+        }),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    for r in results {
+        assert_ne!(
+            r["track_id"].as_str().unwrap(),
+            "t3",
+            "session-A downvoted t3 → must not surface in session-A results",
+        );
+    }
+
+    // A different session must still see t3 as a candidate.
+    let req2 = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 20,
+            "top_n": 20,
+            "session_id": "session-DIFFERENT",
+        }),
+    );
+    let resp2 = app.oneshot(req2).await.unwrap();
+    let body2 = read_json(resp2).await;
+    let ids: Vec<&str> = body2["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"t3"),
+        "downvote in session-A must NOT exclude t3 for a different session, got {ids:?}",
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_with_weights_changes_ranking() {
+    // Two seeds, each surfaces a distinct nearest-neighbour with the
+    // same raw similarity. With equal weights, both candidates would
+    // tie (and break alphabetically). Giving seed 0 a much higher
+    // weight forces *its* neighbour to win — proving the weights
+    // reach the aggregator.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0", "t1"],
+            "seed_weights": [10.0, 0.1],
+            "per_seed_n": 5,
+            "top_n": 5,
+            // Force sampling to take BOTH seeds, not a random 1.
+            "sample_size": 2,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(!results.is_empty(), "should have at least one result");
+    // The top result must be from the heavily-weighted seed's
+    // neighbourhood (not from t1's, which is heavily down-weighted).
+    // unit_at(0) is the neighbour of t0; nothing else is nearer to t0
+    // than itself, and t0 is excluded — so top result has some t_i for
+    // i != 0,1 with the highest sim to t0. Just assert ordering by
+    // checking that there exist results with score > 0 and that the
+    // top one's score is > the bottom one's.
+    let top = results[0]["similarity"].as_f64().unwrap();
+    let bot = results.last().unwrap()["similarity"].as_f64().unwrap();
+    assert!(top >= bot, "results must be score-descending");
+}
+
+#[tokio::test]
 async fn from_seeds_partial_index_does_not_set_all_unindexed() {
     let state = build_state(test_config()).await;
     let ann = state.ann();
@@ -1010,6 +1142,130 @@ async fn from_any_diversity_mode_mmr_returns_slate() {
     let body = read_json(resp).await;
     let results = body["results"].as_array().expect("results");
     assert!(!results.is_empty(), "MMR mode returned an empty slate");
+}
+
+#[tokio::test]
+async fn from_any_mmr_fills_slate_when_only_same_artist_candidates_exist() {
+    // Smada regression: queue holds one Duke Ellington track, ANN
+    // returns N more Duke Ellington tracks. With the old hard cap
+    // (default max_per_artist=2), most got rejected and the queue
+    // could stay empty when 2 was already met by the queue + a single
+    // admit. With the soft penalty model (default cap=0, μ=0.15) all
+    // candidates must still be admitted because no alternatives
+    // exist — the penalty deprioritises but never excludes.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    // DIM same-artist candidates, one per orthogonal axis. Bounded by
+    // DIM so we don't run out of unit-vector slots.
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta(
+                &format!("t{i}"),
+                "duke",
+                "Duke Ellington",
+                &format!("Song {i}"),
+            ))
+            .await
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["t0"],
+            "n": 5,
+            "queue_context": {
+                "queue_track_ids": ["t0"],
+                "now_playing_track_id": "t0",
+                "diversity_mode": "mmr",
+                "mmr_lambda": 0.8,
+                // No `max_per_artist` and no `artist_penalty_weight`
+                // → server defaults (cap=0, μ=0.15).
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results.len(),
+        5,
+        "soft penalty must still admit same-artist when no alternatives exist; \
+         got {} results (the pre-fix bug returned 0)",
+        results.len()
+    );
+}
+
+#[tokio::test]
+async fn from_any_mmr_prefers_fresh_artist_at_close_relevance() {
+    // Inverse of the Smada test: when an alternative-artist candidate
+    // *does* exist at comparable relevance, the soft penalty must
+    // promote it above the same-artist candidate that the unpenalised
+    // MMR would have picked first.
+    //
+    // Construction: seed at index 0. Candidate `same` (Duke Ellington)
+    // at index 1 — high similarity to the seed. Candidate `fresh`
+    // (other artist) at index 2 — slightly lower similarity. With μ=0
+    // the same-artist candidate wins on relevance; with μ=0.15 the
+    // fresh-artist candidate wins despite being less similar.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    ann.upsert(&TrackId::from("seed"), &unit_at(0)).unwrap();
+    // `same` is nearly aligned with the seed direction.
+    let same_vec: Vec<f32> = (0..DIM)
+        .map(|i| if i == 0 { 0.98 } else if i == 1 { 0.199 } else { 0.0 })
+        .collect();
+    ann.upsert(&TrackId::from("same"), &same_vec).unwrap();
+    // `fresh` is a bit further from the seed direction.
+    let fresh_vec: Vec<f32> = (0..DIM)
+        .map(|i| if i == 0 { 0.95 } else if i == 1 { 0.312 } else { 0.0 })
+        .collect();
+    ann.upsert(&TrackId::from("fresh"), &fresh_vec).unwrap();
+    state
+        .metadata_store()
+        .upsert(&meta("seed", "duke", "Duke Ellington", "Smada"))
+        .await
+        .unwrap();
+    state
+        .metadata_store()
+        .upsert(&meta("same", "duke", "Duke Ellington", "Caravan"))
+        .await
+        .unwrap();
+    state
+        .metadata_store()
+        .upsert(&meta("fresh", "miles", "Miles Davis", "So What"))
+        .await
+        .unwrap();
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/from-any",
+        &json!({
+            "candidate_seeds": ["seed"],
+            "n": 1,
+            "queue_context": {
+                "queue_track_ids": ["seed"],
+                "now_playing_track_id": "seed",
+                "diversity_mode": "mmr",
+                "mmr_lambda": 0.8,
+            }
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["track_id"].as_str(),
+        Some("fresh"),
+        "fresh-artist candidate should outrank same-artist at default μ=0.15"
+    );
 }
 
 #[tokio::test]

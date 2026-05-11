@@ -12,7 +12,7 @@ pub mod track;
 
 pub use album::Album;
 pub use artist::Artist;
-pub use ids::{AlbumId, ArtistId, QueueItemId, TrackId};
-pub use playback::PlaybackState;
+pub use ids::{AlbumId, ArtistId, QueueItemId, SessionId, TrackId};
+pub use playback::{PlaybackState, SessionAnchor};
 pub use queue::{Queue, QueueItem};
 pub use track::Track;

@@ -197,6 +197,51 @@ export interface PlaylistSuggestionResult {
   allSeedsUnindexed: boolean;
 }
 
+/** A seed with an explicit weight for `from-seeds` aggregation. The
+ *  weight scales the seed's per-hit similarity in the Σ-similarity
+ *  fold — use this to bias the recommender toward an anchor (weight
+ *  3) over user-picked items (weight 2) over already-played scrobbles
+ *  (weight 1). */
+export interface WeightedSeed {
+  trackId: string;
+  weight: number;
+}
+
+/** Multi-seed station with per-seed weights. Wraps `from-seeds` and
+ *  hydrates the result to full Track objects. Unlike
+ *  `startStationFromAny`, this *aggregates* across seeds (Σ-similarity
+ *  in the centroid of the seed set) rather than picking the first
+ *  indexed seed — better when the seed list reflects the listening
+ *  context (anchor + user-picked + scrobbles) rather than a list of
+ *  fallback candidates.
+ *
+ *  When `sessionId` is supplied, the gateway adds tracks downvoted in
+ *  that recommend-session to the exclusion set — keeps "I just
+ *  thumbs-downed this" tracks from coming back the next refill. */
+export async function startWeightedStation(
+  seeds: readonly WeightedSeed[],
+  n = 20,
+  queueContext?: QueueContext,
+  sessionId?: string,
+): Promise<{ tracks: Track[]; allSeedsUnindexed: boolean }> {
+  if (seeds.length === 0) {
+    return { tracks: [], allSeedsUnindexed: false };
+  }
+  const body: Record<string, unknown> = {
+    seeds: seeds.map((s) => s.trackId),
+    seed_weights: seeds.map((s) => s.weight),
+    top_n: n,
+  };
+  if (queueContext) body.queue_context = serializeQueueContext(queueContext);
+  if (sessionId) body.session_id = sessionId;
+
+  const res = await postJson("/v1/recommend/from-seeds", body);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const parsed = (await res.json()) as FromSeedsResponse;
+  const tracks = await hydrateTracks(parsed.results.map((r) => r.track_id));
+  return { tracks, allSeedsUnindexed: parsed.all_seeds_unindexed };
+}
+
 interface FromSeedsResponse {
   model_version: string | null;
   degraded: boolean;
@@ -246,4 +291,37 @@ export async function suggestForPlaylist(
   const parsed = (await res.json()) as FromSeedsResponse;
   const tracks = await hydrateTracks(parsed.results.map((r) => r.track_id));
   return { tracks, allSeedsUnindexed: parsed.all_seeds_unindexed };
+}
+
+// --- recommendation feedback (thumb up / down) -----------------------------
+//
+// Distinct from Subsonic's `starred`: this is a vote on *the recommendation*
+// (was it a good fit to play right now), not on the song. The UI surface
+// must label the buttons accordingly — see PlayerBar.
+//
+// One UPSERT row per (track_id, session_id). The session_id is generated
+// client-side and persisted in sessionStorage (one id per page load), so
+// the user can flip up→down freely without earning duplicate votes.
+
+export type FeedbackVote = "up" | "down" | null;
+
+export interface FeedbackResponse {
+  track_id: string;
+  up: number;
+  down: number;
+}
+
+export async function submitFeedback(input: {
+  trackId: string;
+  vote: FeedbackVote;
+  sessionId: string;
+}): Promise<FeedbackResponse> {
+  const res = await postJson("/v1/recommend/feedback", {
+    track_id: input.trackId,
+    session_id: input.sessionId,
+    vote: input.vote,
+    occurred_ms: Date.now(),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as FeedbackResponse;
 }

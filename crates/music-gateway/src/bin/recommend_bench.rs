@@ -153,6 +153,12 @@ struct Args {
     #[arg(long, default_value_t = 0.7)]
     lambda: f32,
 
+    /// Soft same-artist penalty `μ` for MMR. `0.0` disables; the
+    /// production default is 0.15. Stacks linearly per same-artist
+    /// admit. Only consulted when `diversity_mode == mmr`.
+    #[arg(long, default_value_t = 0.15)]
+    artist_penalty_weight: f32,
+
     /// Override the model version. Defaults to the version with the
     /// most `done` rows in `track_embeddings` — i.e. the active one.
     #[arg(long)]
@@ -207,6 +213,7 @@ async fn main() -> Result<()> {
     let cfg = QueueFilterConfig {
         diversity_mode: args.diversity_mode.into(),
         mmr_lambda: args.lambda,
+        artist_penalty_weight: args.artist_penalty_weight,
         max_per_artist: args.max_per_artist,
         dedup_titles: args.dedup_titles,
     };
@@ -426,11 +433,20 @@ fn walk_mmr_bench(
             track_id: c.track_id.clone(),
             sim_to_seed: c.similarity,
             vector: ann.get_vector(&c.track_id).ok().flatten(),
+            artist_key: metadata_map
+                .get(&c.track_id)
+                .map(QueueFilter::artist_key_for),
         })
         .collect();
 
     let want = top_n.saturating_mul(2);
-    let order = mmr_rerank(&mmr_inputs, cfg.mmr_lambda, want);
+    let order = mmr_rerank(
+        &mmr_inputs,
+        cfg.mmr_lambda,
+        want,
+        cfg.artist_penalty_weight,
+        filter.artist_counts(),
+    );
 
     let mut admitted_sims = Vec::with_capacity(top_n);
     let mut dropped_sims = Vec::new();
@@ -643,6 +659,10 @@ struct ReportConfig {
     /// remain self-describing — `λ=0.7` for a hard-cap run is harmless
     /// and removes the "did the bench use the right λ?" ambiguity.
     lambda: f32,
+    /// Same self-describing motivation as `lambda`: report the
+    /// configured artist penalty for every run, even hard-cap ones
+    /// where it goes unused.
+    artist_penalty_weight: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -762,6 +782,7 @@ fn build_report(
             dedup_titles: args.dedup_titles,
             diversity_mode: args.diversity_mode,
             lambda: args.lambda,
+            artist_penalty_weight: args.artist_penalty_weight,
         },
         population: ReportPopulation {
             model_version: model_version.to_string(),

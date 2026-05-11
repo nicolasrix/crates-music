@@ -82,9 +82,11 @@ pub enum DiversityMode {
     Off,
 }
 
-/// Knobs controlling filter strictness. Sensible defaults match the
-/// web client's old `MAX_PER_ARTIST = 2` + `dedupeKey` behavior so
-/// switching to server-side filtering is behavior-preserving.
+/// Knobs controlling filter strictness. Defaults wire up the MMR path
+/// with a soft artist-diversity penalty — same-artist candidates pay a
+/// per-occurrence cost in the MMR score, but no hard cap rejects them.
+/// That's the post-Smada behaviour: when only same-artist neighbours
+/// exist in CLAP space, the queue still fills instead of starving.
 #[derive(Clone, Copy, Debug)]
 pub struct QueueFilterConfig {
     /// Selection algorithm for the slate. See [`DiversityMode`].
@@ -94,15 +96,15 @@ pub struct QueueFilterConfig {
     /// (equivalent to `Off`); `0.0` = pure novelty after the
     /// relevance-driven first pick.
     pub mmr_lambda: f32,
+    /// Soft per-artist penalty `μ` applied to the MMR score:
+    /// `-μ * artist_count(c)`. Stacks linearly — a 2nd same-artist
+    /// admit pays `2μ`, a 3rd pays `3μ`. `0.0` disables it (degrades
+    /// to plain MMR). Only consulted under [`DiversityMode::Mmr`].
+    pub artist_penalty_weight: f32,
     /// Max tracks per artist key in the resulting queue. `0` disables
-    /// the cap entirely (useful for test stations / one-artist
-    /// playlists).
-    ///
-    /// Under [`DiversityMode::HardCap`] this is the primary diversity
-    /// mechanism. Under [`DiversityMode::Mmr`] it acts as a safety net
-    /// — MMR shapes the slate softly, but an extreme λ (or a degenerate
-    /// embedding distribution) shouldn't produce 8 tracks by the same
-    /// artist. Set to `0` to make MMR the sole diversity controller.
+    /// the cap (the default — the soft penalty does the diversity work
+    /// under MMR). Non-zero values keep the hard cap available as an
+    /// emergency knob and for [`DiversityMode::HardCap`].
     pub max_per_artist: u32,
     /// When `true`, drop candidates whose `(artist_key,
     /// title_normalized)` is already present in the queue or already
@@ -117,7 +119,8 @@ impl Default for QueueFilterConfig {
         Self {
             diversity_mode: DiversityMode::HardCap,
             mmr_lambda: 0.7,
-            max_per_artist: 2,
+            artist_penalty_weight: 0.15,
+            max_per_artist: 0,
             dedup_titles: true,
         }
     }
@@ -186,6 +189,21 @@ impl QueueFilter {
     /// the user's player). Cheap pre-check before metadata lookup.
     pub fn is_excluded(&self, id: &TrackId) -> bool {
         self.excluded.contains(id)
+    }
+
+    /// Snapshot of the per-artist counts at filter-build time. The MMR
+    /// path feeds this into `mmr_rerank` as the initial tally so the
+    /// soft penalty can charge same-artist candidates for the queue's
+    /// existing footprint.
+    pub fn artist_counts(&self) -> &HashMap<String, u32> {
+        &self.artist_counts
+    }
+
+    /// Returns the same artist key the cap and dedup checks use for a
+    /// given metadata row. Exposed for the MMR path, which needs the
+    /// candidate's key on the `MmrCandidate` it builds.
+    pub fn artist_key_for(meta: &TrackMetadata) -> String {
+        artist_key(meta)
     }
 
     /// Try to accept a candidate. Returns [`FilterDecision::Accept`] if

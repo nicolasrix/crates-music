@@ -50,5 +50,10 @@ pub async fn submit_op(
             Json(json!({"error": "now_playing index out of bounds"})),
         )
             .into_response(),
+        Err(ApplyError::StartSessionEmpty) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "start_session items must not be empty"})),
+        )
+            .into_response(),
     }
 }

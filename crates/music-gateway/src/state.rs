@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use music_cache::Cache;
 use music_recommend::EventStore;
+use music_recommend::FeedbackStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
@@ -40,6 +41,7 @@ struct Inner {
     embedding_store: EmbeddingStore,
     metadata_store: MetadataStore,
     event_store: EventStore,
+    feedback: FeedbackStore,
     ann: Arc<AnnIndex>,
     /// The model_version the recommender stamps on enqueue + ANN
     /// queries. Sourced from the embedder's last health probe; falls
@@ -84,9 +86,10 @@ impl AppState {
         recommend_model_version: ModelVersion,
         trace_store: TraceStore,
     ) -> Self {
-        // Events live in the same SQLite file as the embedding store —
-        // they're both recommender state, share migration timeline.
+        // Events + feedback live in the same SQLite file as the
+        // embedding store — recommender state, shared migrations.
         let event_store = EventStore::new(embedding_store.pool().clone());
+        let feedback = FeedbackStore::new(embedding_store.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -99,6 +102,7 @@ impl AppState {
                 embedding_store,
                 metadata_store,
                 event_store,
+                feedback,
                 ann,
                 recommend_model_version,
                 trace_store,
@@ -154,6 +158,10 @@ impl AppState {
 
     pub fn event_store(&self) -> &EventStore {
         &self.inner.event_store
+    }
+
+    pub fn feedback(&self) -> &FeedbackStore {
+        &self.inner.feedback
     }
 
     pub fn recommend_model_version(&self) -> &ModelVersion {

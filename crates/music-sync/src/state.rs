@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use music_core::{PlaybackState, QueueItem, QueueItemId};
+use music_core::{PlaybackState, QueueItem, QueueItemId, SessionAnchor};
 
 use crate::ops::SyncOp;
 
@@ -28,6 +28,8 @@ pub struct SyncState {
 pub enum ApplyError {
     #[error("now_playing index {index} is out of bounds (queue length {len})")]
     NowPlayingOutOfBounds { index: usize, len: usize },
+    #[error("start_session items must not be empty")]
+    StartSessionEmpty,
 }
 
 impl SyncState {
@@ -35,10 +37,15 @@ impl SyncState {
         Self::default()
     }
 
-    /// Apply an op. Returns `Err` for hard rejects (currently only
-    /// out-of-bounds `SetNowPlaying`). On `Ok`, the version counter
-    /// advances by one.
-    pub fn apply(&mut self, op: &SyncOp) -> Result<(), ApplyError> {
+    /// Apply an op. Returns `Err` for hard rejects (out-of-bounds
+    /// `SetNowPlaying` or `StartSession`, empty `StartSession.items`).
+    /// On `Ok`, the version counter advances by one.
+    ///
+    /// `now_ms` is the server's wall-clock timestamp at apply time.
+    /// The state machine itself never calls `SystemTime::now()` —
+    /// pushing the clock to the caller keeps `apply` pure and lets
+    /// tests replay history with synthetic time.
+    pub fn apply(&mut self, op: &SyncOp, now_ms: i64) -> Result<(), ApplyError> {
         match op {
             SyncOp::Push { item_id, track_id } => {
                 if self.playback.queue.position_of(item_id).is_none() {
@@ -73,6 +80,35 @@ impl SyncState {
                 self.playback.now_playing_index = None;
                 self.playback.position_ms = 0;
                 self.playback.is_playing = false;
+                self.playback.session_anchor = None;
+            }
+            SyncOp::StartSession {
+                items,
+                anchor_index,
+                session_id,
+            } => {
+                if items.is_empty() {
+                    return Err(ApplyError::StartSessionEmpty);
+                }
+                if *anchor_index >= items.len() {
+                    return Err(ApplyError::NowPlayingOutOfBounds {
+                        index: *anchor_index,
+                        len: items.len(),
+                    });
+                }
+                let anchor_track = items[*anchor_index].track_id.clone();
+                self.playback.queue.items = items.clone();
+                self.playback.now_playing_index = Some(*anchor_index);
+                self.playback.position_ms = 0;
+                self.playback.is_playing = true;
+                self.playback.session_anchor = Some(SessionAnchor {
+                    session_id: session_id.clone(),
+                    track_id: anchor_track,
+                    started_ms: now_ms,
+                });
+            }
+            SyncOp::StopSession => {
+                self.playback.session_anchor = None;
             }
         }
         self.version += 1;

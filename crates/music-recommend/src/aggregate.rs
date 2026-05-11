@@ -46,17 +46,43 @@ pub fn aggregate_seed_results<S: std::hash::BuildHasher>(
     exclude: &HashSet<TrackId, S>,
     top_n: usize,
 ) -> Vec<AggregatedResult> {
+    // Equivalent to the weighted aggregator with all weights == 1.0.
+    // Kept as a thin wrapper so existing callers (unit tests, simple
+    // cases) don't have to construct a weights vec.
+    aggregate_seed_results_weighted(per_seed, &[], exclude, top_n)
+}
+
+/// Weighted Σ-similarity aggregation. Each seed's per-hit contribution
+/// is scaled by `weights[i]` (defaulting to 1.0 when the index is out
+/// of range, clamped to 0.0 when negative). Zero-weight seeds are
+/// effectively skipped: their hits do not surface unless another
+/// non-zero seed also hit the same track.
+///
+/// Semantics match `aggregate_seed_results` in every other respect —
+/// the only difference is *how* per-hit scores get added into the
+/// running per-track total.
+pub fn aggregate_seed_results_weighted<S: std::hash::BuildHasher>(
+    per_seed: &[Vec<AnnQueryResult>],
+    weights: &[f32],
+    exclude: &HashSet<TrackId, S>,
+    top_n: usize,
+) -> Vec<AggregatedResult> {
     if top_n == 0 {
         return Vec::new();
     }
     let mut scores: HashMap<TrackId, (f32, u32)> = HashMap::new();
-    for seed_results in per_seed {
+    for (i, seed_results) in per_seed.iter().enumerate() {
+        let raw = weights.get(i).copied().unwrap_or(1.0);
+        let w = raw.max(0.0);
+        if w == 0.0 {
+            continue;
+        }
         for hit in seed_results {
             if exclude.contains(&hit.track_id) {
                 continue;
             }
             let entry = scores.entry(hit.track_id.clone()).or_insert((0.0, 0));
-            entry.0 += hit.similarity;
+            entry.0 += hit.similarity * w;
             entry.1 += 1;
         }
     }
@@ -68,9 +94,6 @@ pub fn aggregate_seed_results<S: std::hash::BuildHasher>(
             seed_hits,
         })
         .collect();
-    // Stable, deterministic ordering: score desc, hits desc, then id asc.
-    // The id tiebreak matters for tests and for parity with hash-map
-    // iteration order across runs.
     ranked.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -234,6 +257,82 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].track_id, t("a"));
         assert_eq!(out[0].seed_hits, 1);
+    }
+
+    // --- aggregate_seed_results_weighted ---
+
+    #[test]
+    fn weighted_scales_each_seeds_contribution() {
+        // Seed A weight 3.0, seed B weight 1.0. A contributes 0.5
+        // (raw) → 1.5 (weighted); B contributes 0.5 (raw) → 0.5.
+        // Track that hits A only beats track that hits B only.
+        let per_seed = vec![vec![hit("via_a", 0.5)], vec![hit("via_b", 0.5)]];
+        let weights = [3.0, 1.0];
+        let out = aggregate_seed_results_weighted(&per_seed, &weights, &HashSet::new(), 10);
+        let ids: Vec<&str> = out.iter().map(|r| r.track_id.as_str()).collect();
+        assert_eq!(ids, vec!["via_a", "via_b"]);
+        assert!((out[0].score - 1.5).abs() < 1e-6);
+        assert!((out[1].score - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn weighted_zero_seed_contributes_nothing() {
+        // A seed with weight 0.0 must not contribute to any score, but
+        // tracks surfaced only via that seed simply don't appear (rather
+        // than appearing with score 0).
+        let per_seed = vec![vec![hit("a", 0.9)], vec![hit("b", 0.9)]];
+        let weights = [0.0, 1.0];
+        let out = aggregate_seed_results_weighted(&per_seed, &weights, &HashSet::new(), 10);
+        let ids: Vec<&str> = out.iter().map(|r| r.track_id.as_str()).collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
+    #[test]
+    fn weighted_all_ones_matches_unweighted() {
+        // Equivalence: weighted with all 1.0 == legacy Σ-similarity.
+        let per_seed = vec![
+            vec![hit("a", 0.5), hit("b", 0.7)],
+            vec![hit("b", 0.4), hit("c", 0.9)],
+        ];
+        let weights = [1.0_f32; 2];
+        let weighted = aggregate_seed_results_weighted(&per_seed, &weights, &HashSet::new(), 10);
+        let plain = aggregate_seed_results(&per_seed, &HashSet::new(), 10);
+        assert_eq!(weighted.len(), plain.len());
+        for (w, p) in weighted.iter().zip(plain.iter()) {
+            assert_eq!(w.track_id, p.track_id);
+            assert!((w.score - p.score).abs() < 1e-6);
+            assert_eq!(w.seed_hits, p.seed_hits);
+        }
+    }
+
+    #[test]
+    fn weighted_negative_weight_is_clamped_to_zero() {
+        // Defence: a user-built seed list might accidentally include a
+        // negative weight. The aggregator clamps rather than rejects so
+        // a single bad value doesn't tank the whole request.
+        let per_seed = vec![vec![hit("a", 0.5)], vec![hit("b", 0.5)]];
+        let weights = [-1.0, 1.0];
+        let out = aggregate_seed_results_weighted(&per_seed, &weights, &HashSet::new(), 10);
+        let ids: Vec<&str> = out.iter().map(|r| r.track_id.as_str()).collect();
+        assert_eq!(ids, vec!["b"], "negative-weighted seed must not surface candidates");
+    }
+
+    #[test]
+    fn weighted_mismatched_lengths_treats_missing_as_one() {
+        // Defence: fewer weights than seeds → missing weights default
+        // to 1.0. More weights than seeds → extras are ignored. This
+        // lets clients evolve the wire shape without coordinated
+        // upgrades.
+        let per_seed = vec![vec![hit("a", 0.5)], vec![hit("b", 0.5)]];
+        let only_one = [3.0];
+        let out = aggregate_seed_results_weighted(&per_seed, &only_one, &HashSet::new(), 10);
+        // a gets 0.5*3.0 = 1.5; b gets 0.5*1.0 (default) = 0.5
+        let by_id: std::collections::HashMap<&str, f32> = out
+            .iter()
+            .map(|r| (r.track_id.as_str(), r.score))
+            .collect();
+        assert!((by_id["a"] - 1.5).abs() < 1e-6);
+        assert!((by_id["b"] - 0.5).abs() < 1e-6);
     }
 
     // --- sample_indices ---

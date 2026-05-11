@@ -14,6 +14,7 @@ pub mod aggregate;
 pub mod ann;
 pub mod embedder;
 pub mod events;
+pub mod feedback;
 pub mod ingest;
 pub mod metadata;
 pub mod mmr;
@@ -23,6 +24,7 @@ pub mod types;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
+pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
 pub use ingest::{MetadataFetcher, MetadataIngest};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,

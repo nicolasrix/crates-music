@@ -2,7 +2,8 @@
 //! JSON because that's what every consumer (Subsonic, gateway, sync) speaks.
 
 use music_core::{
-    Album, AlbumId, Artist, ArtistId, PlaybackState, Queue, QueueItem, QueueItemId, Track, TrackId,
+    Album, AlbumId, Artist, ArtistId, PlaybackState, Queue, QueueItem, QueueItemId, SessionAnchor,
+    SessionId, Track, TrackId,
 };
 
 #[test]
@@ -120,6 +121,7 @@ fn playback_state_default_is_idle_empty() {
     assert_eq!(s.now_playing_index, None);
     assert_eq!(s.position_ms, 0);
     assert!(!s.is_playing);
+    assert!(s.session_anchor.is_none());
 }
 
 #[test]
@@ -134,10 +136,73 @@ fn playback_state_roundtrips() {
         now_playing_index: Some(0),
         position_ms: 12_345,
         is_playing: true,
+        session_anchor: None,
     };
     let json = serde_json::to_string(&state).unwrap();
     let back: PlaybackState = serde_json::from_str(&json).unwrap();
     assert_eq!(back, state);
+}
+
+#[test]
+fn playback_state_with_session_anchor_roundtrips() {
+    let state = PlaybackState {
+        queue: Queue {
+            items: vec![QueueItem {
+                item_id: QueueItemId::from("qi-1"),
+                track_id: TrackId::from("t-1"),
+            }],
+        },
+        now_playing_index: Some(0),
+        position_ms: 0,
+        is_playing: true,
+        session_anchor: Some(SessionAnchor {
+            session_id: SessionId::from("0192a000-0000-7000-8000-000000000001"),
+            track_id: TrackId::from("t-1"),
+            started_ms: 1_710_000_000_000,
+        }),
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let back: PlaybackState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, state);
+}
+
+#[test]
+fn playback_state_without_anchor_omits_field_on_wire() {
+    // session_anchor is None most of the time; we don't want every
+    // snapshot to carry a `"session_anchor":null` payload.
+    let state = PlaybackState::default();
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(
+        !json.contains("session_anchor"),
+        "default PlaybackState should not serialize session_anchor field, got: {json}"
+    );
+}
+
+#[test]
+fn playback_state_deserializes_legacy_payload_without_session_anchor() {
+    // Snapshots written before the field existed must still parse.
+    let json = r#"{"queue":{"items":[]},"now_playing_index":null,"position_ms":0,"is_playing":false}"#;
+    let state: PlaybackState = serde_json::from_str(json).unwrap();
+    assert!(state.session_anchor.is_none());
+}
+
+#[test]
+fn session_id_serializes_as_plain_string() {
+    let id = SessionId::from("0192a000-0000-7000-8000-000000000001");
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "\"0192a000-0000-7000-8000-000000000001\"");
+}
+
+#[test]
+fn session_anchor_roundtrips() {
+    let anchor = SessionAnchor {
+        session_id: SessionId::from("sess-x"),
+        track_id: TrackId::from("t-1"),
+        started_ms: 1_710_000_000_000,
+    };
+    let json = serde_json::to_string(&anchor).unwrap();
+    let back: SessionAnchor = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, anchor);
 }
 
 #[test]
@@ -158,6 +223,7 @@ fn playback_state_now_playing_helper_returns_track_or_none() {
         now_playing_index: Some(1),
         position_ms: 0,
         is_playing: false,
+        session_anchor: None,
     };
     assert_eq!(
         state.now_playing().map(|i| i.track_id.clone()),

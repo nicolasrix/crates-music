@@ -1,21 +1,27 @@
 //! Maximal Marginal Relevance (MMR) re-ranker.
 //!
-//! Given a list of candidates with `(sim_to_seed, embedding_vector)`,
-//! greedily picks `top_n` of them maximising
+//! Given a list of candidates with `(sim_to_seed, embedding_vector,
+//! artist_key)`, greedily picks `top_n` of them maximising
 //!
 //! ```text
-//! score(c | admitted) = λ * sim(c, seed) - (1 - λ) * max_{a ∈ admitted} sim(c, a)
+//! score(c | admitted) = λ * sim(c, seed)
+//!                     - (1 - λ) * max_{a ∈ admitted} sim(c, a)
+//!                     - μ * artist_count(c.artist)
 //! ```
 //!
 //! - `λ = 1.0`: pure similarity (preserves the ANN's relevance order).
 //! - `λ = 0.0`: pure novelty (after an initial relevance-driven pick, each
 //!   subsequent slot maximises distance from what's already admitted).
-//! - The **first slot is always relevance-driven**, regardless of λ. This
-//!   avoids the λ=0 degenerate case where every score is 0 and the
-//!   selection collapses to "first candidate in input order". It also
-//!   matches the conventional MMR interpretation — diversity is a
-//!   *penalty applied to follow-on picks*, not something to optimise
-//!   when the slate is empty.
+//! - `μ` (artist penalty weight): demotes candidates whose artist is
+//!   already represented in the queue or earlier admits. Stacks linearly
+//!   — a 2nd admit by the same artist pays `2μ`, a 3rd pays `3μ`. With
+//!   `μ = 0` the algorithm degrades to plain MMR; that's the regression
+//!   path the bench's λ-sweep was tuned against.
+//! - The **first slot is relevance-and-penalty-driven** (no novelty
+//!   term). This avoids the λ=0 degenerate case where every score is 0
+//!   and the selection collapses to "first candidate in input order".
+//!   The artist penalty still applies — if the queue already has the
+//!   most-relevant artist, the first MMR pick prefers a fresh artist.
 //!
 //! ## Design notes
 //!
@@ -30,10 +36,15 @@
 //!   zero. Better than starving the slate; the cost is that a pathological
 //!   "all candidates missing vectors" call degrades to pure-relevance
 //!   ordering, which is what the system did before MMR existed anyway.
+//! - **Missing artist keys are tolerated.** A candidate with
+//!   `artist_key = None` pays no artist penalty (we have no signal to
+//!   gate on). Same fail-open posture as missing vectors.
 //! - **Ties break by input order.** A strict `>` in the max-find ensures
 //!   the earliest-seen candidate at any given score wins. Combined with
 //!   the relevance-first slot, this makes the output deterministic for a
 //!   given input.
+
+use std::collections::HashMap;
 
 use music_core::TrackId;
 
@@ -48,18 +59,40 @@ pub struct Candidate {
     /// Embedding vector for the diversity term. `None` is acceptable —
     /// see module doc.
     pub vector: Option<Vec<f32>>,
+    /// Stable artist identifier for the soft artist-diversity penalty.
+    /// Conventionally the same `artist_key` the queue filter uses
+    /// (`"id:<artist_id>"` when available, `"name:<lowercased>"`
+    /// otherwise). `None` opts the candidate out of the penalty.
+    pub artist_key: Option<String>,
 }
 
 /// Greedy MMR selection. Returns indices into `candidates` in
 /// admission order (best first). Length is `min(top_n, candidates.len())`.
 ///
 /// `lambda` is clamped to `[0.0, 1.0]`; out-of-range values from a
-/// misconfigured client don't panic.
-pub fn mmr_rerank(candidates: &[Candidate], lambda: f32, top_n: usize) -> Vec<usize> {
+/// misconfigured client don't panic. `artist_penalty_weight` is clamped
+/// to `>= 0.0` for the same reason — negative weights would invert the
+/// signal and are never what the caller meant.
+///
+/// `initial_artist_counts` seeds the per-artist tally with the queue's
+/// existing contents; pass `&HashMap::new()` to score from a clean
+/// slate (also the right call when `artist_penalty_weight == 0.0`).
+#[allow(
+    clippy::implicit_hasher, // single internal caller (the gateway)
+    clippy::cast_precision_loss, // counts are bounded by queue size + top_n
+)]
+pub fn mmr_rerank(
+    candidates: &[Candidate],
+    lambda: f32,
+    top_n: usize,
+    artist_penalty_weight: f32,
+    initial_artist_counts: &HashMap<String, u32>,
+) -> Vec<usize> {
     if top_n == 0 || candidates.is_empty() {
         return Vec::new();
     }
     let lambda = lambda.clamp(0.0, 1.0);
+    let mu = artist_penalty_weight.max(0.0);
     let n = candidates.len();
     let want = top_n.min(n);
 
@@ -70,16 +103,36 @@ pub fn mmr_rerank(candidates: &[Candidate], lambda: f32, top_n: usize) -> Vec<us
     // Indexed by the *original* candidate index, not by position in
     // `remaining` — `remaining` shrinks via swap_remove.
     let mut max_sim_to_admitted: Vec<f32> = vec![0.0; n];
+    // Running per-artist tally, seeded from the queue. Mutated as we
+    // admit; subsequent same-artist candidates see the bumped count
+    // and pay a heavier penalty.
+    let mut artist_counts: HashMap<String, u32> = initial_artist_counts.clone();
+
+    let artist_penalty = |cand_idx: usize, counts: &HashMap<String, u32>| -> f32 {
+        if mu == 0.0 {
+            return 0.0;
+        }
+        let Some(ak) = candidates[cand_idx].artist_key.as_deref() else {
+            return 0.0;
+        };
+        let count = counts.get(ak).copied().unwrap_or(0);
+        mu * (count as f32)
+    };
 
     while selected.len() < want && !remaining.is_empty() {
         let pick_pos = if selected.is_empty() {
-            // Relevance-first slot. See module doc.
-            argmax_by(&remaining, |&cand_idx| candidates[cand_idx].sim_to_seed)
+            // First slot: relevance + artist penalty, no novelty term
+            // (max_sim_to_admitted is uniformly 0 here anyway).
+            argmax_by(&remaining, |&cand_idx| {
+                candidates[cand_idx].sim_to_seed - artist_penalty(cand_idx, &artist_counts)
+            })
         } else {
             argmax_by(&remaining, |&cand_idx| {
                 let relevance = candidates[cand_idx].sim_to_seed;
                 let novelty_penalty = max_sim_to_admitted[cand_idx];
-                lambda * relevance - (1.0 - lambda) * novelty_penalty
+                lambda * relevance
+                    - (1.0 - lambda) * novelty_penalty
+                    - artist_penalty(cand_idx, &artist_counts)
             })
         };
         // `remove` (O(n)) instead of `swap_remove` (O(1)) — order
@@ -99,6 +152,13 @@ pub fn mmr_rerank(candidates: &[Candidate], lambda: f32, top_n: usize) -> Vec<us
                     }
                 }
             }
+        }
+
+        // Bump the running artist tally so subsequent picks by the same
+        // artist pay a heavier penalty. No-op when the candidate carries
+        // no artist key.
+        if let Some(ak) = candidates[picked_idx].artist_key.as_deref() {
+            *artist_counts.entry(ak.to_string()).or_insert(0) += 1;
         }
 
         selected.push(picked_idx);
@@ -158,6 +218,7 @@ mod tests {
             track_id: TrackId::from(id),
             sim_to_seed: sim,
             vector: Some(vec),
+            artist_key: None,
         }
     }
 
@@ -166,27 +227,46 @@ mod tests {
             track_id: TrackId::from(id),
             sim_to_seed: sim,
             vector: None,
+            artist_key: None,
         }
+    }
+
+    /// Helper for penalty tests: builds a candidate with both a vector
+    /// (so the diversity term is well-defined) and an artist key (so
+    /// the penalty term applies).
+    fn cand_with_artist(id: &str, sim: f32, vec: Vec<f32>, artist: &str) -> Candidate {
+        Candidate {
+            track_id: TrackId::from(id),
+            sim_to_seed: sim,
+            vector: Some(vec),
+            artist_key: Some(artist.to_string()),
+        }
+    }
+
+    /// Common "no penalty" call shape so individual tests don't have to
+    /// repeat `0.0, &HashMap::new()`.
+    fn no_penalty(candidates: &[Candidate], lambda: f32, top_n: usize) -> Vec<usize> {
+        mmr_rerank(candidates, lambda, top_n, 0.0, &HashMap::new())
     }
 
     // --- empty / boundary ---
 
     #[test]
     fn empty_candidates_returns_empty() {
-        assert!(mmr_rerank(&[], 0.7, 5).is_empty());
+        assert!(no_penalty(&[], 0.7, 5).is_empty());
     }
 
     #[test]
     fn top_n_zero_returns_empty() {
         let cs = vec![cand("a", 0.9, vec![1.0, 0.0])];
-        assert!(mmr_rerank(&cs, 0.7, 0).is_empty());
+        assert!(no_penalty(&cs, 0.7, 0).is_empty());
     }
 
     #[test]
     fn single_candidate_returned_regardless_of_lambda() {
         let cs = vec![cand("a", 0.9, vec![1.0, 0.0])];
         for &lam in &[0.0_f32, 0.3, 0.5, 0.7, 1.0] {
-            assert_eq!(mmr_rerank(&cs, lam, 5), vec![0], "λ={lam}");
+            assert_eq!(no_penalty(&cs, lam, 5), vec![0], "λ={lam}");
         }
     }
 
@@ -197,7 +277,7 @@ mod tests {
             cand("b", 0.8, vec![0.0, 1.0]),
             cand("c", 0.7, vec![0.5, 0.5]),
         ];
-        assert_eq!(mmr_rerank(&cs, 0.7, 2).len(), 2);
+        assert_eq!(no_penalty(&cs, 0.7, 2).len(), 2);
     }
 
     #[test]
@@ -206,7 +286,7 @@ mod tests {
             cand("a", 0.9, vec![1.0, 0.0]),
             cand("b", 0.8, vec![0.0, 1.0]),
         ];
-        assert_eq!(mmr_rerank(&cs, 0.7, 99).len(), 2);
+        assert_eq!(no_penalty(&cs, 0.7, 99).len(), 2);
     }
 
     // --- λ extremes ---
@@ -219,7 +299,7 @@ mod tests {
             cand("c", 0.7, vec![1.0, 0.0]),
         ];
         // λ=1: score = sim_to_seed. Order: b (0.9), c (0.7), a (0.5).
-        assert_eq!(mmr_rerank(&cs, 1.0, 3), vec![1, 2, 0]);
+        assert_eq!(no_penalty(&cs, 1.0, 3), vec![1, 2, 0]);
     }
 
     #[test]
@@ -230,7 +310,7 @@ mod tests {
             cand("b", 0.9, vec![0.0, 1.0]),
             cand("c", 0.7, vec![1.0, 0.0]),
         ];
-        let out = mmr_rerank(&cs, 0.0, 1);
+        let out = no_penalty(&cs, 0.0, 1);
         assert_eq!(out, vec![1]);
     }
 
@@ -249,7 +329,7 @@ mod tests {
             cand("b", 0.9, vec![0.0, 1.0]),
             cand("c", 0.7, vec![-1.0, 0.0]),
         ];
-        let out = mmr_rerank(&cs, 0.0, 3);
+        let out = no_penalty(&cs, 0.0, 3);
         assert_eq!(out[0], 1);
         // Wait actually max_sim_to_admitted is updated unconditionally
         // with `if s > current`. c's sim to b is 0 + 0 = 0 (dot product
@@ -281,7 +361,7 @@ mod tests {
             cand("b", 0.5, vec![0.0, 1.0, 0.0]), // orthogonal to a
             cand("c", 0.85, vec![0.99, 0.14, 0.0]), // close to a
         ];
-        let out = mmr_rerank(&cs, 0.0, 3);
+        let out = no_penalty(&cs, 0.0, 3);
         assert_eq!(out[0], 0); // a — highest relevance, first pick
         assert_eq!(out[1], 1); // b — most novel
         assert_eq!(out[2], 2); // c — last
@@ -305,7 +385,7 @@ mod tests {
             cand("b", 0.85, vec![0.95, 0.31225, 0.0]), // sim(b,a)≈0.95
             cand("c", 0.6, vec![0.0, 1.0, 0.0]),       // orthogonal
         ];
-        let out = mmr_rerank(&cs, 0.5, 3);
+        let out = no_penalty(&cs, 0.5, 3);
         assert_eq!(out[0], 0); // a
         assert_eq!(out[1], 2); // c — diverse beats similar
         assert_eq!(out[2], 1); // b — last
@@ -323,7 +403,7 @@ mod tests {
             cand("b", 0.85, vec![0.95, 0.31225, 0.0]),
             cand("c", 0.6, vec![0.0, 1.0, 0.0]),
         ];
-        let out = mmr_rerank(&cs, 0.95, 3);
+        let out = no_penalty(&cs, 0.95, 3);
         assert_eq!(out, vec![0, 1, 2]);
     }
 
@@ -341,7 +421,7 @@ mod tests {
             cand("a", 0.5, vec![1.0, 0.0]),
             cand_no_vec("b", 0.9),
         ];
-        let out = mmr_rerank(&cs, 0.5, 2);
+        let out = no_penalty(&cs, 0.5, 2);
         assert_eq!(out, vec![1, 0]);
     }
 
@@ -355,7 +435,7 @@ mod tests {
         // Every score reduces to lambda * relevance after the first pick
         // (no diversity term), so order is by relevance descending for
         // any λ > 0.
-        assert_eq!(mmr_rerank(&cs, 0.7, 3), vec![1, 2, 0]);
+        assert_eq!(no_penalty(&cs, 0.7, 3), vec![1, 2, 0]);
     }
 
     // --- determinism ---
@@ -368,7 +448,7 @@ mod tests {
             cand("b", 0.5, vec![1.0, 0.0]),
             cand("c", 0.5, vec![1.0, 0.0]),
         ];
-        assert_eq!(mmr_rerank(&cs, 0.7, 3), vec![0, 1, 2]);
+        assert_eq!(no_penalty(&cs, 0.7, 3), vec![0, 1, 2]);
     }
 
     #[test]
@@ -378,12 +458,12 @@ mod tests {
             cand("b", 0.9, vec![1.0, 0.0]),
         ];
         // Out-of-range λ should be clamped, not panic. Negative → 0.
-        let out_low = mmr_rerank(&cs, -1.0, 2);
-        let out_zero = mmr_rerank(&cs, 0.0, 2);
+        let out_low = no_penalty(&cs, -1.0, 2);
+        let out_zero = no_penalty(&cs, 0.0, 2);
         assert_eq!(out_low, out_zero);
         // > 1 → 1.
-        let out_high = mmr_rerank(&cs, 5.0, 2);
-        let out_one = mmr_rerank(&cs, 1.0, 2);
+        let out_high = no_penalty(&cs, 5.0, 2);
+        let out_one = no_penalty(&cs, 1.0, 2);
         assert_eq!(out_high, out_one);
     }
 
@@ -416,5 +496,109 @@ mod tests {
     fn cosine_similarity_normalises_non_unit_vectors() {
         // [2,0] and [3,0] should be sim=1 (same direction).
         assert!((cosine_similarity(&[2.0, 0.0], &[3.0, 0.0]) - 1.0).abs() < 1e-6);
+    }
+
+    // --- artist penalty ---
+
+    #[test]
+    fn zero_penalty_weight_is_a_no_op_against_the_unpenalised_path() {
+        let cs = vec![
+            cand_with_artist("a", 0.9, vec![1.0, 0.0], "ar1"),
+            cand_with_artist("b", 0.85, vec![0.95, 0.31225], "ar1"),
+            cand_with_artist("c", 0.6, vec![0.0, 1.0], "ar2"),
+        ];
+        let with_penalty = mmr_rerank(&cs, 0.7, 3, 0.0, &HashMap::new());
+        let without_penalty = no_penalty(&cs, 0.7, 3);
+        assert_eq!(with_penalty, without_penalty);
+    }
+
+    #[test]
+    fn first_slot_demotes_already_queued_artist() {
+        // Two candidates at identical relevance, one's artist is already
+        // in the queue (count=1). At μ=0.15 the fresh artist wins.
+        let cs = vec![
+            cand_with_artist("a", 0.9, vec![1.0, 0.0], "duke"),
+            cand_with_artist("b", 0.9, vec![0.0, 1.0], "fresh"),
+        ];
+        let mut counts = HashMap::new();
+        counts.insert("duke".to_string(), 1);
+        let out = mmr_rerank(&cs, 0.7, 1, 0.15, &counts);
+        assert_eq!(out, vec![1], "fresh artist should win the first slot");
+    }
+
+    #[test]
+    fn all_same_artist_still_fills_slate_when_no_alternative_exists() {
+        // Smada scenario: every candidate is by the seed artist. The
+        // soft penalty must still admit them so the queue doesn't
+        // starve — that was the whole point of swapping the hard cap.
+        let cs = vec![
+            cand_with_artist("a", 0.88, vec![1.0, 0.0, 0.0], "duke"),
+            cand_with_artist("b", 0.87, vec![0.0, 1.0, 0.0], "duke"),
+            cand_with_artist("c", 0.86, vec![0.0, 0.0, 1.0], "duke"),
+        ];
+        let mut counts = HashMap::new();
+        counts.insert("duke".to_string(), 1);
+        let out = mmr_rerank(&cs, 0.8, 3, 0.15, &counts);
+        assert_eq!(
+            out.len(),
+            3,
+            "all three candidates admitted despite same-artist penalty"
+        );
+    }
+
+    #[test]
+    fn penalty_stacks_linearly_and_runs_are_deterministic() {
+        let cs = vec![
+            cand_with_artist("a", 0.9, vec![1.0, 0.0, 0.0], "duke"),
+            cand_with_artist("b", 0.8, vec![0.0, 1.0, 0.0], "duke"),
+            cand_with_artist("c", 0.7, vec![0.0, 0.0, 1.0], "duke"),
+        ];
+        let out_run1 = mmr_rerank(&cs, 0.7, 3, 0.15, &HashMap::new());
+        let out_run2 = mmr_rerank(&cs, 0.7, 3, 0.15, &HashMap::new());
+        assert_eq!(out_run1.len(), 3);
+        assert_eq!(out_run1, out_run2, "deterministic across runs");
+    }
+
+    #[test]
+    fn fresh_artist_beats_more_relevant_same_artist_at_typical_weights() {
+        // Trace-grounded: at the production μ=0.15, a 0.88-sim
+        // candidate by an already-queued artist loses to a 0.85-sim
+        // fresh-artist candidate.
+        //   queued: count=1 → 0.88 - 0.15 = 0.73
+        //   fresh:  count=0 → 0.85 - 0.0  = 0.85
+        let cs = vec![
+            cand_with_artist("queued", 0.88, vec![1.0, 0.0], "duke"),
+            cand_with_artist("fresh", 0.85, vec![0.0, 1.0], "ar2"),
+        ];
+        let mut counts = HashMap::new();
+        counts.insert("duke".to_string(), 1);
+        let out = mmr_rerank(&cs, 0.8, 1, 0.15, &counts);
+        assert_eq!(out, vec![1]);
+    }
+
+    #[test]
+    fn candidate_without_artist_key_pays_no_penalty() {
+        let mut a = cand_with_artist("a", 0.5, vec![1.0, 0.0], "duke");
+        a.artist_key = None;
+        let cs = vec![a, cand_with_artist("b", 0.5, vec![0.0, 1.0], "duke")];
+        let mut counts = HashMap::new();
+        counts.insert("duke".to_string(), 1);
+        let out = mmr_rerank(&cs, 0.7, 1, 0.15, &counts);
+        assert_eq!(out, vec![0]);
+    }
+
+    #[test]
+    fn negative_penalty_weight_is_clamped_to_zero() {
+        // A μ=-1 from a misconfigured client must not invert the
+        // signal into a "prefer repeated artists" preference.
+        let cs = vec![
+            cand_with_artist("a", 0.9, vec![1.0, 0.0], "duke"),
+            cand_with_artist("b", 0.85, vec![0.0, 1.0], "ar2"),
+        ];
+        let mut counts = HashMap::new();
+        counts.insert("duke".to_string(), 5);
+        let out_neg = mmr_rerank(&cs, 1.0, 1, -1.0, &counts);
+        let out_zero = mmr_rerank(&cs, 1.0, 1, 0.0, &counts);
+        assert_eq!(out_neg, out_zero);
     }
 }

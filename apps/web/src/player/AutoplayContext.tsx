@@ -29,8 +29,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { startStationFromAny } from "../api/recommend";
+import { startStationFromAny, startWeightedStation } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
+import { buildAutoplaySeeds } from "./autoplaySeeds";
 
 // Threshold the queue refill targets. The server applies the artist
 // cap + dedup, so we ask for exactly `need` candidates per refill
@@ -60,6 +61,13 @@ const UNDERDELIVERY_COOLDOWN_MS = 30_000;
 interface AutoplayCtx {
   autoplay: boolean;
   setAutoplay: (v: boolean) => void;
+  /** True when the given queue item was pushed by the autoplay refill
+   *  (i.e. came from the recommender). User-picked tracks return false.
+   *  Provenance lives only in memory: a page reload resets it, which
+   *  is fine — recommendation feedback is moment-in-time signal, and
+   *  conflating "I added this manually" with "it came from a rec" is
+   *  worse than the buttons going dim after a reload. */
+  isRecommendation: (itemId: string | undefined) => boolean;
 }
 
 const Ctx = createContext<AutoplayCtx | null>(null);
@@ -82,12 +90,28 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { state, pushTrack } = useSync();
-  const { queue, now_playing_index } = state.playback;
+  const { queue, now_playing_index, session_anchor } = state.playback;
 
   // Lock: true while a refill is in flight. We deliberately leave it
   // set for a short cooldown after the pushes resolve, see comment on
   // REFILL_COOLDOWN_MS.
   const isRefillingRef = useRef(false);
+
+  // Provenance set: item_ids that the refill effect has pushed. The
+  // member check is the "is this a recommendation?" query.
+  //
+  // We never explicitly remove ids from this set — when a queue item
+  // is dropped (clear, remove op, etc.), its id is simply garbage
+  // from then on; the lookup against the set is point-in-time-correct
+  // and bounded by the queue length anyway. Leaking a few thousand
+  // strings over a long session is cheaper than tracking removals
+  // through the sync layer.
+  const recommendedIdsRef = useRef<Set<string>>(new Set());
+  const isRecommendation = useCallback(
+    (itemId: string | undefined) =>
+      itemId !== undefined && recommendedIdsRef.current.has(itemId),
+    [],
+  );
 
   useEffect(() => {
     if (!autoplay) return;
@@ -100,16 +124,28 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     if (upcomingCount >= MIN_UPCOMING) return;
     if (isRefillingRef.current) return;
 
-    // Seed candidates: walk back from the tail. The most-recent track
-    // is the strongest signal of "what the user is in the mood for
-    // right now"; falls back to earlier items if it isn't embedded yet.
-    // startStationFromAny handles the not-embedded fallthrough internally.
-    const seedCandidates: string[] = [];
-    for (let j = items.length - 1; j >= 0; j--) {
-      const id = items[j]?.track_id;
-      if (id) seedCandidates.push(id);
+    // Weighted seed list rooted in the user's intent:
+    //   anchor (3x) > user-picked (2x) > scrobble (1x) > algo-added (skip)
+    // The skip on algo-added items is the key fix for the drift loop
+    // that previously had the seed pool walking off into whatever the
+    // recommender had last suggested.
+    const weightedSeeds = buildAutoplaySeeds({
+      items,
+      nowPlayingIndex: now_playing_index,
+      sessionAnchor: session_anchor,
+      recommendedItemIds: recommendedIdsRef.current,
+    });
+    // Fallback to the legacy single-seed-first-wins path when we have
+    // *no* weighted seeds at all — happens when the session anchor
+    // hasn't propagated yet and every queue item is algo-picked.
+    const fallbackCandidates: string[] = [];
+    if (weightedSeeds.length === 0) {
+      for (let j = items.length - 1; j >= 0; j--) {
+        const id = items[j]?.track_id;
+        if (id) fallbackCandidates.push(id);
+      }
+      if (fallbackCandidates.length === 0) return;
     }
-    if (seedCandidates.length === 0) return;
 
     const queuedIds = new Set<string>(items.map((it) => it.track_id));
     const need = MIN_UPCOMING - upcomingCount;
@@ -120,12 +156,17 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     void (async () => {
       let added = 0;
       try {
-        const { tracks } = await startStationFromAny(seedCandidates, need, {
+        const queueContext = {
           queueTrackIds: items.map((it) => it.track_id),
           ...(nowPlayingTrackId ? { nowPlayingTrackId } : {}),
           diversityMode: DIVERSITY_MODE,
           mmrLambda: MMR_LAMBDA,
-        });
+        };
+        const sessionId = session_anchor?.session_id;
+        const { tracks } =
+          weightedSeeds.length > 0
+            ? await startWeightedStation(weightedSeeds, need, queueContext, sessionId)
+            : await startStationFromAny(fallbackCandidates, need, queueContext);
         if (cancelled) return;
         for (const t of tracks) {
           if (added >= need) break;
@@ -135,7 +176,8 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
           // that slips through here would be a re-add of a track we
           // just played; cheap to guard against.
           if (queuedIds.has(t.id)) continue;
-          pushTrack(t);
+          const newItemId = pushTrack(t);
+          recommendedIdsRef.current.add(newItemId);
           queuedIds.add(t.id);
           added++;
         }
@@ -168,10 +210,12 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [autoplay, queue.items, now_playing_index, pushTrack]);
+  }, [autoplay, queue.items, now_playing_index, session_anchor, pushTrack]);
 
   return (
-    <Ctx.Provider value={{ autoplay, setAutoplay }}>{children}</Ctx.Provider>
+    <Ctx.Provider value={{ autoplay, setAutoplay, isRecommendation }}>
+      {children}
+    </Ctx.Provider>
   );
 }
 

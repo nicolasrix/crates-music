@@ -2,7 +2,7 @@
 //! between clients and the gateway, so JSON shape changes are
 //! breaking-API changes.
 
-use music_core::{QueueItemId, TrackId};
+use music_core::{QueueItem, QueueItemId, SessionId, TrackId};
 use music_sync::SyncOp;
 
 fn roundtrip(op: &SyncOp) -> SyncOp {
@@ -91,4 +91,49 @@ fn unknown_op_type_fails_to_deserialize() {
         result.is_err(),
         "an unknown op tag must not silently succeed: {result:?}"
     );
+}
+
+#[test]
+fn start_session_op_roundtrips() {
+    let op = SyncOp::StartSession {
+        items: vec![
+            QueueItem {
+                item_id: QueueItemId::from("qi-1"),
+                track_id: TrackId::from("t-1"),
+            },
+            QueueItem {
+                item_id: QueueItemId::from("qi-2"),
+                track_id: TrackId::from("t-2"),
+            },
+        ],
+        anchor_index: 0,
+        session_id: SessionId::from("sess-1"),
+    };
+    assert_eq!(roundtrip(&op), op);
+}
+
+#[test]
+fn start_session_op_wire_shape() {
+    let op = SyncOp::StartSession {
+        items: vec![QueueItem {
+            item_id: QueueItemId::from("qi-1"),
+            track_id: TrackId::from("t-1"),
+        }],
+        anchor_index: 0,
+        session_id: SessionId::from("sess-1"),
+    };
+    let v: serde_json::Value = serde_json::to_value(&op).unwrap();
+    assert_eq!(v["type"], "start_session");
+    assert_eq!(v["anchor_index"], 0);
+    assert_eq!(v["session_id"], "sess-1");
+    assert_eq!(v["items"][0]["item_id"], "qi-1");
+    assert_eq!(v["items"][0]["track_id"], "t-1");
+}
+
+#[test]
+fn stop_session_op_roundtrips_as_tag_only() {
+    let op = SyncOp::StopSession;
+    let v: serde_json::Value = serde_json::to_value(&op).unwrap();
+    assert_eq!(v["type"], "stop_session");
+    assert_eq!(roundtrip(&op), op);
 }

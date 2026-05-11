@@ -7,6 +7,7 @@
 //! to default. Single-user, low-stakes; the trade-off is intentional.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use music_sync::{ApplyError, SyncOp, SyncState};
 use tokio::sync::{RwLock, broadcast};
@@ -63,9 +64,17 @@ impl SyncStore {
     /// success and broadcasts an `AppliedEvent` to all subscribers.
     /// The broadcast happens inside the critical section so subscribers
     /// see ops in apply order.
+    ///
+    /// `now_ms` is stamped here from `SystemTime::now()` and threaded
+    /// into the pure state machine. The state machine itself never
+    /// looks at the clock — keeping it deterministic for tests.
     pub async fn apply(&self, op: &SyncOp) -> Result<u64, ApplyError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
         let mut guard = self.inner.write().await;
-        guard.apply(op)?;
+        guard.apply(op, now_ms)?;
         let version = guard.version;
         // send returns Err only if there are zero receivers — fine.
         let _ = self.bus.send(AppliedEvent {

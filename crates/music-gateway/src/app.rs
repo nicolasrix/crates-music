@@ -16,6 +16,7 @@ use crate::events;
 use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
 use crate::recommend;
+use crate::recommend_feedback;
 use crate::state::AppState;
 use crate::sync::handlers as sync_handlers;
 
@@ -40,6 +41,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
         .route("/v1/recommend/from-any", post(recommend::from_any))
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
+        .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/events", post(events::submit))
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))
         .route(
