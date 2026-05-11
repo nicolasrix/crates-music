@@ -13,6 +13,7 @@ use music_cache::Cache;
 use music_recommend::EventStore;
 use music_recommend::FeedbackStore;
 use music_recommend::PlayHistoryStore;
+use music_recommend::ProjectionStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
@@ -44,6 +45,7 @@ struct Inner {
     event_store: EventStore,
     play_history: PlayHistoryStore,
     feedback: FeedbackStore,
+    projection: ProjectionStore,
     ann: Arc<AnnIndex>,
     /// The model_version the recommender stamps on enqueue + ANN
     /// queries. Sourced from the embedder's last health probe; falls
@@ -93,6 +95,7 @@ impl AppState {
         let event_store = EventStore::new(embedding_store.pool().clone());
         let play_history = PlayHistoryStore::new(embedding_store.pool().clone());
         let feedback = FeedbackStore::new(embedding_store.pool().clone());
+        let projection = ProjectionStore::new(embedding_store.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -107,6 +110,7 @@ impl AppState {
                 event_store,
                 play_history,
                 feedback,
+                projection,
                 ann,
                 recommend_model_version,
                 trace_store,
@@ -170,6 +174,10 @@ impl AppState {
 
     pub fn feedback(&self) -> &FeedbackStore {
         &self.inner.feedback
+    }
+
+    pub fn projection(&self) -> &ProjectionStore {
+        &self.inner.projection
     }
 
     pub fn recommend_model_version(&self) -> &ModelVersion {

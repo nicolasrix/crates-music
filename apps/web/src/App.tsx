@@ -9,6 +9,7 @@ import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
 import { Diagnostics } from "./pages/Diagnostics";
 import { Home } from "./pages/Home";
+import { LatentSpace } from "./pages/LatentSpace";
 import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
@@ -81,5 +82,6 @@ function Routed({ path }: { path: string }) {
   if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
   if (path === "/diagnostics") return <Diagnostics />;
+  if (path === "/diagnostics/latent") return <LatentSpace />;
   return <Home />;
 }

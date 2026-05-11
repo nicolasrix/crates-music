@@ -33,6 +33,12 @@ dev = [
     "pytest-benchmark>=4.0",
     "httpx>=0.27",
 ]
+# UMAP 2-D reduction for the latent-space view in the diagnostics page.
+# Used by `embedder.reduce` only — not loaded by the FastAPI service.
+# Pulls in numba + scipy + sklearn so kept optional.
+reduce = [
+    "umap-learn>=0.5",
+]
 
 [build-system]
 requires = ["hatchling"]
