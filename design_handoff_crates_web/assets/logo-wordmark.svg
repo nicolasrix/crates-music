@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 60" fill="none">
+  
+  <g transform="translate(4, 6)">
+    <circle cx="24" cy="24" r="24" fill="currentColor"></circle>
+    <circle cx="24" cy="24" r="20" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"></circle>
+    <circle cx="24" cy="24" r="16" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"></circle>
+    <circle cx="24" cy="24" r="12" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"></circle>
+    <circle cx="24" cy="24" r="9" fill="#E8B468"></circle>
+    <circle cx="24" cy="24" r="1.2" fill="#1B1A18"></circle>
+  </g>
+  
+  <text x="62" y="40" font-family="Fraunces, Georgia, serif" font-weight="500" font-size="32" letter-spacing="-0.02em" fill="currentColor">crates</text>
+</svg>

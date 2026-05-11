@@ -1,0 +1,47 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.player { background: var(--surface-1); border-top: 1px solid var(--border-subtle); padding: 12px 16px; border-radius: var(--radius-3); display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 16px; align-items: center; }
+.np { display:flex; gap: 12px; align-items:center; min-width: 0; }
+.np .cover { width: 52px; height: 52px; border-radius: var(--radius-2); background: linear-gradient(135deg,#3A1F0E,#9A6B3F); flex-shrink:0; }
+.np .meta { min-width: 0; }
+.np .title { font-weight: 500; font-size: 14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.np .sub { color: var(--fg-muted); font-size: 12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.controls { display:flex; align-items:center; gap: 6px; }
+.controls .ic { width:36px; height:36px; border-radius: var(--radius-2); display:inline-flex; align-items:center; justify-content:center; background:transparent; color: var(--fg); border:0; cursor:pointer; transition: background var(--dur-1); }
+.controls .ic:hover { background: var(--surface-2); }
+.controls .play { width:44px; height:44px; border-radius: var(--radius-full); background: var(--fg); color: var(--surface-0); }
+.controls .play:hover { background: var(--ink-950); }
+.controls .ic.on { color: var(--accent); }
+.scrub { display:flex; align-items:center; gap:10px; }
+.scrub .time { font: var(--type-mono); font-size: 11px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.bar { flex:1; height: 4px; background: var(--surface-3); border-radius: 999px; position:relative; }
+.bar::after { content:""; position:absolute; left:0; top:0; bottom:0; width: 38%; background: var(--fg); border-radius: 999px; }
+.right { display:flex; justify-content:flex-end; align-items:center; gap:8px; font-size:12px; color: var(--fg-muted); }
+.svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.toggle { display:inline-flex; align-items:center; gap:8px; padding: 6px 10px; border-radius: var(--radius-1); background: rgba(232,180,104,0.10); color: var(--accent); font: var(--type-meta); font-weight:500; }
+.toggle .dot { width: 6px; height:6px; border-radius:999px; background: var(--accent); }
+</style></head>
+<body style="height:220px">
+<div class="card-grid">
+  <div class="label">Persistent player bar</div>
+  <div class="player">
+    <div class="np">
+      <div class="cover"></div>
+      <div class="meta"><div class="title">Bitches Brew</div><div class="sub">Miles Davis · Bitches Brew</div></div>
+    </div>
+    <div class="col" style="gap:6px;align-items:center;min-width:280px">
+      <div class="controls">
+        <button class="ic" title="repeat"><svg class="svg" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg></button>
+        <button class="ic" title="prev"><svg class="svg" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg></button>
+        <button class="play" title="pause"><svg class="svg" viewBox="0 0 24 24" style="stroke:none;fill:currentColor"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg></button>
+        <button class="ic" title="next"><svg class="svg" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg></button>
+        <button class="ic on" title="autoplay"><svg class="svg" viewBox="0 0 24 24"><path d="M9.4 16.6 4.8 12l4.6-4.6"/><path d="M19.2 12H4.8"/><circle cx="19" cy="12" r="2.5"/></svg></button>
+      </div>
+      <div class="scrub" style="width:100%"><span class="time">2:14</span><div class="bar"></div><span class="time">5:51</span></div>
+    </div>
+    <div class="right">
+      <span class="toggle"><span class="dot"></span>autoplay on</span>
+    </div>
+  </div>
+</div>
+</body></html>

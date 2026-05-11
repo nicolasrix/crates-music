@@ -1,0 +1,25 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.icons { display: grid; grid-template-columns: repeat(10, 1fr); gap: 12px; align-items:center; justify-items:center; }
+.icons div { display:flex; flex-direction:column; gap:4px; align-items:center; color: var(--fg); }
+.icons span { color: var(--fg-faint); font: var(--type-mono); font-size: 10px; }
+.svg { width: 22px; height: 22px; stroke: currentColor; stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+</style></head>
+<body style="height:200px">
+<div class="card-grid">
+  <div class="label">Iconography · Lucide · 1.5px stroke · 18 / 22 / 14</div>
+  <div class="icons">
+    <div><svg class="svg" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3" fill="currentColor" stroke="none"/></svg><span>play</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" fill="currentColor" stroke="none"/><rect x="14" y="4" width="4" height="16" fill="currentColor" stroke="none"/></svg><span>pause</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg><span>skip-fwd</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg><span>skip-back</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span>repeat</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>search</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg><span>disc-3</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><path d="M21 15V6"/><path d="M18.5 18a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/></svg><span>list-music</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg><span>user</span></div>
+    <div><svg class="svg" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="19" cy="12" r="1.5" fill="currentColor"/></svg><span>more</span></div>
+  </div>
+  <div class="token">via lucide-static SVG sprite · MIT · color inherits currentColor · no emoji, no PNG icons in chrome</div>
+</div>
+</body></html>

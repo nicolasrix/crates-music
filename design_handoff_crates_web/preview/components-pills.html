@@ -1,0 +1,26 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.pill { display:inline-flex; align-items:center; gap:6px; padding: 3px 10px; border-radius: var(--radius-1); font: var(--type-label); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.pill .dot { width: 6px; height: 6px; border-radius: 999px; }
+.tag { display:inline-flex; align-items:center; padding: 3px 8px; border-radius: var(--radius-1); background: var(--surface-2); color: var(--fg-muted); font: var(--type-mono); font-size: 11px; }
+</style></head>
+<body style="height:200px">
+<div class="card-grid">
+  <div class="label">Pills · semantic state (RUM ratings, queue depth)</div>
+  <div class="row">
+    <span class="pill" style="background:rgba(106,180,120,0.18);color:var(--success-200)"><span class="dot" style="background:var(--success)"></span>good</span>
+    <span class="pill" style="background:rgba(220,170,80,0.18);color:var(--warning-200)"><span class="dot" style="background:var(--warning)"></span>needs-improvement</span>
+    <span class="pill" style="background:rgba(220,80,80,0.18);color:var(--danger-200)"><span class="dot" style="background:var(--danger)"></span>poor</span>
+    <span class="pill" style="background:rgba(120,160,220,0.18);color:var(--info-200)"><span class="dot" style="background:var(--info)"></span>info</span>
+  </div>
+  <div class="label" style="margin-top:8px">Tags · technical metadata</div>
+  <div class="row">
+    <span class="tag">FLAC</span>
+    <span class="tag">320 kbps</span>
+    <span class="tag">48 kHz</span>
+    <span class="tag tabular">2:01:34</span>
+    <span class="tag" style="color:var(--accent);background:rgba(232,180,104,0.12)">pinned</span>
+    <span class="tag" style="color:var(--success);background:rgba(106,180,120,0.10)">cached</span>
+  </div>
+</div>
+</body></html>

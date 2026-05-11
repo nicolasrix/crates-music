@@ -1,0 +1,23 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.scrub { display:flex; align-items:center; gap:10px; padding: 22px 16px; }
+.scrub .time { font: var(--type-mono); font-size: 11px; color: var(--fg-muted); font-variant-numeric: tabular-nums; min-width: 36px; text-align: right; }
+.bar { flex:1; height: 4px; background: var(--surface-3); border-radius: 999px; position:relative; cursor: pointer; }
+.bar .fill { position:absolute; left:0; top:0; bottom:0; width: 38%; background: var(--art-accent, var(--fg)); border-radius: 999px; }
+.bar .thumb { position:absolute; top:50%; left:38%; width: 12px; height: 12px; border-radius:999px; background: var(--art-accent, var(--fg)); transform: translate(-50%,-50%); box-shadow: var(--shadow-pop); opacity: 0; transition: opacity var(--dur-1); }
+.bar:hover .thumb { opacity: 1; }
+.bar:hover .fill { background: var(--art-accent, var(--fg)); }
+.bar.warm { --art-accent: #E8A96A; }
+.bar.cool { --art-accent: #5B8FB9; }
+.bar.green { --art-accent: #A8C26B; }
+</style></head>
+<body style="height:230px">
+<div class="card-grid">
+  <div class="label">Scrubber · per-page tint from --art-accent · thumb on hover only</div>
+  <div class="col" style="gap:0">
+    <div class="scrub"><span class="time">2:14</span><div class="bar warm"><div class="fill"></div><div class="thumb"></div></div><span class="time">5:51</span></div>
+    <div class="scrub"><span class="time">0:46</span><div class="bar cool"><div class="fill"></div><div class="thumb"></div></div><span class="time">4:02</span></div>
+    <div class="scrub"><span class="time">1:30</span><div class="bar green"><div class="fill"></div><div class="thumb"></div></div><span class="time">3:18</span></div>
+  </div>
+</div>
+</body></html>

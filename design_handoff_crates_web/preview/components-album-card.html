@@ -1,0 +1,24 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.cards { display:grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+.cover { aspect-ratio: 1; border-radius: var(--radius-3); background-size: cover; background-position: center; transition: box-shadow var(--dur-2) var(--ease-out-soft), transform var(--dur-2) var(--ease-out-soft); }
+.tile:hover .cover { box-shadow: var(--shadow-pop); transform: translateY(-2px); }
+.tile .title { margin-top: 8px; font-weight:500; font-size: 14px; }
+.tile .sub { margin-top: 2px; font-size: 12px; color: var(--fg-muted); }
+.c1 { background: linear-gradient(135deg, #3A1F0E, #9A6B3F); }
+.c2 { background: linear-gradient(135deg, #0F2236, #5B8FB9); }
+.c3 { background: linear-gradient(135deg, #1B2A1A, #A8C26B); }
+.c4 { background: linear-gradient(135deg, #2A1A2A, #B07AA1); }
+</style>
+</head>
+<body style="height:220px">
+<div class="card-grid">
+  <div class="label">Album / artist tile (no border, no shadow at rest, lifts on hover)</div>
+  <div class="cards">
+    <a class="tile" style="text-decoration:none;color:inherit"><div class="cover c1"></div><div class="title">Bitches Brew</div><div class="sub">Miles Davis · 1970</div></a>
+    <a class="tile" style="text-decoration:none;color:inherit"><div class="cover c2"></div><div class="title">Blue Train</div><div class="sub">John Coltrane · 1957</div></a>
+    <a class="tile" style="text-decoration:none;color:inherit"><div class="cover c3"></div><div class="title">Pet Sounds</div><div class="sub">The Beach Boys · 1966</div></a>
+    <a class="tile" style="text-decoration:none;color:inherit"><div class="cover c4"></div><div class="title">Maggot Brain</div><div class="sub">Funkadelic · 1971</div></a>
+  </div>
+</div>
+</body></html>

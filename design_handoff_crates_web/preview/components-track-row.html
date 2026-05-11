@@ -1,0 +1,33 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+table.tracks { width: 100%; border-collapse: collapse; font: var(--type-meta); }
+.tracks thead th { text-align:left; color: var(--fg-faint); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
+.tracks tbody tr { transition: background var(--dur-1); }
+.tracks tbody tr:hover { background: var(--surface-2); }
+.tracks td { padding: 7px 4px; border-bottom: 1px solid var(--border-subtle); }
+.num { color: var(--fg-faint); width: 24px; font-variant-numeric: tabular-nums; }
+.tracks tbody tr:hover .num { color: transparent; position: relative; }
+.tracks tbody tr:hover .num::after { content:"▶"; position:absolute; left:0; top:7px; color: var(--fg); font-size: 10px; }
+.dur { text-align:right; color: var(--fg-muted); font-variant-numeric: tabular-nums; width: 50px; }
+.row-now td { color: var(--art-accent, var(--accent)); }
+.row-now .num { color: var(--art-accent, var(--accent)); }
+.eq { display:inline-flex; gap:2px; vertical-align: middle; margin-left: 6px; }
+.eq i { display:inline-block; width:2px; background: var(--art-accent, var(--accent)); animation: bar 0.9s ease-in-out infinite; }
+.eq i:nth-child(1) { height:6px; animation-delay: 0; }
+.eq i:nth-child(2) { height:10px; animation-delay: 0.2s; }
+.eq i:nth-child(3) { height:7px; animation-delay: 0.4s; }
+@keyframes bar { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
+</style></head>
+<body style="height:230px;--art-accent:#E8A96A">
+<div class="card-grid">
+  <div class="label">Track row · hover swaps number → play · now-playing row tinted</div>
+  <table class="tracks">
+    <thead><tr><th>#</th><th>Title</th><th>Artist</th><th style="text-align:right">Time</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Pharaoh's Dance</td><td style="color:var(--fg-muted)">Miles Davis</td><td class="dur">20:05</td></tr>
+      <tr class="row-now"><td class="num">2</td><td>Bitches Brew<span class="eq"><i></i><i></i><i></i></span></td><td>Miles Davis</td><td class="dur">26:58</td></tr>
+      <tr><td class="num">3</td><td>Spanish Key</td><td style="color:var(--fg-muted)">Miles Davis</td><td class="dur">17:32</td></tr>
+    </tbody>
+  </table>
+</div>
+</body></html>
