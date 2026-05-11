@@ -84,15 +84,17 @@ WARN  gateway is unconfigured — visit https://gateway.local:8443/oauth/setup w
 Open that URL in your browser. Set a master password. The setup token
 is single-use; after this run, the warning won't appear again.
 
-The gateway also creates three SQLite files next to the config:
+The gateway also creates four SQLite files next to the config:
 - `gateway-state.sqlite` — OAuth state (irreplaceable: holds your
-  master password hash + per-device refresh tokens; back this up)
-- `gateway-cache.sqlite` — L2 metadata cache (throwaway: re-derived
-  from upstream on demand)
-- `gateway-state.recommend.sqlite` — embeddings + event log.
+  master password hash + per-device refresh tokens; back this up).
+- `gateway-cache.sqlite` — L2 metadata + cover-art cache
+  (throwaway: re-derived from upstream on demand).
+- `gateway-state.recommend.sqlite` — embeddings, ingest queue, event
+  log, track metadata, play history, feedback, 2D projections.
   Embeddings are reproducible (re-ingest a track to regenerate); the
-  event log is append-only and feeds the future behavioural index, so
-  it's worth backing up alongside `gateway-state.sqlite`.
+  event log + feedback are append-only signal worth backing up.
+- `gateway-state.traces.sqlite` — diagnostics ring buffer (closed
+  `tracing` spans + browser RUM events). Throwaway.
 
 Plus one file outside SQLite:
 - `gateway-state.ann` (+ `gateway-state.ann.keys` sidecar) — the
@@ -184,6 +186,7 @@ INFO  embedder: probe ok model=clap-music_audioset_epoch_15_esc_90.14 dim=512
 | Subsonic proxy | `curl -k -H "Authorization: Bearer $TOKEN" 'https://gateway.local:8443/rest/ping?v=1.16.1&c=test&f=json'` → Subsonic ping OK |
 | Embedder reachable | `curl http://localhost:9000/healthz` → 200 with `model_loaded: true` |
 | Web app | http://localhost:5173 → albums list loads |
+| Diagnostics | http://localhost:5173/diagnostics after sign-in → live recommend / RUM / trace dashboards |
 
 ## Common first-run snags
 
@@ -211,7 +214,10 @@ On macOS: `xcode-select --install`.
 
 ## What's next
 
-- [components/music-gateway.md](./components/music-gateway.md) — where most code changes land
-- [API.md](./API.md) — endpoint reference for client work
-- [TESTING.md](./TESTING.md) — running the test suite
-- [CONFIGURATION.md](./CONFIGURATION.md) — the rest of the gateway config knobs
+- [components/music-gateway.md](./components/music-gateway.md) — where most code changes land.
+- [components/music-recommend.md](./components/music-recommend.md) — the recommender stack (embeddings, ANN, MMR, feedback, projection).
+- [API.md](./API.md) — endpoint reference for client work.
+- [TESTING.md](./TESTING.md) — running the test suite.
+- [CONFIGURATION.md](./CONFIGURATION.md) — the rest of the gateway config knobs.
+- The `/diagnostics` page in the web app is the fastest way to see
+  what the gateway is actually doing in real time.

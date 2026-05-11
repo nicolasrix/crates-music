@@ -1,0 +1,21 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.row2 { display:grid; grid-template-columns: 90px 1fr; gap: 10px 16px; align-items: baseline; }
+.row2 dt { color: var(--fg-faint); font: var(--type-label); text-transform: uppercase; letter-spacing: 0.04em; }
+.row2 dd { margin: 0; color: var(--fg); font: var(--type-meta); }
+em.do { color: var(--success-200); font-style: normal; }
+em.dont { color: var(--danger-200); font-style: normal; text-decoration: line-through; }
+</style></head>
+<body style="height:280px">
+<div class="card-grid">
+  <div class="label">Voice & tone</div>
+  <dl class="row2">
+    <dt>casing</dt><dd>lowercase nav and labels · sentence case body · never normalize metadata</dd>
+    <dt>person</dt><dd>"your library" · avoid "my" / "our" / "I"</dd>
+    <dt>numbers</dt><dd>SI units always · <span class="tabular">2 GB · 120 ms · 48 kHz</span> · durations <span class="tabular">m:ss</span></dd>
+    <dt>emoji</dt><dd>none — not in UI, not in copy</dd>
+    <dt>microcopy</dt><dd><em class="do">"error: gateway returned 503. retry?"</em> &nbsp; <em class="dont">"Oops! Something went wrong 😬"</em></dd>
+    <dt>vibe</dt><dd>a single quiet shelf with everything labeled correctly</dd>
+  </dl>
+</div>
+</body></html>

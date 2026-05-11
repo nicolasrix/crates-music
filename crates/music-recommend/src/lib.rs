@@ -10,15 +10,31 @@
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod aggregate;
 pub mod ann;
 pub mod embedder;
 pub mod events;
+pub mod feedback;
 pub mod ingest;
+pub mod metadata;
+pub mod mmr;
+pub mod play_history;
+pub mod projection;
+pub mod queue_filter;
 pub mod store;
 pub mod types;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
+pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
+pub use ingest::{MetadataFetcher, MetadataIngest};
+pub use metadata::{
+    BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
+};
+pub use mmr::{Candidate as MmrCandidate, mmr_rerank};
+pub use play_history::PlayHistoryStore;
+pub use projection::{Projection2D, ProjectionStore, ProjectionVersionSummary};
+pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
 

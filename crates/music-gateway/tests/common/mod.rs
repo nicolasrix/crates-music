@@ -14,6 +14,7 @@ use music_gateway::embedder::EmbedderHandle;
 use music_gateway::oauth::{OauthStore, SetupToken};
 use music_gateway::state::AppState;
 use music_recommend::ann::AnnIndex;
+use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 
@@ -83,6 +84,9 @@ async fn build_state_full(
     let embedding_store = EmbeddingStore::open_in_memory()
         .await
         .expect("in-memory embedding store opens");
+    // Sibling store on the same in-memory pool — production wires both
+    // against the recommend DB (see boot_recommender in main.rs).
+    let metadata_store = MetadataStore::new(embedding_store.pool().clone());
     let ann = Arc::new(AnnIndex::open_in_memory(TEST_DIM, 16).expect("ann opens"));
     let trace_store = TraceStore::open_in_memory()
         .await
@@ -94,6 +98,7 @@ async fn build_state_full(
         setup_token,
         EmbedderHandle::disabled(),
         embedding_store,
+        metadata_store,
         ann,
         ModelVersion::from("test-v1"),
         trace_store,

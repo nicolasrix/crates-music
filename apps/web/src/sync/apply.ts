@@ -54,6 +54,33 @@ function applyToPlayback(p: PlaybackState, op: SyncOp): PlaybackState {
     case "set_playing":
       return { ...p, is_playing: op.is_playing };
     case "clear":
-      return { queue: { items: [] }, now_playing_index: null, position_ms: 0, is_playing: false };
+      return {
+        queue: { items: [] },
+        now_playing_index: null,
+        position_ms: 0,
+        is_playing: false,
+        session_anchor: null,
+      };
+    case "start_session": {
+      // Optimistic local stamp — the next frame from the server
+      // overwrites `playback` wholesale with the authoritative anchor
+      // (correct `started_ms`), so this guess only lives until the
+      // ack round-trip.
+      const anchor_track = op.items[op.anchor_index]?.track_id;
+      if (anchor_track === undefined) return p;
+      return {
+        queue: { items: op.items.map((i) => ({ item_id: i.item_id, track_id: i.track_id })) },
+        now_playing_index: op.anchor_index,
+        position_ms: 0,
+        is_playing: true,
+        session_anchor: {
+          session_id: op.session_id,
+          track_id: anchor_track,
+          started_ms: Date.now(),
+        },
+      };
+    }
+    case "stop_session":
+      return { ...p, session_anchor: null };
   }
 }

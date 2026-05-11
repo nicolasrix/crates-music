@@ -10,6 +10,14 @@ export interface Album {
   duration?: number;
   year?: number;
   coverArt?: string;
+  /** Aggregate play count across the album's tracks. OpenSubsonic
+   *  extension; older servers omit it. Source of truth lives upstream
+   *  in Navidrome — refreshed when an /rest/getAlbum response lands. */
+  playCount?: number;
+  /** ISO8601 timestamp of the most recent play across the album.
+   *  Format strictly as returned by the server; the UI parses with
+   *  the platform Intl APIs. */
+  played?: string;
 }
 
 export interface Track {
@@ -18,12 +26,45 @@ export interface Track {
   album?: string;
   albumId?: string;
   artist?: string;
+  artistId?: string;
   duration?: number;
   track?: number;
   coverArt?: string;
+  /** Total times this track has been played. See Album.playCount for
+   *  caveats on freshness. */
+  playCount?: number;
+  /** ISO8601 timestamp of the most recent play. */
+  played?: string;
 }
 
 export interface AlbumWithTracks {
   album: Album;
+  tracks: Track[];
+}
+
+export interface Artist {
+  id: string;
+  name: string;
+  albumCount?: number;
+  coverArt?: string;
+  artistImageUrl?: string;
+}
+
+export interface ArtistWithAlbums {
+  artist: Artist;
+  albums: Album[];
+  biography?: string;
+}
+
+export interface PlaylistSummary {
+  id: string;
+  name: string;
+  songCount?: number;
+  duration?: number;
+  coverArt?: string;
+}
+
+export interface PlaylistWithTracks {
+  playlist: PlaylistSummary;
   tracks: Track[];
 }

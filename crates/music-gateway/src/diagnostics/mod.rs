@@ -17,5 +17,5 @@ mod store;
 mod types;
 
 pub use layer::{TraceLayer, spawn_drainer};
-pub use store::{HistogramBucket, TraceStore};
+pub use store::{HistogramBucket, RecommendSummary, TraceStore};
 pub use types::{ClientEventRecord, SpanRecord};

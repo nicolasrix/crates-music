@@ -1,0 +1,198 @@
+/* crates design tokens — lifted from design_handoff_crates_web/colors_and_type.css.
+   Framework-neutral CSS custom properties: same names work in Tailwind utilities
+   (via the colors/fontFamily/borderRadius mappings in tailwind.config.js) and in
+   raw CSS for the component-class layer. Fonts are loaded from index.html via
+   <link rel="preconnect"> + <link rel="stylesheet"> rather than @import here,
+   so the request kicks off in parallel with the HTML parse. */
+
+:root {
+  --ink-50:  oklch(14% 0.005 70);
+  --ink-100: oklch(18% 0.005 70);
+  --ink-200: oklch(22% 0.006 70);
+  --ink-300: oklch(28% 0.006 70);
+  --ink-400: oklch(38% 0.007 70);
+  --ink-500: oklch(52% 0.008 70);
+  --ink-600: oklch(66% 0.008 70);
+  --ink-700: oklch(78% 0.008 70);
+  --ink-800: oklch(88% 0.007 70);
+  --ink-900: oklch(95% 0.006 70);
+  --ink-950: oklch(98.5% 0.004 70);
+
+  --crate-amber-500: oklch(72% 0.13 65);
+  --crate-amber-400: oklch(76% 0.13 65);
+  --crate-amber-600: oklch(64% 0.14 60);
+
+  --success-500: oklch(70% 0.16 155);
+  --warning-500: oklch(78% 0.15 80);
+  --danger-500:  oklch(64% 0.21 25);
+  --info-500:    oklch(70% 0.13 230);
+}
+
+:root,
+:root[data-theme="dark"] {
+  --surface-0: var(--ink-50);
+  --surface-1: var(--ink-100);
+  --surface-2: var(--ink-200);
+  --surface-3: var(--ink-300);
+
+  --fg-strong:    var(--ink-950);
+  --fg:           var(--ink-900);
+  --fg-muted:     var(--ink-700);
+  --fg-faint:     var(--ink-500);
+  --fg-on-accent: var(--ink-50);
+
+  --border-subtle: oklch(28% 0.005 70 / 1);
+  --border-strong: oklch(38% 0.006 70 / 1);
+
+  --accent:       var(--crate-amber-500);
+  --accent-hover: var(--crate-amber-400);
+  --accent-press: var(--crate-amber-600);
+  --on-accent:    var(--ink-50);
+
+  --focus: var(--crate-amber-500);
+
+  --success: var(--success-500);
+  --warning: var(--warning-500);
+  --danger:  var(--danger-500);
+  --info:    var(--info-500);
+
+  --art-bg:     var(--surface-0);
+  --art-fg:     var(--fg);
+  --art-mute:   var(--fg-muted);
+  --art-accent: var(--accent);
+}
+
+:root[data-theme="light"] {
+  --surface-0: oklch(98% 0.008 80);
+  --surface-1: oklch(96% 0.009 80);
+  --surface-2: oklch(93% 0.009 80);
+  --surface-3: oklch(99% 0.005 80);
+
+  --fg-strong:    oklch(15% 0.005 70);
+  --fg:           oklch(22% 0.005 70);
+  --fg-muted:     oklch(45% 0.007 70);
+  --fg-faint:     oklch(60% 0.007 70);
+  --fg-on-accent: oklch(15% 0.005 70);
+
+  --border-subtle: oklch(88% 0.005 70 / 1);
+  --border-strong: oklch(78% 0.006 70 / 1);
+
+  --accent:       oklch(60% 0.16 60);
+  --accent-hover: oklch(56% 0.17 60);
+  --accent-press: oklch(50% 0.17 60);
+  --on-accent:    oklch(98% 0.005 80);
+
+  --focus: oklch(60% 0.16 60);
+
+  --success: oklch(56% 0.16 155);
+  --warning: oklch(64% 0.16 80);
+  --danger:  oklch(54% 0.21 25);
+  --info:    oklch(56% 0.15 230);
+
+  --art-bg:     var(--surface-0);
+  --art-fg:     var(--fg);
+  --art-mute:   var(--fg-muted);
+  --art-accent: var(--accent);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --surface-0: oklch(98% 0.008 80);
+    --surface-1: oklch(96% 0.009 80);
+    --surface-2: oklch(93% 0.009 80);
+    --surface-3: oklch(99% 0.005 80);
+    --fg-strong: oklch(15% 0.005 70);
+    --fg:        oklch(22% 0.005 70);
+    --fg-muted:  oklch(45% 0.007 70);
+    --fg-faint:  oklch(60% 0.007 70);
+    --fg-on-accent: oklch(15% 0.005 70);
+    --border-subtle: oklch(88% 0.005 70 / 1);
+    --border-strong: oklch(78% 0.006 70 / 1);
+    --accent:       oklch(60% 0.16 60);
+    --accent-hover: oklch(56% 0.17 60);
+    --accent-press: oklch(50% 0.17 60);
+    --on-accent:    oklch(98% 0.005 80);
+    --focus: oklch(60% 0.16 60);
+  }
+}
+
+:root {
+  --font-sans:    "Inter", "Söhne", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Bodoni Moda", "GT Alpina", "Didot", "Times New Roman", Georgia, serif;
+  --font-mono:    "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
+
+  --text-xs:   0.6875rem;
+  --text-sm:   0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md:   1rem;
+  --text-lg:   1.125rem;
+  --text-xl:   1.375rem;
+  --text-2xl:  1.75rem;
+  --text-3xl:  2.25rem;
+  --text-display-sm: clamp(2rem, 4vw, 2.75rem);
+  --text-display-md: clamp(2.5rem, 6vw, 4rem);
+  --text-display-lg: clamp(3rem, 8vw, 5.5rem);
+
+  --leading-tight:   1.15;
+  --leading-snug:    1.3;
+  --leading-base:    1.5;
+  --leading-relaxed: 1.65;
+
+  --tracking-display: -0.02em;
+  --tracking-tight:   -0.01em;
+  --tracking-base:    0;
+  --tracking-label:   0.04em;
+
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  --row-y: 6px;
+
+  --radius-0: 0;
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --radius-3: 10px;
+  --radius-4: 16px;
+  --radius-full: 9999px;
+
+  --shadow-pop:
+    0 1px 2px rgba(0, 0, 0, 0.20),
+    0 8px 24px -4px rgba(0, 0, 0, 0.45);
+  --shadow-overlay:
+    0 -1px 0 var(--border-subtle),
+    0 -12px 32px -8px rgba(0, 0, 0, 0.45);
+
+  --ease-out-soft: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-soft:  cubic-bezier(0.55, 0.1, 0.85, 0.4);
+  --dur-1:  90ms;
+  --dur-2:  180ms;
+  --dur-3:  320ms;
+
+  --sidebar-w: 240px;
+  --player-h: 92px;
+  --player-h-mobile: 84px;
+  --content-max: 1280px;
+  --header-h: 56px;
+}
+
+:root[data-theme="light"] {
+  --shadow-pop:
+    0 1px 2px rgba(40, 30, 10, 0.06),
+    0 8px 24px -4px rgba(40, 30, 10, 0.14);
+  --shadow-overlay:
+    0 -1px 0 var(--border-subtle),
+    0 -10px 28px -8px rgba(40, 30, 10, 0.10);
+}

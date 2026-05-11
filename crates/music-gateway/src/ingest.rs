@@ -22,8 +22,9 @@ use music_core::TrackId;
 use music_recommend::ann::AnnIndex;
 use music_recommend::embedder::EmbedderClient;
 use music_recommend::ingest::{
-    AudioFetcher, FetchError, IngestWorker, IngestWorkerConfig,
+    AudioFetcher, FetchError, IngestWorker, IngestWorkerConfig, MetadataFetcher, MetadataIngest,
 };
+use music_recommend::metadata::{MetadataStore, TrackMetadata, normalize_title};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use music_subsonic::{Client as SubsonicClient, Credentials};
@@ -126,6 +127,65 @@ fn pick_offset_seconds(duration_seconds: u32, window_seconds: u32) -> u32 {
     (duration_seconds - window_seconds) / 2
 }
 
+/// Metadata fetcher backed by the upstream Navidrome via the typed
+/// Subsonic client. Cheap (~5ms / call); runs once per ingest as a
+/// best-effort side-channel, separately from the audio fetch.
+pub struct SubsonicMetadataFetcher {
+    client: SubsonicClient,
+}
+
+impl std::fmt::Debug for SubsonicMetadataFetcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubsonicMetadataFetcher")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SubsonicMetadataFetcher {
+    pub fn new(upstream: &UpstreamConfig) -> Result<Self> {
+        let creds = Credentials {
+            username: upstream.username.clone(),
+            password: upstream.password.clone(),
+        };
+        let client = SubsonicClient::new(&upstream.navidrome_url, creds)
+            .context("constructing Subsonic client for metadata fetch")?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait]
+impl MetadataFetcher for SubsonicMetadataFetcher {
+    #[tracing::instrument(name = "ingest.fetch_metadata", skip(self), fields(track = %track_id))]
+    async fn fetch_metadata(&self, track_id: &TrackId) -> Result<TrackMetadata, FetchError> {
+        let track = self
+            .client
+            .get_song(track_id)
+            .await
+            .map_err(|e| FetchError::Transport(format!("getSong: {e}")))?;
+        // Map the music-core::Track shape onto the recommend metadata
+        // row. `bpm` and `musical_key` are still None because they're
+        // not on the core Track today — extending the wire layer for
+        // those is a separate piece of work.
+        let title_normalized = normalize_title(&track.title);
+        Ok(TrackMetadata {
+            track_id: track.id.clone(),
+            artist_id: track.artist_id.as_ref().map(|a| a.as_str().to_string()),
+            artist: track.artist_name.unwrap_or_default(),
+            album_id: track.album_id.as_ref().map(|a| a.as_str().to_string()),
+            album: track.album_name,
+            title: track.title,
+            title_normalized,
+            duration_seconds: track.duration_seconds,
+            genre: track.genre,
+            year: track.year.map(i32::from),
+            track_number: track.track_number,
+            disc_number: track.disc_number,
+            bpm: None,
+            musical_key: None,
+        })
+    }
+}
+
 #[async_trait]
 impl AudioFetcher for SubsonicAudioFetcher {
     #[tracing::instrument(name = "ingest.fetch_clip", skip(self), fields(track = %track_id))]
@@ -191,6 +251,39 @@ impl AudioFetcher for SubsonicAudioFetcher {
     }
 }
 
+/// Spawn the background metadata-backfill task. Walks `done`
+/// embeddings missing a metadata row, fetches their Subsonic metadata,
+/// and upserts. Bounded work; exits when the missing set is empty or
+/// every fetch in a batch fails. Safe to call on a fully-warm cache —
+/// the first SQLite query returns empty and the task exits immediately.
+pub fn spawn_metadata_backfill(
+    metadata_store: MetadataStore,
+    metadata_fetcher: Arc<dyn MetadataFetcher>,
+    model_version: ModelVersion,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        match music_recommend::backfill_metadata(
+            &metadata_store,
+            metadata_fetcher.as_ref(),
+            &model_version,
+        )
+        .await
+        {
+            Ok(stats) if stats.upserted > 0 || stats.fetch_failed > 0 => {
+                tracing::info!(
+                    upserted = stats.upserted,
+                    fetch_failed = stats.fetch_failed,
+                    "metadata: backfill complete"
+                );
+            }
+            Ok(_) => {} // empty cache + empty missing set; no log spam
+            Err(e) => {
+                tracing::warn!(error = %e, "metadata: backfill aborted");
+            }
+        }
+    })
+}
+
 /// Spawn the background ingest loop. Returns an empty Vec (and logs)
 /// if no embedder client is available — the gateway then runs in
 /// degraded mode and queued rows sit at `not_started` until a future
@@ -205,6 +298,7 @@ pub fn spawn_ingest_worker(
     ann: Arc<AnnIndex>,
     embedder: Option<EmbedderClient>,
     fetcher: Arc<dyn AudioFetcher>,
+    metadata: Option<MetadataIngest>,
     model_version: &ModelVersion,
 ) -> Vec<JoinHandle<()>> {
     let Some(embedder) = embedder else {
@@ -216,6 +310,7 @@ pub fn spawn_ingest_worker(
         embedder,
         fetcher,
         model_version: model_version.clone(),
+        metadata,
     };
     let worker = Arc::new(IngestWorker::new(cfg));
 

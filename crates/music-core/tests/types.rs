@@ -2,7 +2,8 @@
 //! JSON because that's what every consumer (Subsonic, gateway, sync) speaks.
 
 use music_core::{
-    Album, AlbumId, Artist, ArtistId, PlaybackState, Queue, QueueItem, QueueItemId, Track, TrackId,
+    Album, AlbumId, Artist, ArtistId, PlaybackState, Queue, QueueItem, QueueItemId, SessionAnchor,
+    SessionId, Track, TrackId,
 };
 
 #[test]
@@ -28,6 +29,8 @@ fn album_roundtrips() {
         song_count: 4,
         duration_seconds: 2880,
         cover_art_id: Some("cover-1".to_string()),
+        play_count: Some(3),
+        played_at: Some("2026-04-15T12:00:00Z".to_string()),
     };
     let json = serde_json::to_string(&album).unwrap();
     let back: Album = serde_json::from_str(&json).unwrap();
@@ -49,6 +52,10 @@ fn track_roundtrips() {
         bit_rate_kbps: Some(320),
         content_type: Some("audio/flac".to_string()),
         suffix: Some("flac".to_string()),
+        year: None,
+        play_count: Some(7),
+        played_at: Some("2026-04-15T12:00:00Z".to_string()),
+        genre: Some("Ambient".to_string()),
     };
     let json = serde_json::to_string(&track).unwrap();
     let back: Track = serde_json::from_str(&json).unwrap();
@@ -77,6 +84,8 @@ fn album_duration_helper_returns_std_duration() {
         song_count: 0,
         duration_seconds: 90,
         cover_art_id: None,
+        play_count: None,
+        played_at: None,
     };
     assert_eq!(album.duration(), std::time::Duration::from_secs(90));
 }
@@ -120,6 +129,7 @@ fn playback_state_default_is_idle_empty() {
     assert_eq!(s.now_playing_index, None);
     assert_eq!(s.position_ms, 0);
     assert!(!s.is_playing);
+    assert!(s.session_anchor.is_none());
 }
 
 #[test]
@@ -134,10 +144,73 @@ fn playback_state_roundtrips() {
         now_playing_index: Some(0),
         position_ms: 12_345,
         is_playing: true,
+        session_anchor: None,
     };
     let json = serde_json::to_string(&state).unwrap();
     let back: PlaybackState = serde_json::from_str(&json).unwrap();
     assert_eq!(back, state);
+}
+
+#[test]
+fn playback_state_with_session_anchor_roundtrips() {
+    let state = PlaybackState {
+        queue: Queue {
+            items: vec![QueueItem {
+                item_id: QueueItemId::from("qi-1"),
+                track_id: TrackId::from("t-1"),
+            }],
+        },
+        now_playing_index: Some(0),
+        position_ms: 0,
+        is_playing: true,
+        session_anchor: Some(SessionAnchor {
+            session_id: SessionId::from("0192a000-0000-7000-8000-000000000001"),
+            track_id: TrackId::from("t-1"),
+            started_ms: 1_710_000_000_000,
+        }),
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let back: PlaybackState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, state);
+}
+
+#[test]
+fn playback_state_without_anchor_omits_field_on_wire() {
+    // session_anchor is None most of the time; we don't want every
+    // snapshot to carry a `"session_anchor":null` payload.
+    let state = PlaybackState::default();
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(
+        !json.contains("session_anchor"),
+        "default PlaybackState should not serialize session_anchor field, got: {json}"
+    );
+}
+
+#[test]
+fn playback_state_deserializes_legacy_payload_without_session_anchor() {
+    // Snapshots written before the field existed must still parse.
+    let json = r#"{"queue":{"items":[]},"now_playing_index":null,"position_ms":0,"is_playing":false}"#;
+    let state: PlaybackState = serde_json::from_str(json).unwrap();
+    assert!(state.session_anchor.is_none());
+}
+
+#[test]
+fn session_id_serializes_as_plain_string() {
+    let id = SessionId::from("0192a000-0000-7000-8000-000000000001");
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "\"0192a000-0000-7000-8000-000000000001\"");
+}
+
+#[test]
+fn session_anchor_roundtrips() {
+    let anchor = SessionAnchor {
+        session_id: SessionId::from("sess-x"),
+        track_id: TrackId::from("t-1"),
+        started_ms: 1_710_000_000_000,
+    };
+    let json = serde_json::to_string(&anchor).unwrap();
+    let back: SessionAnchor = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, anchor);
 }
 
 #[test]
@@ -158,6 +231,7 @@ fn playback_state_now_playing_helper_returns_track_or_none() {
         now_playing_index: Some(1),
         position_ms: 0,
         is_playing: false,
+        session_anchor: None,
     };
     assert_eq!(
         state.now_playing().map(|i| i.track_id.clone()),
@@ -187,6 +261,10 @@ fn track_duration_helper_returns_optional_std_duration() {
         bit_rate_kbps: None,
         content_type: None,
         suffix: None,
+        year: None,
+        play_count: None,
+        played_at: None,
+        genre: None,
     };
     assert_eq!(track.duration(), Some(std::time::Duration::from_secs(125)));
     track.duration_seconds = None;

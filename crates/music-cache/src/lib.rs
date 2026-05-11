@@ -172,6 +172,31 @@ impl Cache {
         Ok(res.rows_affected() > 0)
     }
 
+    /// All cache keys whose body matches the given etag. Used by the
+    /// gateway's cover-art placeholder detection — when one body shows
+    /// up under multiple distinct cover-art ids, it's almost certainly
+    /// Navidrome's default "no artwork" image.
+    pub async fn keys_with_etag(&self, etag: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT key FROM cache_entries WHERE etag = ?")
+            .bind(etag)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("key")).collect())
+    }
+
+    /// Remove every cache entry with the given etag. Returns the number
+    /// of rows removed. Pair with `keys_with_etag` for the placeholder
+    /// sweep — once a hash is identified as Navidrome's default, we
+    /// flush every cached copy so the next request re-runs through
+    /// detection and gets the SVG substitute.
+    pub async fn delete_keys_with_etag(&self, etag: &str) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM cache_entries WHERE etag = ?")
+            .bind(etag)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Remove every entry whose deadline (`fetched_at + ttl`) is at or before
     /// `cutoff`. Returns the number of rows removed.
     pub async fn expire_before(&self, cutoff: SystemTime) -> Result<u64> {

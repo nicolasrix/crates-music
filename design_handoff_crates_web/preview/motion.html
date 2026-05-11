@@ -1,0 +1,21 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.demo { height: 28px; background: var(--surface-2); border-radius: var(--radius-1); position: relative; overflow: hidden; }
+.demo::after { content:""; position:absolute; left:0; top:0; bottom:0; width:30%; background: var(--accent); border-radius: var(--radius-1); animation: slide 1.6s var(--ease-out-soft) infinite alternate; }
+@keyframes slide { from { left: 0; } to { left: 70%; } }
+.d1::after { animation-duration: var(--dur-1); }
+.d2::after { animation-duration: var(--dur-2); }
+.d3::after { animation-duration: var(--dur-3); }
+</style>
+</head>
+<body style="height:240px">
+<div class="card-grid">
+  <div class="label">Motion · 3 durations · soft easing</div>
+  <div class="col" style="gap:10px">
+    <div class="row"><div class="token-name" style="width:130px">--dur-1 · 90ms</div><div class="demo d1" style="flex:1"></div><div class="token">hover/press</div></div>
+    <div class="row"><div class="token-name" style="width:130px">--dur-2 · 180ms</div><div class="demo d2" style="flex:1"></div><div class="token">menus, popovers</div></div>
+    <div class="row"><div class="token-name" style="width:130px">--dur-3 · 320ms</div><div class="demo d3" style="flex:1"></div><div class="token">page fades</div></div>
+  </div>
+  <div class="token" style="margin-top:6px">cubic-bezier(0.2, 0.7, 0.2, 1) · no bounce, no overshoot</div>
+</div>
+</body></html>

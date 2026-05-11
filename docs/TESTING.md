@@ -1,8 +1,7 @@
 # Testing
 
-The Rust workspace has ~330 tests across 8 crates. The Python
-embedder has ~18. The web app has none yet (planned with the first
-substantial UI work).
+The Rust workspace has ≈690 tests across 8 crates. The web app has
+72 Vitest tests. The Python embedder has ≈18.
 
 This doc covers how the test suites are organised, what mocks/stubs
 exist, and how to run a single test.
@@ -68,16 +67,17 @@ files. It's why TLS termination lives in `main.rs` and not in
 
 ## Per-crate breakdown
 
-| Crate | Files | Tests | What's notable |
-|---|---|---|---|
-| music-core | 2 | 19 | Pure data; no fixtures needed. |
-| music-subsonic | 3 | 16 | Uses `wiremock` to stub Navidrome HTTP responses. |
-| music-cache | 2 | 35 | Each test gets a `tempfile::tempdir()` for isolation. |
-| music-player | 3 | 8 | Most tests skip actual playback (no audio device in CI); they exercise the resolution / cache-read paths. |
-| music-sync | 3 | 36 | Pure state machine; no fixtures. Property-style tests for op application. |
-| music-recommend | 4 | 54 | `wiremock` for the embedder client; in-memory SQLite for the store; in-memory `usearch` index for the ANN. |
-| music-gateway | 19 | 131 | Largest suite. Each integration test gets its own `AppState` via `common::build_state`. |
-| music-cli | 3 | 31 | Mostly config + format unit tests; CLI dispatch goes through the `app::run` library entrypoint so end-to-end behaviour can be asserted without spawning a subprocess. |
+| Crate | Tests | What's notable |
+|---|---|---|
+| music-core | 24 | Pure data; no fixtures needed. |
+| music-subsonic | 24 | Uses `wiremock` to stub Navidrome HTTP responses. |
+| music-cache | 35 | Each test gets a `tempfile::tempdir()` for isolation. |
+| music-player | 8 | Most tests skip actual playback (no audio device in CI); they exercise the resolution / cache-read paths. |
+| music-sync | 50 | Pure state machine; no fixtures. Property-style tests for op application. |
+| music-recommend | 206 | `wiremock` for the embedder client; in-memory SQLite for the store; in-memory `usearch` index for the ANN. Heavy unit coverage on the post-retrieval modules (queue_filter, mmr, aggregate, feedback, projection). |
+| music-gateway | 315 | Largest suite. Each integration test gets its own `AppState` via `common::build_state`. ≈27 integration files. |
+| music-cli | 31 | Mostly config + format unit tests; CLI dispatch goes through the `app::run` library entrypoint so end-to-end behaviour can be asserted without spawning a subprocess. |
+| **web** (Vitest) | 72 | 6 files — search ranking, latent-space binning, sync reducer, recommend filter shape. |
 
 ## Shared test fixtures
 
@@ -186,9 +186,10 @@ deduplication tests possible without needing a real model.
 - **TLS** — gateway integration tests skip TLS by going through
   `oneshot`. End-to-end TLS works in production; nothing exercises
   it in CI.
-- **Web UI** — no Vitest or Playwright suite yet. The build
-  type-checks via `tsc -b`, which catches a lot, but doesn't catch
-  runtime bugs.
+- **Web UI components** — Vitest covers pure-logic helpers; React
+  component rendering and Playwright end-to-end flows are not yet in.
+  The build type-checks via `tsc -b`, which catches a lot, but
+  doesn't catch runtime bugs.
 - **Cross-device sync** — the sync state machine has unit tests
   exercising every op. The end-to-end "two clients, both connected
   to the gateway, observe consistent state" is not yet a test.

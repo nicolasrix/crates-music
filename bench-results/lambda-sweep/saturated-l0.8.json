@@ -1,0 +1,64 @@
+{
+  "config": {
+    "iterations_requested": 200,
+    "rng_seed": 42,
+    "queue_mode": "saturated",
+    "top_n": 20,
+    "max_per_artist": 2,
+    "dedup_titles": true,
+    "diversity_mode": "mmr",
+    "lambda": 0.8
+  },
+  "population": {
+    "model_version": "music_audioset_epoch_15_esc_90.14",
+    "ann_size": 5111,
+    "seed_pool_size": 200,
+    "skipped_no_metadata": 0,
+    "skipped_no_vector": 0
+  },
+  "totals": {
+    "iterations_recorded": 200,
+    "total_wall_ms": 177.392474,
+    "calls_with_drops": 197,
+    "calls_starved": 0,
+    "admit_count_total": 3260,
+    "drop_count_total": 3959,
+    "drop_count_artist": 3958,
+    "drop_count_dedup": 1
+  },
+  "admit": {
+    "n": 3260,
+    "mean": 0.7557119838299196,
+    "mean_distance": 0.24428801617008045,
+    "p50": 0.7553455233573914,
+    "p95": 0.9004504680633545,
+    "p99": 0.9247512221336365,
+    "min": 0.1984463930130005,
+    "max": 0.9504613876342773
+  },
+  "drop": {
+    "n": 3959,
+    "mean": 0.7781100275089536,
+    "mean_distance": null,
+    "p50": 0.7829688787460327,
+    "p95": 0.9029402136802673,
+    "p99": 0.9322220087051392,
+    "min": 0.1963099241256714,
+    "max": 0.9618236422538757
+  },
+  "tax_per_call": {
+    "n_calls": 197,
+    "mean": -0.002019252168130977,
+    "p50": -0.0036258628911070012,
+    "p95": 0.02833016074839101,
+    "max": 0.06287507712841034
+  },
+  "latency_us": {
+    "n": 200,
+    "mean": 843.075,
+    "p50": 829.0,
+    "p95": 948.0,
+    "p99": 1001.0,
+    "max": 1120.0
+  }
+}

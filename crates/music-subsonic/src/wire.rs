@@ -108,6 +108,10 @@ struct WireAlbum {
     #[serde(default)]
     duration: u32,
     year: Option<u16>,
+    play_count: Option<u32>,
+    // Subsonic emits `played` as a single word; serde's camelCase rename
+    // leaves single-word fields unchanged, so this maps 1:1.
+    played: Option<String>,
 }
 
 impl From<WireAlbum> for Album {
@@ -121,6 +125,8 @@ impl From<WireAlbum> for Album {
             song_count: w.song_count,
             duration_seconds: w.duration,
             cover_art_id: w.cover_art,
+            play_count: w.play_count,
+            played_at: w.played,
         }
     }
 }
@@ -140,6 +146,10 @@ struct WireTrack {
     bit_rate: Option<u32>,
     content_type: Option<String>,
     suffix: Option<String>,
+    year: Option<u16>,
+    play_count: Option<u32>,
+    played: Option<String>,
+    genre: Option<String>,
 }
 
 impl From<WireTrack> for Track {
@@ -157,6 +167,10 @@ impl From<WireTrack> for Track {
             bit_rate_kbps: w.bit_rate,
             content_type: w.content_type,
             suffix: w.suffix,
+            year: w.year,
+            play_count: w.play_count,
+            played_at: w.played,
+            genre: w.genre,
         }
     }
 }

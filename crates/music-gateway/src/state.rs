@@ -5,11 +5,17 @@
 //! L2 cache, and OAuth state DB live here so connection pooling and the SQLite
 //! pools are per-process, not per-request.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use music_cache::Cache;
 use music_recommend::EventStore;
+use music_recommend::FeedbackStore;
+use music_recommend::PlayHistoryStore;
+use music_recommend::ProjectionStore;
 use music_recommend::ann::AnnIndex;
+use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 
@@ -35,7 +41,11 @@ struct Inner {
     sync: SyncStore,
     embedder: EmbedderHandle,
     embedding_store: EmbeddingStore,
+    metadata_store: MetadataStore,
     event_store: EventStore,
+    play_history: PlayHistoryStore,
+    feedback: FeedbackStore,
+    projection: ProjectionStore,
     ann: Arc<AnnIndex>,
     /// The model_version the recommender stamps on enqueue + ANN
     /// queries. Sourced from the embedder's last health probe; falls
@@ -46,6 +56,21 @@ struct Inner {
     /// `main.rs` is the sole writer. Cloning is cheap (wraps a sqlx
     /// pool).
     trace_store: TraceStore,
+    /// Etags of upstream cover-art bodies that have been observed for
+    /// two or more distinct cover-art ids — i.e. Navidrome's default
+    /// "no artwork" placeholder. Lookups on cover-art fetches skip the
+    /// SQL duplicate-check once an etag is in here. Not persisted —
+    /// rebuilt naturally on restart after the first two duplicate
+    /// fetches.
+    placeholder_etags: RwLock<HashSet<String>>,
+    /// Per-cache-key timestamp of the last placeholder revalidation
+    /// attempt. When a request hits the cache and finds a placeholder
+    /// (our SVG, or a Navidrome default discovered post-hoc), a
+    /// background task fetches upstream to see if real art is now
+    /// available; this map gates that task so a burst of cache hits
+    /// (e.g. 60 covers on a page reload) coalesces into a single
+    /// upstream fetch per key per cooldown window.
+    placeholder_revalidations: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -60,13 +85,17 @@ impl AppState {
         setup_token: SetupToken,
         embedder: EmbedderHandle,
         embedding_store: EmbeddingStore,
+        metadata_store: MetadataStore,
         ann: Arc<AnnIndex>,
         recommend_model_version: ModelVersion,
         trace_store: TraceStore,
     ) -> Self {
-        // Events live in the same SQLite file as the embedding store —
-        // they're both recommender state, share migration timeline.
+        // Events + play history both live in the same SQLite file as
+        // the embedding store — recommender state, shared migrations.
         let event_store = EventStore::new(embedding_store.pool().clone());
+        let play_history = PlayHistoryStore::new(embedding_store.pool().clone());
+        let feedback = FeedbackStore::new(embedding_store.pool().clone());
+        let projection = ProjectionStore::new(embedding_store.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -77,10 +106,16 @@ impl AppState {
                 sync: SyncStore::new(),
                 embedder,
                 embedding_store,
+                metadata_store,
                 event_store,
+                play_history,
+                feedback,
+                projection,
                 ann,
                 recommend_model_version,
                 trace_store,
+                placeholder_etags: RwLock::new(HashSet::new()),
+                placeholder_revalidations: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -125,8 +160,24 @@ impl AppState {
         &self.inner.embedding_store
     }
 
+    pub fn metadata_store(&self) -> &MetadataStore {
+        &self.inner.metadata_store
+    }
+
     pub fn event_store(&self) -> &EventStore {
         &self.inner.event_store
+    }
+
+    pub fn play_history(&self) -> &PlayHistoryStore {
+        &self.inner.play_history
+    }
+
+    pub fn feedback(&self) -> &FeedbackStore {
+        &self.inner.feedback
+    }
+
+    pub fn projection(&self) -> &ProjectionStore {
+        &self.inner.projection
     }
 
     pub fn recommend_model_version(&self) -> &ModelVersion {
@@ -135,5 +186,13 @@ impl AppState {
 
     pub fn trace_store(&self) -> &TraceStore {
         &self.inner.trace_store
+    }
+
+    pub fn placeholder_etags(&self) -> &RwLock<HashSet<String>> {
+        &self.inner.placeholder_etags
+    }
+
+    pub fn placeholder_revalidations(&self) -> &Mutex<HashMap<String, Instant>> {
+        &self.inner.placeholder_revalidations
     }
 }

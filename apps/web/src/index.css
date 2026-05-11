@@ -1,3 +1,10 @@
+/* Order matters: imports must precede any other rule per CSS spec, and Vite's
+   PostCSS pipeline inlines them in place. Tokens first (custom properties),
+   then component classes that read them, then Tailwind's three layers — so
+   utility classes can still override component classes when applied on JSX. */
+@import "./styles/tokens.css";
+@import "./styles/components.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

@@ -226,6 +226,44 @@ async fn cache_key_normalises_query_param_order() {
 }
 
 #[tokio::test]
+async fn random_album_list_bypasses_cache() {
+    // `getAlbumList2?type=random` is the one BROWSE_METHODS entry whose
+    // response isn't a pure function of the catalog — Navidrome shuffles
+    // server-side per call. Caching it would pin the first shuffle for
+    // browse_ttl_seconds and make the /albums/random page show the same
+    // list every visit.
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/getAlbumList2"))
+        .and(query_param("type", "random"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_album_list2()))
+        .expect(2)
+        .mount(&upstream)
+        .await;
+
+    let app = build_router(
+        common::build_state(common::test_config_with_upstream(
+            &upstream.uri(),
+            "alice",
+            "sesame",
+        ))
+        .await,
+    );
+
+    let _ = app
+        .clone()
+        .oneshot(auth("/rest/getAlbumList2?type=random&size=20"))
+        .await
+        .unwrap();
+    let _ = app
+        .oneshot(auth("/rest/getAlbumList2?type=random&size=20"))
+        .await
+        .unwrap();
+    // expect(2) verifies both calls reached upstream — i.e. the cache
+    // didn't intercept the second one.
+}
+
+#[tokio::test]
 async fn non_browse_endpoints_are_not_cached() {
     let upstream = MockServer::start().await;
     Mock::given(m_method("GET"))

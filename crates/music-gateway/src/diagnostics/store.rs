@@ -400,6 +400,123 @@ pub struct HistogramBucket {
     pub mean_ms: f64,
 }
 
+/// One parsed recommend span. The handler layer aggregates many of
+/// these into queue-fill / shortfall / similarity / top-results charts.
+///
+/// Optional fields are `None` when the underlying span was emitted
+/// before the matching instrumentation landed — we keep the diagnostics
+/// page resilient to old ring contents so a model-version flip doesn't
+/// blank the panel for a few minutes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecommendSummary {
+    pub end_ms: i64,
+    pub name: String,
+    pub requested_n: Option<u32>,
+    pub results: Option<u32>,
+    pub shortfall_reason: Option<String>,
+    pub result_track_ids: Vec<String>,
+    pub admitted_sims: Vec<f32>,
+}
+
+impl TraceStore {
+    /// Pull recommend.from_any / recommend.from_seeds spans and parse
+    /// their `fields_json` into a typed summary. Ordering matches
+    /// `recent`/`query` — newest first by row id.
+    ///
+    /// `since_ms` is an optional inclusive lower bound on `end_ms`. The
+    /// row count is unbounded by design; the diagnostics surface clamps
+    /// retention via `trim_to_capacity`, so the worst-case scan is
+    /// already capped at the ring size (100k rows).
+    pub async fn recommend_summaries(
+        &self,
+        since_ms: Option<i64>,
+    ) -> sqlx::Result<Vec<RecommendSummary>> {
+        // IN (?, ?) sidesteps an ORM and keeps the query plan obvious:
+        // a table scan over the (small) ring, filtered by name and
+        // optionally end_ms. No index — at 100k rows the scan is fast
+        // and indexing `name` would slow the (much hotter) insert path.
+        let rows = if let Some(s) = since_ms {
+            sqlx::query(
+                "SELECT name, end_ms, fields_json
+                 FROM spans
+                 WHERE name IN ('recommend.from_any', 'recommend.from_seeds')
+                   AND end_ms >= ?
+                 ORDER BY id DESC",
+            )
+            .bind(s)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT name, end_ms, fields_json
+                 FROM spans
+                 WHERE name IN ('recommend.from_any', 'recommend.from_seeds')
+                 ORDER BY id DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let name: String = row.try_get("name")?;
+            let end_ms: i64 = row.try_get("end_ms")?;
+            let fields_json: String = row.try_get("fields_json")?;
+            out.push(parse_recommend_summary(name, end_ms, &fields_json));
+        }
+        Ok(out)
+    }
+}
+
+/// Parse one row's `fields_json` into a [`RecommendSummary`]. Missing
+/// fields collapse to `None` / empty vec; a malformed `fields_json`
+/// (shouldn't happen — we control the writer) also degrades to "no
+/// fields" so a single bad row doesn't blank the aggregate response.
+fn parse_recommend_summary(name: String, end_ms: i64, fields_json: &str) -> RecommendSummary {
+    let parsed: serde_json::Value =
+        serde_json::from_str(fields_json).unwrap_or(serde_json::Value::Null);
+    let obj = parsed.as_object();
+
+    let requested_n = obj
+        .and_then(|o| o.get("requested_n"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok());
+    let results = obj
+        .and_then(|o| o.get("results"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok());
+    let shortfall_reason = obj
+        .and_then(|o| o.get("shortfall_reason"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    // The track-id list is stored as a JSON *string* containing a JSON
+    // array. That's the cheapest way to round-trip through tracing's
+    // recorder (which doesn't natively serialize Vec<String>). Parse it
+    // again here, tolerating both "missing" and "malformed inner JSON".
+    let result_track_ids = obj
+        .and_then(|o| o.get("result_track_ids_json"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default();
+
+    let admitted_sims: Vec<f32> = obj
+        .and_then(|o| o.get("filter_admitted_sims_json"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| serde_json::from_str::<Vec<f32>>(s).ok())
+        .unwrap_or_default();
+
+    RecommendSummary {
+        end_ms,
+        name,
+        requested_n,
+        results,
+        shortfall_reason,
+        result_track_ids,
+        admitted_sims,
+    }
+}
+
 /// Nearest-rank percentile on a pre-sorted ascending slice. `p` is in
 /// [0, 100]. Empty input is rejected by the caller (`histogram` only
 /// computes per-bucket after grouping, which guarantees non-empty).

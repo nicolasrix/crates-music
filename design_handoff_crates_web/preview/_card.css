@@ -1,0 +1,26 @@
+/* Shared stylesheet for preview cards */
+@import url("../colors_and_type.css");
+
+:root[data-theme="dark"] body { background: var(--surface-0); }
+
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--surface-0);
+  color: var(--fg);
+  font: var(--type-body);
+  padding: 20px 24px;
+  box-sizing: border-box;
+  width: 700px;
+}
+.card-grid { display: flex; flex-direction: column; gap: 14px; }
+.row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: 6px; }
+.swatch { width: 56px; height: 56px; border-radius: var(--radius-2); }
+.swatch.sm { width: 38px; height: 38px; }
+.swatch.lg { width: 72px; height: 72px; }
+.token { font: var(--type-mono); color: var(--fg-faint); font-size: 11px; }
+.token-name { font: var(--type-mono); color: var(--fg); font-size: 12px; }
+.label { font: var(--type-label); color: var(--fg-muted); text-transform: uppercase; letter-spacing: var(--tracking-label); }
+.fg-muted { color: var(--fg-muted); }
+.fg-faint { color: var(--fg-faint); }
+hr.hairline { border: 0; border-top: 1px solid var(--border-subtle); margin: 0; }

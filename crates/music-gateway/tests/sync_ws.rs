@@ -166,6 +166,72 @@ async fn ws_invalid_op_returns_op_error_only_to_sender_no_broadcast() {
 }
 
 #[tokio::test]
+async fn ws_receives_start_session_applied_frame_with_anchor_in_op() {
+    let app_state = common::build_state(common::test_config()).await;
+    let app = build_router(app_state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (mut ws, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let snapshot = next_text_message(&mut ws).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert!(
+        snapshot["state"]["playback"].get("session_anchor").is_none(),
+        "initial snapshot must omit session_anchor"
+    );
+
+    let op = SyncOp::StartSession {
+        items: vec![music_core::QueueItem {
+            item_id: music_core::QueueItemId::from("qi-1"),
+            track_id: music_core::TrackId::from("t-1"),
+        }],
+        anchor_index: 0,
+        session_id: music_core::SessionId::from("sess-1"),
+    };
+    app_state.sync().apply(&op).await.unwrap();
+
+    let frame = next_text_message(&mut ws).await;
+    assert_eq!(frame["type"], "applied");
+    assert_eq!(frame["version"], 1);
+    assert_eq!(frame["op"]["type"], "start_session");
+    assert_eq!(frame["op"]["session_id"], "sess-1");
+    assert_eq!(frame["op"]["items"][0]["item_id"], "qi-1");
+}
+
+#[tokio::test]
+async fn ws_first_frame_snapshot_includes_anchor_when_session_active() {
+    let app_state = common::build_state(common::test_config()).await;
+    let app = build_router(app_state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Apply a StartSession *before* the subscriber connects — the
+    // initial snapshot must reflect it.
+    let op = SyncOp::StartSession {
+        items: vec![music_core::QueueItem {
+            item_id: music_core::QueueItemId::from("qi-1"),
+            track_id: music_core::TrackId::from("t-1"),
+        }],
+        anchor_index: 0,
+        session_id: music_core::SessionId::from("sess-pre"),
+    };
+    app_state.sync().apply(&op).await.unwrap();
+
+    let (mut ws, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let frame = next_text_message(&mut ws).await;
+    assert_eq!(frame["type"], "snapshot");
+    let anchor = &frame["state"]["playback"]["session_anchor"];
+    assert_eq!(anchor["session_id"], "sess-pre");
+    assert_eq!(anchor["track_id"], "t-1");
+    assert!(
+        anchor["started_ms"].as_i64().is_some(),
+        "started_ms must be present and integer-valued"
+    );
+}
+
+#[tokio::test]
 async fn ws_malformed_client_message_returns_op_error() {
     let addr = spawn_app().await;
     let (mut ws, _) = connect_async(ws_url_with_token(addr)).await.unwrap();

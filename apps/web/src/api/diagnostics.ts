@@ -138,3 +138,166 @@ export function fetchClientEvents(opts: {
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return getJson<ClientEventsResponse>(`/v1/diagnostics/client_events${suffix}`);
 }
+
+// --- recently played ------------------------------------------------------
+
+export interface RecentlyPlayedEntry {
+  track_id: string;
+  /** Client-supplied scrobble timestamp (unix-ms). */
+  occurred_at_ms: number;
+  /** Gateway-stamped persist time (unix-ms). */
+  received_at_ms: number;
+  /** All metadata fields are nullable: a track that has been scrobbled
+   *  but not yet ingested by the recommender (so it's missing from the
+   *  `track_metadata` cache) will return null for every field below.
+   *  The UI falls back to the raw `track_id`. */
+  title: string | null;
+  artist: string | null;
+  artist_id: string | null;
+  album: string | null;
+  album_id: string | null;
+  year: number | null;
+}
+
+export interface RecentlyPlayedResponse {
+  events: RecentlyPlayedEntry[];
+}
+
+export function fetchRecentlyPlayed(opts: {
+  limit?: number;
+  sinceMs?: number;
+}): Promise<RecentlyPlayedResponse> {
+  const qs = new URLSearchParams();
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<RecentlyPlayedResponse>(`/v1/diagnostics/recently_played${suffix}`);
+}
+
+// --- recommender aggregates ----------------------------------------------
+//
+// The four /v1/diagnostics/recommend/* aggregations all key off the same
+// recommend.from_any / recommend.from_seeds spans, but slice differently:
+// fill-ratio histogram, shortfall reason counts, admitted-similarity
+// quantiles, and a recommend-frequency leaderboard.
+
+export interface QueueFillBucket {
+  label: string;
+  count: number;
+}
+
+export interface QueueFillResponse {
+  total: number;
+  buckets: QueueFillBucket[];
+}
+
+export interface ShortfallResponse {
+  total: number;
+  /** Map of `shortfall_reason` → count. Pre-R1 spans land under `unknown`. */
+  counts: Record<string, number>;
+}
+
+export interface SimilarityResponse {
+  count: number;
+  p50: number;
+  p90: number;
+  p95: number;
+  p99: number;
+  min: number;
+  max: number;
+  mean: number;
+}
+
+export interface TopResultItem {
+  track_id: string;
+  count: number;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+export interface TopResultsResponse {
+  items: TopResultItem[];
+}
+
+export function fetchRecommendQueueFill(opts: {
+  sinceMs?: number;
+}): Promise<QueueFillResponse> {
+  const qs = new URLSearchParams();
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<QueueFillResponse>(`/v1/diagnostics/recommend/queue_fill${suffix}`);
+}
+
+export function fetchRecommendShortfall(opts: {
+  sinceMs?: number;
+}): Promise<ShortfallResponse> {
+  const qs = new URLSearchParams();
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<ShortfallResponse>(`/v1/diagnostics/recommend/shortfall${suffix}`);
+}
+
+export function fetchRecommendSimilarity(opts: {
+  sinceMs?: number;
+}): Promise<SimilarityResponse> {
+  const qs = new URLSearchParams();
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<SimilarityResponse>(`/v1/diagnostics/recommend/similarity${suffix}`);
+}
+
+export function fetchRecommendTopResults(opts: {
+  limit?: number;
+  sinceMs?: number;
+}): Promise<TopResultsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<TopResultsResponse>(
+    `/v1/diagnostics/recommend/top_results${suffix}`
+  );
+}
+
+// --- latent space (UMAP scatter) -----------------------------------------
+
+export interface LatentSpacePoint {
+  track_id: string;
+  x: number;
+  y: number;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  /** Reported genre from Subsonic metadata; null when the track has no
+   *  genre tag, or no metadata row in the gateway cache yet. The scatter
+   *  uses this to colour clusters as a validation of the embedding. */
+  genre: string | null;
+}
+
+export interface LatentSpaceVersionEntry {
+  proj_version: string;
+  point_count: number;
+  created_at_ms: number;
+}
+
+export interface LatentSpaceResponse {
+  model_version: string;
+  /** null when no projection has been written yet for `model_version`. */
+  proj_version: string | null;
+  points: LatentSpacePoint[];
+  versions: LatentSpaceVersionEntry[];
+}
+
+export function fetchRecommendLatentSpace(opts: {
+  projVersion?: string;
+  modelVersion?: string;
+}): Promise<LatentSpaceResponse> {
+  const qs = new URLSearchParams();
+  if (opts.projVersion) qs.set("proj_version", opts.projVersion);
+  if (opts.modelVersion) qs.set("model_version", opts.modelVersion);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<LatentSpaceResponse>(
+    `/v1/diagnostics/recommend/latent_space${suffix}`
+  );
+}

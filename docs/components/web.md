@@ -2,7 +2,7 @@
 
 **Path:** `apps/web/`
 **Type:** Vite + React 19 single-page app
-**Test count:** 0 (planned)
+**Test count:** 72 (Vitest)
 
 The browser client. Talks to the gateway over HTTPS for both REST
 calls (`/rest/*`, `/v1/*`) and the sync WebSocket (`/v1/sync`).
@@ -31,19 +31,35 @@ apps/web/
 ├── package.json
 ├── vite.config.ts
 ├── tsconfig.json
-├── tailwind.config.ts
+├── tailwind.config.js
 ├── index.html
 └── src/
     ├── main.tsx              # entry: ReactDOM.createRoot
     ├── App.tsx               # provider tree
-    ├── router.tsx            # hash routing
-    ├── api/                  # gateway client
+    ├── router.tsx            # History API routing
+    ├── api/                  # gateway client (REST + diagnostics)
     ├── auth/                 # OAuth flow + AuthContext
     ├── components/           # shared UI primitives
-    ├── pages/                # route components (AlbumsPage, AlbumPage, ...)
-    ├── player/               # PlayerProvider + bottom-bar UI
-    └── sync/                 # WebSocket client + SyncContext
+    ├── pages/                # route components — see below
+    ├── player/               # PlayerProvider + bottom-bar UI (thumbs feedback)
+    ├── rum/                  # web-vitals + markEvent + flush loop
+    ├── styles/               # Tailwind + design-bundle CSS
+    ├── sync/                 # WebSocket client + SyncContext
+    └── utils/                # shared helpers
 ```
+
+Pages today (`apps/web/src/pages/`):
+
+- `Home`, `Albums`, `Album`, `Artists`, `Artist`, `Tracks` — catalog.
+- `Search`, `SearchBucket`, `searchRanking.ts`, `listMode.ts` —
+  search with bucketed top-results re-ranking.
+- `Playlist` — playlist view + management.
+- `Queue` — current play queue with reorder / remove.
+- `LatentSpace` + `latentSpace.ts`/`.test.ts` — the 2D UMAP plot
+  view (reads `/v1/diagnostics/recommend/latent_space`).
+- `Diagnostics` — recommend + RUM + trace dashboards. Reachable via
+  the `/diagnostics` nav link.
+- `SignIn`, `Callback` — OAuth PKCE flow.
 
 ## Provider tree
 
@@ -117,6 +133,13 @@ through `NODE_EXTRA_CA_CERTS` setup.
 - The `<audio>` element (mounted once at the bottom of the layout).
 - Current track + queue + position.
 - "Time-to-skip" event throttling.
+- The player-bar thumbs-up / thumbs-down buttons. Clicks POST to
+  `/v1/recommend/feedback` with the active recommend session id and
+  re-render with the returned `(up, down)` counts. Clicking an
+  already-active thumb clears the vote.
+- The `playback.start` RUM mark (measured from `src` set → first
+  `playing` event — the user-perceived latency, not `loadedmetadata`
+  which fires too early).
 
 When you click play on a track:
 1. Compute the stream URL: `/rest/stream?id=<track>&access_token=<...>`.
@@ -127,6 +150,21 @@ When you click play on a track:
 
 Position updates fire on `timeupdate` (~4 Hz). Likes / skips /
 scrobbles are batched into `/v1/events` every 5s.
+
+## RUM (`rum/`)
+
+Browser-side performance telemetry. Two emitters feed
+`POST /v1/diagnostics/client_events`:
+
+- `web-vitals` 4.x — LCP / INP / CLS / FCP / TTFB → marks named
+  `web-vital.<NAME>` with the library's `rating` bucket attached.
+- `markEvent(name, {value_ms?, rating?, fields?})` — public API for
+  custom marks. Currently used for `playback.start`.
+
+Batched: 10 s interval flush via `fetch`, plus `pagehide` /
+`visibilitychange→hidden` flush via `fetch(..., {keepalive: true})`.
+In-memory cap of 50 events drops oldest. Session id is one per
+page-load, persisted in `sessionStorage`.
 
 ## Sync
 
@@ -162,9 +200,15 @@ today. To deploy, either:
 
 ## Tests
 
-None yet. Planned: Vitest for component logic, Playwright for
-end-to-end flows. The build does run `tsc -b` which catches a lot
-of refactor breakage.
+72 Vitest tests across 6 files at last count — pure-logic helpers
+(search ranking, latent-space binning, sync reducer, recommend
+filter shape). React-component tests and Playwright end-to-end
+suites are not yet in. The build still runs `tsc -b` which catches
+refactor breakage.
+
+```bash
+cd apps/web && npx vitest run
+```
 
 ## Known gaps
 
@@ -177,4 +221,7 @@ of refactor breakage.
   retained, but we haven't audited keyboard navigation or
   screen-reader behaviour.
 - **No internationalization.** Strings are hardcoded English.
-- **No analytics.** Self-hosted single-user; not relevant.
+- **No analytics in the marketing sense.** RUM is internal-only
+  (feeds `/diagnostics`); no third-party trackers.
+- **No React-component tests.** Vitest covers logic helpers; the
+  components are eyeball-tested.

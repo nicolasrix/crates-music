@@ -11,11 +11,25 @@ export interface Queue {
   items: QueueItem[];
 }
 
+/// The intent tier of playback state — which user-initiated session
+/// owns the current queue. `started_ms` is server-stamped (epoch ms);
+/// the client mirror may temporarily hold a `Date.now()` guess for an
+/// optimistic StartSession, which is replaced as soon as the next
+/// frame from the server reconciles.
+export interface SessionAnchor {
+  session_id: string;
+  track_id: string;
+  started_ms: number;
+}
+
 export interface PlaybackState {
   queue: Queue;
   now_playing_index: number | null;
   position_ms: number;
   is_playing: boolean;
+  // Absent on the wire when there's no active session — we normalize
+  // to `null` here so consumers don't have to guard against `undefined`.
+  session_anchor: SessionAnchor | null;
 }
 
 export interface SyncState {
@@ -30,7 +44,14 @@ export type SyncOp =
   | { type: "set_now_playing"; index: number | null }
   | { type: "set_position"; position_ms: number }
   | { type: "set_playing"; is_playing: boolean }
-  | { type: "clear" };
+  | { type: "clear" }
+  | {
+      type: "start_session";
+      items: QueueItem[];
+      anchor_index: number;
+      session_id: string;
+    }
+  | { type: "stop_session" };
 
 export type ServerMessage =
   | { type: "snapshot"; state: SyncState }

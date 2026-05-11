@@ -1,0 +1,34 @@
+<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css">
+<style>
+.menu { background: var(--surface-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-2); padding: 6px; box-shadow: var(--shadow-pop); width: 260px; }
+.menu .item { display:flex; justify-content:space-between; align-items:center; gap:8px; padding: 7px 10px; border-radius: var(--radius-1); font: var(--type-ui); color: var(--fg); cursor:pointer; }
+.menu .item:hover { background: var(--surface-2); }
+.menu .item .kbd { font: var(--type-mono); font-size: 11px; color: var(--fg-faint); }
+.menu .sep { height: 1px; background: var(--border-subtle); margin: 4px 2px; }
+.menu .item.danger { color: var(--danger-200); }
+</style></head>
+<body style="height:230px">
+<div class="card-grid">
+  <div class="label">Menu / popover · surface-3 · shadow-pop · hairline border</div>
+  <div class="row" style="gap:18px;align-items:flex-start">
+    <div class="menu">
+      <div class="item"><span>Add to queue</span><span class="kbd">⌘Q</span></div>
+      <div class="item"><span>Add to playlist…</span><span class="kbd">⌘P</span></div>
+      <div class="item"><span>Pin track</span><span class="kbd">⌘.</span></div>
+      <div class="sep"></div>
+      <div class="item"><span>Go to artist</span></div>
+      <div class="item"><span>Go to album</span></div>
+      <div class="sep"></div>
+      <div class="item danger"><span>Remove from playlist</span><span class="kbd">⌫</span></div>
+    </div>
+    <div class="col" style="flex:1;gap:6px">
+      <div class="token-name">menu</div>
+      <div class="token">bg: --surface-3 · 1px --border-subtle · --shadow-pop</div>
+      <div class="token-name" style="margin-top:6px">item:hover</div>
+      <div class="token">bg: --surface-2</div>
+      <div class="token-name" style="margin-top:6px">danger</div>
+      <div class="token">color: --danger-200 (legible on hover bg)</div>
+    </div>
+  </div>
+</div>
+</body></html>

@@ -179,6 +179,192 @@ async fn post_op_rejects_unknown_op_type_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+async fn snapshot_json(
+    app: axum::Router,
+    auth: (&'static str, String),
+) -> serde_json::Value {
+    let resp = app
+        .oneshot(
+            Request::get("/v1/sync/snapshot")
+                .header(auth.0, auth.1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    body_json(resp).await
+}
+
+#[tokio::test]
+async fn snapshot_omits_session_anchor_field_when_none() {
+    // Default state: no session, no anchor. The wire payload must not
+    // carry a `session_anchor` key at all — clients should only see
+    // it when there's something to see.
+    let app = build_router(common::build_state(common::test_config()).await);
+    let (k, v) = auth_header();
+    let snap = snapshot_json(app, (k, v)).await;
+    assert!(
+        snap["playback"].get("session_anchor").is_none(),
+        "session_anchor must be absent from default snapshot, got: {snap}"
+    );
+}
+
+#[tokio::test]
+async fn post_start_session_sets_anchor_in_snapshot() {
+    let app = build_router(common::build_state(common::test_config()).await);
+    let (k, v) = auth_header();
+
+    let before_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+
+    let body = json!({
+        "type": "start_session",
+        "items": [
+            {"item_id": "qi-1", "track_id": "t-1"},
+            {"item_id": "qi-2", "track_id": "t-2"},
+        ],
+        "anchor_index": 0,
+        "session_id": "sess-1",
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(k, v.clone())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ack = body_json(resp).await;
+    assert_eq!(ack["version"], 1);
+
+    let after_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+
+    let snap = snapshot_json(app, (k, v)).await;
+    assert_eq!(snap["version"], 1);
+    assert_eq!(snap["playback"]["queue"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(snap["playback"]["now_playing_index"], 0);
+    assert_eq!(snap["playback"]["is_playing"], true);
+
+    let anchor = &snap["playback"]["session_anchor"];
+    assert_eq!(anchor["session_id"], "sess-1");
+    assert_eq!(anchor["track_id"], "t-1");
+    let started_ms = anchor["started_ms"].as_i64().expect("started_ms is integer");
+    assert!(
+        started_ms >= before_ms && started_ms <= after_ms,
+        "server-stamped started_ms ({started_ms}) must fall within [{before_ms}, {after_ms}]"
+    );
+}
+
+#[tokio::test]
+async fn post_stop_session_clears_anchor_only_not_queue() {
+    let app = build_router(common::build_state(common::test_config()).await);
+    let (k, v) = auth_header();
+
+    // Start a session, then stop it.
+    let start_body = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 0,
+        "session_id": "sess-1",
+    });
+    app.clone()
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(k, v.clone())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(start_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(k, v.clone())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"type": "stop_session"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let snap = snapshot_json(app, (k, v)).await;
+    assert_eq!(snap["version"], 2);
+    assert!(
+        snap["playback"].get("session_anchor").is_none(),
+        "anchor must be absent after stop_session, got: {snap}"
+    );
+    // Queue and cursor survive — stop_session is intent-only.
+    assert_eq!(
+        snap["playback"]["queue"]["items"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(snap["playback"]["now_playing_index"], 0);
+}
+
+#[tokio::test]
+async fn post_start_session_empty_items_returns_422() {
+    let app = build_router(common::build_state(common::test_config()).await);
+    let (k, v) = auth_header();
+    let body = json!({
+        "type": "start_session",
+        "items": [],
+        "anchor_index": 0,
+        "session_id": "sess-1",
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(k, v)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json = body_json(resp).await;
+    assert!(json["error"].is_string());
+}
+
+#[tokio::test]
+async fn post_start_session_out_of_range_anchor_returns_422() {
+    let app = build_router(common::build_state(common::test_config()).await);
+    let (k, v) = auth_header();
+    let body = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 5,
+        "session_id": "sess-1",
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(k, v)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn ops_are_linearized_across_concurrent_posts() {
     // Two concurrent Push ops must both apply, end up at version 2,

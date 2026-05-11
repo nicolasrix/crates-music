@@ -1,0 +1,364 @@
+/* =========================================================================
+   crates Design System — colors + type + spacing + motion tokens
+   -------------------------------------------------------------------------
+   Author: design system
+   Stack: Tailwind 4 (@theme) compatible — these vars can be lifted directly
+          into a `@theme { ... }` block. Names are platform-neutral so the
+          Compose Multiplatform mobile app can mirror them.
+   ========================================================================= */
+
+/* -----------------------------------------------------------------------
+   Web fonts (Google Fonts substitutions — see README font flags)
+   ----------------------------------------------------------------------- */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+/* =========================================================================
+   1. INK SCALE — neutral chrome (OKLCH-spaced, perceptually even)
+   ========================================================================= */
+
+:root {
+  /* Neutral ink ramp — slightly warm (hue 70, very low chroma).
+     ink-50 = near-black, ink-950 = near-white. Names increase brightness
+     so an 'ink-700' button text on an 'ink-50' surface is high contrast. */
+  --ink-50:  oklch(14% 0.005 70);
+  --ink-100: oklch(18% 0.005 70);
+  --ink-200: oklch(22% 0.006 70);
+  --ink-300: oklch(28% 0.006 70);
+  --ink-400: oklch(38% 0.007 70);
+  --ink-500: oklch(52% 0.008 70);
+  --ink-600: oklch(66% 0.008 70);
+  --ink-700: oklch(78% 0.008 70);
+  --ink-800: oklch(88% 0.007 70);
+  --ink-900: oklch(95% 0.006 70);
+  --ink-950: oklch(98.5% 0.004 70);
+
+  /* Crate amber — the single chrome accent. Evokes tape labels, aged
+     paper, warm tube glow. Used sparingly: brand mark, the playing-now
+     dot, focus ring fallback when no artwork accent is available. */
+  --crate-amber-500: oklch(72% 0.13 65);
+  --crate-amber-400: oklch(76% 0.13 65);
+  --crate-amber-600: oklch(64% 0.14 60);
+
+  /* Semantic state — same hue family as Tailwind but OKLCH-tuned to
+     read on both dark and light chrome and on artwork-tinted pages. */
+  --success-500: oklch(70% 0.16 155);
+  --success-200: oklch(85% 0.10 155);
+  --warning-500: oklch(78% 0.15 80);
+  --warning-200: oklch(88% 0.09 80);
+  --danger-500:  oklch(64% 0.21 25);
+  --danger-200:  oklch(78% 0.13 25);
+  --info-500:    oklch(70% 0.13 230);
+  --info-200:    oklch(85% 0.08 230);
+}
+
+/* =========================================================================
+   2. SEMANTIC TOKENS — dark mode (default)
+   ========================================================================= */
+
+:root,
+:root[data-theme="dark"] {
+  /* Surfaces — three layers of "background" for nesting */
+  --surface-0: var(--ink-50);   /* page bg */
+  --surface-1: var(--ink-100);  /* cards, sidebar */
+  --surface-2: var(--ink-200);  /* hover, raised */
+  --surface-3: var(--ink-300);  /* popovers */
+
+  /* Foreground */
+  --fg:        var(--ink-950);
+  --fg-strong: var(--ink-950);
+  --fg:        var(--ink-900);
+  --fg-muted:  var(--ink-600);
+  --fg-faint:  var(--ink-500);
+  --fg-on-accent: var(--ink-50);
+
+  /* Borders / dividers */
+  --border-subtle: oklch(28% 0.005 70 / 1);
+  --border-strong: oklch(38% 0.006 70 / 1);
+
+  /* Brand accent (chrome-side) */
+  --accent:        var(--crate-amber-500);
+  --accent-hover:  var(--crate-amber-400);
+  --accent-press:  var(--crate-amber-600);
+  --on-accent:     var(--ink-50);
+
+  /* Focus */
+  --focus: var(--crate-amber-500);
+
+  /* Semantic */
+  --success: var(--success-500);
+  --warning: var(--warning-500);
+  --danger:  var(--danger-500);
+  --info:    var(--info-500);
+
+  /* Artwork-derived palette (set per page; falls back to chrome). */
+  --art-bg:     var(--surface-0);
+  --art-fg:     var(--fg);
+  --art-mute:   var(--fg-muted);
+  --art-accent: var(--accent);
+}
+
+/* =========================================================================
+   3. SEMANTIC TOKENS — light mode
+   ========================================================================= */
+
+:root[data-theme="light"] {
+  /* Light chrome is warm paper, not pure white. */
+  --surface-0: oklch(98% 0.008 80);
+  --surface-1: oklch(96% 0.009 80);
+  --surface-2: oklch(93% 0.009 80);
+  --surface-3: oklch(99% 0.005 80);
+
+  --fg-strong: oklch(15% 0.005 70);
+  --fg:        oklch(22% 0.005 70);
+  --fg-muted:  oklch(45% 0.007 70);
+  --fg-faint:  oklch(60% 0.007 70);
+  --fg-on-accent: oklch(15% 0.005 70);
+
+  --border-subtle: oklch(88% 0.005 70 / 1);
+  --border-strong: oklch(78% 0.006 70 / 1);
+
+  --accent:       oklch(60% 0.16 60);
+  --accent-hover: oklch(56% 0.17 60);
+  --accent-press: oklch(50% 0.17 60);
+  --on-accent:    oklch(98% 0.005 80);
+
+  --focus: oklch(60% 0.16 60);
+
+  --success: oklch(56% 0.16 155);
+  --warning: oklch(64% 0.16 80);
+  --danger:  oklch(54% 0.21 25);
+  --info:    oklch(56% 0.15 230);
+
+  --art-bg:     var(--surface-0);
+  --art-fg:     var(--fg);
+  --art-mute:   var(--fg-muted);
+  --art-accent: var(--accent);
+}
+
+/* Auto dark/light when no explicit data-theme is set. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --surface-0: oklch(98% 0.008 80);
+    --surface-1: oklch(96% 0.009 80);
+    --surface-2: oklch(93% 0.009 80);
+    --surface-3: oklch(99% 0.005 80);
+    --fg-strong: oklch(15% 0.005 70);
+    --fg:        oklch(22% 0.005 70);
+    --fg-muted:  oklch(45% 0.007 70);
+    --fg-faint:  oklch(60% 0.007 70);
+    --fg-on-accent: oklch(15% 0.005 70);
+    --border-subtle: oklch(88% 0.005 70 / 1);
+    --border-strong: oklch(78% 0.006 70 / 1);
+    --accent:       oklch(60% 0.16 60);
+    --accent-hover: oklch(56% 0.17 60);
+    --accent-press: oklch(50% 0.17 60);
+    --on-accent:    oklch(98% 0.005 80);
+    --focus: oklch(60% 0.16 60);
+  }
+}
+
+/* =========================================================================
+   4. TYPE
+   ========================================================================= */
+
+:root {
+  /* Families. The display family is an ATF Bodoni revival — high-contrast
+     Didone proportions, the kind of face stamped on classic record
+     sleeves. Optical-size axis tunes crispness at large hero sizes. */
+  --font-sans:    "Inter", "Söhne", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Bodoni Moda", "GT Alpina", "Didot", "Times New Roman", Georgia, serif;
+  --font-mono:    "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* Type scale — in rem, modular ratio 1.2 (minor third). */
+  --text-xs:   0.6875rem;  /* 11px — table headers */
+  --text-sm:   0.8125rem;  /* 13px — diagnostics body, metadata */
+  --text-base: 0.9375rem;  /* 15px — UI default */
+  --text-md:   1rem;       /* 16px — paragraph */
+  --text-lg:   1.125rem;   /* 18px — sidebar headings */
+  --text-xl:   1.375rem;   /* 22px — page subtitles */
+  --text-2xl:  1.75rem;    /* 28px — section header */
+  --text-3xl:  2.25rem;    /* 36px — page title */
+  --text-display-sm: clamp(2rem, 4vw, 2.75rem);
+  --text-display-md: clamp(2.5rem, 6vw, 4rem);
+  --text-display-lg: clamp(3rem, 8vw, 5.5rem);
+
+  /* Line height */
+  --leading-tight: 1.15;
+  --leading-snug:  1.3;
+  --leading-base:  1.5;
+  --leading-relaxed: 1.65;
+
+  /* Letter spacing — display gets a tiny negative; mono / labels positive. */
+  --tracking-display: -0.02em;
+  --tracking-tight:   -0.01em;
+  --tracking-base:    0;
+  --tracking-label:   0.04em;
+
+  /* Weights */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+}
+
+/* Semantic type roles — apply to elements via class or @apply.
+   These are how feature code should reference type, not raw scale. */
+:root {
+  /* Display roles — only for hero/page titles on detail pages. */
+  --type-hero-album: var(--font-display) var(--text-display-md) / var(--leading-tight);
+  --type-hero-artist: var(--font-display) var(--text-display-lg) / var(--leading-tight);
+
+  /* UI roles — sans, no italics. */
+  --type-h1:   var(--weight-semibold) var(--text-3xl) / var(--leading-tight) var(--font-sans);
+  --type-h2:   var(--weight-semibold) var(--text-2xl) / var(--leading-snug) var(--font-sans);
+  --type-h3:   var(--weight-semibold) var(--text-xl)  / var(--leading-snug) var(--font-sans);
+  --type-h4:   var(--weight-medium)   var(--text-lg)  / var(--leading-snug) var(--font-sans);
+  --type-body: var(--weight-regular)  var(--text-md)  / var(--leading-base) var(--font-sans);
+  --type-ui:   var(--weight-medium)   var(--text-base) / var(--leading-snug) var(--font-sans);
+  --type-meta: var(--weight-regular)  var(--text-sm)  / var(--leading-snug) var(--font-sans);
+  --type-label: var(--weight-medium)  var(--text-xs)  / 1 var(--font-sans);   /* uppercase + tracking-label */
+  --type-mono: var(--weight-regular)  var(--text-sm)  / var(--leading-snug) var(--font-mono);
+}
+
+/* =========================================================================
+   5. SPACING / RADIUS / SHADOW / MOTION
+   ========================================================================= */
+
+:root {
+  /* 8px base scale */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* Dense rhythm for tables / diagnostics */
+  --row-y: 6px;
+
+  /* Radius */
+  --radius-0: 0;
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --radius-3: 10px;
+  --radius-4: 16px;
+  --radius-full: 9999px;
+
+  /* Shadows — only two, by design. */
+  --shadow-pop:
+    0 1px 2px rgba(0, 0, 0, 0.20),
+    0 8px 24px -4px rgba(0, 0, 0, 0.45);
+  --shadow-overlay:
+    0 -1px 0 var(--border-subtle),
+    0 -12px 32px -8px rgba(0, 0, 0, 0.45);
+
+  /* Motion */
+  --ease-out-soft: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-soft:  cubic-bezier(0.55, 0.1, 0.85, 0.4);
+  --dur-1:  90ms;   /* hover / press */
+  --dur-2:  180ms;  /* menus, popovers */
+  --dur-3:  320ms;  /* page-level fades */
+
+  /* Layout */
+  --sidebar-w: 240px;
+  --player-h: 80px;
+  --player-h-mobile: 72px;
+  --content-max: 1280px;
+  --header-h: 56px;
+}
+
+/* Light mode shadow softening */
+:root[data-theme="light"] {
+  --shadow-pop:
+    0 1px 2px rgba(40, 30, 10, 0.06),
+    0 8px 24px -4px rgba(40, 30, 10, 0.14);
+  --shadow-overlay:
+    0 -1px 0 var(--border-subtle),
+    0 -10px 28px -8px rgba(40, 30, 10, 0.10);
+}
+
+/* =========================================================================
+   6. RESET-LIGHT + BASE TYPOGRAPHY
+   (intentionally minimal — pair with Tailwind preflight)
+   ========================================================================= */
+
+html, body {
+  background: var(--surface-0);
+  color: var(--fg);
+  font: var(--type-body);
+  font-feature-settings: "ss01", "cv11";  /* Inter stylistic alternates */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1 { font: var(--type-h1); letter-spacing: var(--tracking-tight); }
+h2 { font: var(--type-h2); }
+h3 { font: var(--type-h3); }
+h4 { font: var(--type-h4); }
+
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Display utilities */
+.t-hero-album  { font: var(--type-hero-album);  letter-spacing: var(--tracking-display); }
+.t-hero-artist { font: var(--type-hero-artist); letter-spacing: var(--tracking-display); }
+
+/* Label (small caps style without small caps) */
+.t-label {
+  font: var(--type-label);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+/* Reduced motion — collapse all transitions except the scrubber. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* =========================================================================
+   7. COMPONENT PRIMITIVES (low-level — used by ui_kits/web)
+   ========================================================================= */
+
+.btn {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: 8px 14px;
+  border-radius: var(--radius-2);
+  font: var(--type-ui);
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 0; cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out-soft);
+}
+.btn:hover { background: var(--surface-3); }
+.btn:active { background: var(--surface-1); }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:active { background: var(--accent-press); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--fg-muted);
+}
+.btn-ghost:hover { background: var(--surface-2); color: var(--fg); }
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
