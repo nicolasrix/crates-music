@@ -818,6 +818,74 @@ body {
   gap: var(--space-2);
   justify-content: flex-end;
 }
+
+/* Recommendation-feedback pill. Visually distinct from the play
+ * controls (a bordered pill, not a bare icon button) and from any
+ * future "favorite this song" affordance — the inline `rate rec`
+ * label makes the scope explicit so the user understands this is a
+ * vote on the recommendation, not on the song. */
+.rec-feedback {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--surface-2) 60%, transparent);
+  border: 1px solid var(--border-subtle);
+}
+.rec-feedback__label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  font-weight: var(--weight-medium);
+  user-select: none;
+  white-space: nowrap;
+}
+.rec-feedback__btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--fg-muted);
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur-1) var(--ease-out-soft),
+    color var(--dur-1) var(--ease-out-soft);
+}
+.rec-feedback__btn:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+.rec-feedback__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Locked state — the current queue item is user-picked, not a
+ * recommendation. Dim the whole pill so the affordance reads as
+ * "available but not applicable right now," matching the disabled-
+ * button visual language used elsewhere (Repeat button etc.). */
+.rec-feedback.is-locked {
+  opacity: 0.45;
+}
+.rec-feedback.is-locked .rec-feedback__btn {
+  cursor: not-allowed;
+}
+/* Active states intentionally use distinct colors per direction so the
+ * cast vote is immediately legible at a glance — green for "good fit",
+ * red-ish for "poor fit". Falls back to --accent when those vars aren't
+ * defined in a theme. */
+.rec-feedback__btn.up.is-active {
+  background: color-mix(in oklab, var(--success, #2ea043) 22%, transparent);
+  color: var(--success, #2ea043);
+}
+.rec-feedback__btn.down.is-active {
+  background: color-mix(in oklab, var(--danger, #d1242f) 22%, transparent);
+  color: var(--danger, #d1242f);
+}
 /* Player-bar scrubber — reads --art-accent on the wrapper.
  *
  * flex:1 makes the bar fill the middle column of .scrub (between the two

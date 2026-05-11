@@ -11,6 +11,8 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useArtwork } from "../components/ArtworkPalette";
@@ -18,8 +20,10 @@ import { Cover } from "../components/Cover";
 import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
+import { useSync } from "../sync/SyncContext";
 import { useAutoplay } from "./AutoplayContext";
 import { usePlayer } from "./PlayerContext";
+import { useRecommendationFeedback } from "./useRecommendationFeedback";
 import { VolumeControl } from "./VolumeControl";
 
 export function PlayerBar() {
@@ -136,6 +140,7 @@ export function PlayerBar() {
       </div>
 
       <div className="right-cluster">
+        <RecommendationFeedback trackId={nowPlaying.id} />
         <VolumeControl />
         <Link
           to="/queue"
@@ -250,6 +255,75 @@ function Scrubber() {
         <div className="thumb" style={{ left: `${pct}%` }} />
       </div>
       <span className="time">{fmtDuration(duration)}</span>
+    </div>
+  );
+}
+
+// Thumb-up / thumb-down pill. Labeled "Rate recommendation" so the
+// user understands the votes are about *the recommendation choice*
+// (was this a good fit to play right now?), not the song itself — no
+// risk of the user expecting this to feed a Subsonic-style "favorite"
+// or "starred" list. The label is rendered inline rather than as a
+// tooltip so it remains visible without hover, since hover-only
+// affordances are easy to miss in a persistent player.
+//
+// Gating: locked unless the current queue item was pushed by the
+// autoplay refill (AutoplayContext.isRecommendation). A user-picked
+// track isn't a recommendation, so rating it would feed misleading
+// signal to the recommender. The disabled state shows the pill so
+// the user still sees the affordance exists; the tooltip explains
+// why it's inactive.
+function RecommendationFeedback({ trackId }: { trackId: string }) {
+  const { vote, pending, cast } = useRecommendationFeedback(trackId);
+  const { state } = useSync();
+  const { isRecommendation } = useAutoplay();
+  const idx = state.playback.now_playing_index;
+  const currentItemId =
+    idx !== null ? state.playback.queue.items[idx]?.item_id : undefined;
+  const isRec = isRecommendation(currentItemId);
+
+  const lockedTitle =
+    "you picked this track yourself — only recommended tracks can be rated";
+  return (
+    <div
+      className={`rec-feedback ${isRec ? "" : "is-locked"}`}
+      role="group"
+      aria-label="rate this recommendation"
+      title={isRec ? undefined : lockedTitle}
+    >
+      <span className="rec-feedback__label" aria-hidden="true">
+        rate rec
+      </span>
+      <button
+        type="button"
+        className={`rec-feedback__btn up ${vote === "up" && isRec ? "is-active" : ""}`}
+        aria-label="good recommendation"
+        aria-pressed={vote === "up" && isRec}
+        title={isRec ? "good recommendation" : lockedTitle}
+        disabled={pending || !isRec}
+        onClick={() => cast("up")}
+      >
+        <ThumbsUp
+          size={14}
+          strokeWidth={1.75}
+          fill={vote === "up" && isRec ? "currentColor" : "none"}
+        />
+      </button>
+      <button
+        type="button"
+        className={`rec-feedback__btn down ${vote === "down" && isRec ? "is-active" : ""}`}
+        aria-label="poor recommendation"
+        aria-pressed={vote === "down" && isRec}
+        title={isRec ? "poor recommendation" : lockedTitle}
+        disabled={pending || !isRec}
+        onClick={() => cast("down")}
+      >
+        <ThumbsDown
+          size={14}
+          strokeWidth={1.75}
+          fill={vote === "down" && isRec ? "currentColor" : "none"}
+        />
+      </button>
     </div>
   );
 }
