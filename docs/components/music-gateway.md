@@ -2,7 +2,7 @@
 
 **Path:** `crates/music-gateway/`
 **Type:** binary (with library crate for tests)
-**Test count:** 131 (largest in the workspace)
+**Test count:** 315 (largest in the workspace)
 
 The HTTP gateway. Loads config, wires the axum router, terminates
 TLS, runs OAuth, layers caches in front of Navidrome, hosts the
@@ -15,28 +15,32 @@ This is where most ongoing code changes land.
 ```
 crates/music-gateway/
 ├── src/
-│   ├── main.rs           # binary entrypoint: TLS termination, boot wiring
-│   ├── lib.rs            # library entrypoint: re-exports for tests
-│   ├── app.rs            # build_router() — single source of truth for routes
-│   ├── config.rs         # TOML schema + Config::load
-│   ├── state.rs          # AppState: shared, Arc-backed, cloned per-request
-│   ├── auth.rs           # require_bearer middleware
-│   ├── proxy.rs          # /rest/* → Navidrome with cache layered in
-│   ├── recommend.rs      # /v1/recommend/* handlers
-│   ├── events.rs         # POST /v1/events handler
-│   ├── embedder.rs       # EmbedderHandle + degraded-mode boot probe
-│   ├── oauth/            # OAuth 2.1 server (modules: handlers, storage, ...)
-│   └── sync/             # sync transport (HTTP snapshot + WS fan-out)
-├── tests/
-│   ├── common/mod.rs     # shared test fixtures
-│   ├── oauth_*.rs        # 5 files
-│   ├── recommend.rs
-│   ├── events.rs
-│   ├── proxy.rs
-│   ├── cache_layer.rs
-│   └── …                 # 19 files total
+│   ├── main.rs                  # binary entrypoint: TLS, boot wiring
+│   ├── lib.rs                   # library entrypoint: re-exports for tests
+│   ├── app.rs                   # build_router() — single source of truth for routes
+│   ├── config.rs                # TOML schema + Config::load
+│   ├── state.rs                 # AppState (Arc-backed, cloned per-request)
+│   ├── auth.rs                  # require_bearer middleware
+│   ├── proxy.rs                 # /rest/* → Navidrome; L2 + cover-art proxy
+│   ├── recommend.rs             # /v1/recommend/next, from-any, from-seeds, enqueue
+│   ├── recommend_feedback.rs    # POST /v1/recommend/feedback (thumbs up/down)
+│   ├── scrobble.rs              # /rest/scrobble interceptor → play_history + event log
+│   ├── events.rs                # POST /v1/events
+│   ├── embedder.rs              # EmbedderHandle + degraded-mode boot probe
+│   ├── ingest.rs                # background ingest worker glue
+│   ├── diagnostics/             # trace ring, RUM, /v1/diagnostics/* handlers
+│   ├── oauth/                   # OAuth 2.1 server
+│   ├── sync/                    # sync transport (HTTP snapshot + WS fan-out)
+│   └── bin/
+│       ├── backfill_genre.rs    # one-shot genre/year backfill into MetadataStore
+│       └── recommend_bench.rs   # offline quality harness (rebuild + score)
+├── tests/                       # ≈27 integration files
 └── Cargo.toml
 ```
+
+The integration tests cover OAuth, sync (REST + WS), recommend,
+events, proxy, cover-art, cache layer, embedder probe, diagnostics,
+client_events, scrobble, and the ingest fetcher.
 
 ## Boot path
 
@@ -71,29 +75,29 @@ construct an `AppState` (with all in-memory backing stores), call
 
 ## AppState
 
-```rust
-pub struct AppState {
-    inner: Arc<Inner>,
-}
+`AppState` is `Arc<Inner>` and trivially `Clone`. axum hands it to
+every handler cheaply. The current fields (see `state.rs`):
 
-struct Inner {
-    config: Config,
-    http: reqwest::Client,
-    cache: Cache,
-    oauth: OauthStore,
-    setup_token: SetupToken,
-    sync: SyncStore,
-    embedder: EmbedderHandle,
-    embedding_store: EmbeddingStore,
-    event_store: EventStore,
-    ann: Arc<AnnIndex>,
-    recommend_model_version: ModelVersion,
-}
-```
-
-Trivially `Clone` (just an Arc bump), so axum can hand it to every
-handler cheaply. The `reqwest::Client` is here so HTTP/2 connection
-pooling is per-process, not per-request.
+| Field | Purpose |
+|---|---|
+| `config` | Loaded `gateway.toml`. |
+| `http` | Process-wide `reqwest::Client` (HTTP/2 connection pooling). |
+| `cache` | L2 metadata cache. |
+| `oauth` | OAuth 2.1 state pool. |
+| `setup_token` | One-time first-run token (gated by absence of master password). |
+| `sync` | In-memory `SyncStore` — queue + playback + likes. |
+| `embedder` | `EmbedderHandle`. Either an HTTP client to the sidecar or a "disabled" sentinel. |
+| `embedding_store` | `track_embeddings` table + ingest queue. |
+| `metadata_store` | `track_metadata` cache (filter inputs). |
+| `event_store` | Append-only event log. |
+| `play_history` | MMR recency clock. |
+| `feedback` | Per-session thumbs-up/down store. |
+| `projection` | UMAP 2D projection store. |
+| `ann` | `usearch` HNSW index (Arc — shared with the ingest worker). |
+| `recommend_model_version` | Stamp for new embeddings + ANN queries. Sourced from the embedder's last health probe. |
+| `trace_store` | M0 diagnostics ring (read-only view; the drainer task is the sole writer). |
+| `placeholder_etags` | In-memory dedup of Navidrome's "no artwork" placeholder etags. Rebuilt on restart. |
+| `placeholder_revalidations` | Cooldown map for the cover-art self-heal background refetch. |
 
 ## Auth middleware (`require_bearer`)
 
@@ -152,17 +156,64 @@ damage.
    `If-None-Match` upstream and revalidates.
 3. Streams the response back to the client.
 
-The proxy intentionally doesn't try to be smart about the response —
-it forwards the JSON unchanged. Clients can use any Subsonic SDK.
+`type=random` on `getAlbumList2` bypasses the cache (it's supposed to
+shuffle every time).
+
+### Cover-art proxy
+
+`getCoverArt` is handled in the same file but with its own logic:
+
+- Cache hits are served with `max-age=300, must-revalidate`.
+- Placeholder bodies (our SVG or Navidrome's "no artwork" default —
+  detected by etag dedup across distinct cover-art ids) are served
+  with `no-cache, must-revalidate`. This is the fix for the "G logo
+  is stuck" bug class: once a real cover lands, the browser
+  revalidates instead of serving the placeholder from disk cache.
+- A placeholder cache hit kicks off a coalesced background refetch
+  (one per key per cooldown window) so missing art self-heals.
+
+## Intercepted Subsonic endpoints
+
+`/rest/scrobble` is registered as a specific route ahead of the
+catch-all `/rest/*subsonic_path`. axum's matchit prefers the more
+specific path, so this wins regardless of registration order. The
+handler:
+
+1. Writes `play_history.last_played_ms` (recency clock for MMR).
+2. Appends a `Scrobble` event to the event log.
+3. Forwards the unmodified request to the proxy — Navidrome remains
+   the canonical play-count ledger.
+
+Both writes are best-effort: a failure is logged and never blocks the
+forwarded request.
 
 ## Recommend / events / sync handlers
 
 See per-component docs:
-- [music-recommend](./music-recommend.md) — endpoints in `recommend.rs`.
+- [music-recommend](./music-recommend.md) — `recommend.rs`,
+  `recommend_feedback.rs`. Endpoint surface in [API.md](../API.md#recommender).
 - [music-sync](./music-sync.md) — endpoints in `sync/handlers.rs` and
   `sync/ws.rs`.
-- Events handler in `events.rs` is ~70 lines: validate input, batch,
-  call `EventStore::append_batch`.
+- Events handler in `events.rs` is small: validate input, batch, call
+  `EventStore::append_batch`.
+
+## Diagnostics
+
+`diagnostics/` contains four pieces:
+
+- `store.rs` — sqlx pool against `gateway-state.traces.sqlite`, plus
+  the ring-trim policy.
+- `layer.rs` — a `tracing` subscriber layer that drains closed spans
+  into the store (batched).
+- `handlers.rs` — every `/v1/diagnostics/*` HTTP handler.
+- `types.rs` — wire shapes for trace records, histogram buckets,
+  client events.
+
+The trace ring is M0 of the diagnostics roadmap; the per-feature
+recommend dashboards (`queue_fill`, `shortfall`, `similarity`,
+`top_results`, `feedback`) are M2.2; browser RUM is M3. The
+`client_events` table currently has no automatic trim — see the
+memory note `project_m3_client_events_followups`.
 
 ## Testing patterns
 
@@ -192,6 +243,15 @@ async fn it_does_a_thing() {
 `common::build_state` constructs an in-memory cache, OAuth store,
 embedding store, and ANN — so every test runs against a fresh state.
 
+## Bins (one-shot tooling)
+
+- `backfill_genre` — reads `track_metadata` rows missing `genre` /
+  `year`, refetches from Navidrome, upserts. Run after the schema
+  added those columns.
+- `recommend_bench` — offline quality harness. Loads a fixed seed
+  list, runs the recommender at several configs, reports per-config
+  metrics. Useful for "did my filter change regress?"
+
 ## Known gaps
 
 - **No transcoding.** Streaming is forwarded raw from Navidrome.
@@ -201,6 +261,8 @@ embedding store, and ANN — so every test runs against a fresh state.
   needed.
 - **CLI uses static bearer**. Will move to OAuth Device Authorization
   Grant (RFC 8628) at P4.
-- **No metrics endpoint.** No `/metrics` for Prometheus, no
-  histogram of request durations. Easy to add via `tower-http::Metrics`
-  when there's an actual operator who wants it.
+- **No Prometheus `/metrics`.** The M0 trace ring covers the same
+  ground for now and the `/diagnostics` page is enough for a single
+  operator; we'll add `/metrics` if external scraping ever matters.
+- **No `client_events` ring-trim.** The table grows; see
+  `docs/components/music-gateway.md` follow-ups via memory.

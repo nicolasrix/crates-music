@@ -40,7 +40,8 @@ their own canonical statement:
 
 - **Caching** — L1 (in-memory) → L2 (SQLite, ETag-keyed) → L3 (audio file cache, content-addressed) → L4 (gateway transcoded LRU). See [ARCHITECTURE.md#caching](./ARCHITECTURE.md#caching).
 - **Auth** — bearer token (CLI, transitional) + OAuth 2.1 with PKCE (web; device-grant for CLI later). See [ARCHITECTURE.md#auth](./ARCHITECTURE.md#auth).
-- **Recommender** — content embeddings (CLAP) + ANN (usearch, cosine) + ingest queue + event log. See [components/music-recommend.md](./components/music-recommend.md).
+- **Recommender** — content embeddings (CLAP) + ANN (usearch, cosine), with post-retrieval queue filter (MMR, per-artist cap, dedup), per-session downvote exclusion, and a 2D UMAP projection for visual debugging. See [components/music-recommend.md](./components/music-recommend.md).
+- **Diagnostics** — span ring (`gateway-state.traces.sqlite`) + browser RUM + per-feature dashboards backing the `/diagnostics` page. See [ARCHITECTURE.md#diagnostics](./ARCHITECTURE.md#diagnostics) and [API.md#diagnostics](./API.md#diagnostics).
 
 ## Conventions
 

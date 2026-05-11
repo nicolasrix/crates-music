@@ -14,11 +14,14 @@ source of truth.
                     ┌────────┴─────────────────────────┐
                     │  music-gateway (Rust, axum)      │
                     │  • Subsonic proxy + augments     │
-                    │  • Transcoded-stream LRU cache   │
+                    │  • Cover-art proxy + self-heal   │
                     │  • OAuth 2.1 server              │
-                    │  • Recommender (CLAP + ANN)      │
-                    │  • Event log + WebSocket sync    │
-                    │  • SQLite (gateway state)        │
+                    │  • Recommender (CLAP + ANN +     │
+                    │    queue filter + MMR + feedback)│
+                    │  • Event log + scrobble intercept│
+                    │  • WebSocket sync                │
+                    │  • Diagnostics ring + RUM        │
+                    │  • SQLite (gateway state, 3 DBs) │
                     └──┬──────────────┬─────────────┬──┘
                        │              │             │
                 ┌──────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐
@@ -173,27 +176,26 @@ See [API.md](./API.md) for the endpoint reference.
 
 ## Recommender pipeline
 
-Backend-only. Two indices, blended at query time — they capture
-different things:
+Backend-only. Two indices planned, blended at query time — they
+capture different things:
 
 - **Content embeddings** (CLAP) — computed once per track at ingest.
   Captures "these tracks sound similar." Bonus: text-aligned, so
   natural-language queries ("rainy sunday afternoon") work via the
-  same index.
+  same index. **Live.**
 - **Behavioural embeddings** (track2vec on listening sessions) —
-  retrained nightly. Captures "this user plays these together," which
-  can diverge from acoustic similarity. **Not yet implemented**;
-  the event log feeds it.
+  retrained nightly. Captures "this user plays these together,"
+  which can diverge from acoustic similarity. **Deferred (P6.8);**
+  the event log + `play_history` table feed it.
 
 Both will eventually be stored as mmap'd HNSW files via
-[`usearch`](https://github.com/unum-cloud/usearch). The content index
-is live; the behavioural index lands in a future phase.
+[`usearch`](https://github.com/unum-cloud/usearch).
 
 Inference runs in a Python sidecar (FastAPI + LAION CLAP) so the
 gateway stays lightweight. Boot probe: gateway checks the embedder's
 `/healthz` at startup. If unreachable, it logs a warning and runs in
-**degraded mode** — recommend endpoints fall back to tag-only
-similarity.
+**degraded mode** — recommend endpoints return 404 for every seed
+(reserved for a future tag-only fallback).
 
 ```
 New track discovered (Subsonic poll)
@@ -204,29 +206,91 @@ New track discovered (Subsonic poll)
   → mark track ready in catalog
 ```
 
-Ingest is single-worker for now. Crash recovery is built in: any rows
-flagged `in_progress` at startup get reset to `not_started` so the
-worker re-attempts. The ANN is a derived cache — it's rebuildable
-from SQLite, so you can wipe the file freely.
+Ingest is single-worker. Crash recovery is built in: rows flagged
+`in_progress` at startup get reset to `not_started`. The ANN is a
+derived cache — rebuildable from SQLite, so you can wipe the file
+freely.
+
+### Beyond raw similarity
+
+Raw ANN top-K is rarely what the user wants. The recommend handlers
+layer three post-retrieval steps on top:
+
+1. **Multi-seed aggregation** (`POST /v1/recommend/from-seeds`). Sample
+   up to N seeds from a playlist, fan out per-seed ANN queries, fold
+   them with Σ-similarity (optionally weighted). Replaces a
+   client-side fan-out loop with one round-trip.
+2. **Queue-aware diversity filter**
+   (`music_recommend::queue_filter`). Given the upcoming queue, apply
+   a per-artist cap and same-title dedup; choose admits with one of
+   three diversity modes:
+   - `hard_cap` (default) — first-fit subject to the caps.
+   - `mmr` — Maximal Marginal Relevance, parameters `λ` (relevance
+     vs. novelty) and `μ` (same-artist soft penalty).
+   - `off` — no filtering.
+3. **Session-scoped downvotes**. When the client supplies a
+   `session_id`, tracks the user thumbs-downed *within that session*
+   are excluded. Per-session, not global — the user may have been
+   in a different mood last week.
+
+The `/rest/scrobble` interceptor writes to a `play_history` table
+that the MMR recency penalty reads from. That gives "song I played
+yesterday" a different penalty than "song I played 6 months ago"
+without scanning the full event log on every recommend call.
 
 See [components/music-recommend.md](./components/music-recommend.md)
 and [components/embedder.md](./components/embedder.md).
 
+### Latent-space view
+
+Beyond the search/recommend hot path, the gateway can ship a 2D UMAP
+projection of every embedded track. The `backfill_projection` binary
+computes it offline; the gateway exposes it via
+`GET /v1/diagnostics/recommend/latent_space`; the web app's
+`/recommend/latent-space` page renders it. Useful for "what does my
+library look like" and for debugging recommend coverage gaps.
+
 ## Event log
 
 `POST /v1/events` is append-only. Captures user-interaction signal
-(scrobble, skip, like, seek) for the behavioural index. Events are
-persisted to `gateway-state.recommend.sqlite` but **not yet
-consumed** — the recommender will read them when the behavioural
-index lands.
+(scrobble, skip, like, seek). Two consumers today plus one planned:
+
+- **Diagnostics** reads recent scrobbles for the `/diagnostics`
+  recently-played panel.
+- **Recommender recency clock** is fed by the `/rest/scrobble`
+  interceptor (which also writes a `play_history` row alongside the
+  event-log append, for fast lookup).
+- **Behavioural index** (P6.8) — deferred. The event log is the
+  authoritative input when it lands.
 
 Two timestamps per event:
 - `occurred_at` — client-supplied unix ms (when the user did the thing)
 - `received_at` — gateway-side unix ms (when we persisted)
 
-The diff is clock skew + queue delay. Clients are expected to coalesce
-events into batches every few seconds (or on app background) and POST
-them in one go.
+The diff is clock skew + queue delay. Clients coalesce events into
+batches every few seconds (or on app background) and POST them in one
+go.
+
+## Diagnostics
+
+The gateway is wired for observability without needing a separate
+Prometheus / Grafana stack. Three pieces:
+
+1. **Span ring buffer (M0).** A background drainer task copies
+   closed `tracing` spans into a SQLite table
+   (`gateway-state.traces.sqlite`), ring-trimmed to a cap. Cheap
+   enough to leave on in production.
+2. **Browser RUM (M3).** The web app emits Core Web Vitals (LCP,
+   INP, CLS, FCP, TTFB) and custom marks (e.g. `playback.start`)
+   via `POST /v1/diagnostics/client_events`. Batched every 10 s plus
+   a `keepalive` flush on `pagehide`.
+3. **`/diagnostics` page in the web app.** Renders the ring,
+   per-recommend-call breakdowns (`queue_fill`, `shortfall`,
+   `similarity`, `top_results`, `feedback`), and the RUM ring. 5-second
+   poll via TanStack Query; no WebSocket.
+
+See the diagnostics section in [API.md](./API.md#diagnostics) for the
+endpoint surface.
 
 ## Responsiveness budget
 

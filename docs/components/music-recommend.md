@@ -2,19 +2,27 @@
 
 **Path:** `crates/music-recommend/`
 **Type:** library, server-only
-**Test count:** 54
+**Test count:** 206
 
-The recommender's state layer. Owns:
+The recommender's state layer. The original "embeddings + queue + ANN"
+core has grown into several focused modules; all share the same
+SQLite pool (`gateway-state.recommend.sqlite`) but own independent
+tables.
 
-1. **Embedding store** — SQLite, content-addressed by
-   `(track_id, model_version)`.
-2. **Ingest queue** — same SQLite table, status column doubles as
-   queue.
-3. **ANN index** — `usearch` HNSW, cosine metric.
-4. **Embedder client** — HTTP wrapper around the Python sidecar.
-5. **Ingest worker** — pulls from the queue, fetches audio, calls
-   the embedder, writes to store + ANN.
-6. **Event log** — append-only `events` table.
+| Module | Owns | Migration |
+|---|---|---|
+| `store` | `track_embeddings` table + ingest queue (status column) | `0001_embeddings.sql` |
+| `events` | `events` append-only log | `0002_events.sql` |
+| `metadata` | `track_metadata` cache (artist/title/album/year/genre/duration) | `0003_track_metadata.sql` |
+| `play_history` | `play_history` (track_id PK, last_played_ms) — MMR recency clock | `0004_play_history.sql` |
+| `feedback` | `recommend_feedback` (track_id, session_id, vote, occurred_ms) | `0005_recommend_feedback.sql` |
+| `projection` | `embedding_projection_2d` (track_id, model_version, x, y) for UMAP visualisation | `0006_embedding_projection_2d.sql` |
+| `ann` | `usearch` HNSW + sidecar `(TrackId ↔ u64)` map | n/a (derived cache) |
+| `embedder` | HTTP client for the Python sidecar | n/a |
+| `ingest` | Worker: claim → fetch audio → embed → upsert | n/a |
+| `aggregate` | Σ-similarity multi-seed fan-out helpers | n/a |
+| `mmr` | Maximal Marginal Relevance reranker | n/a |
+| `queue_filter` | Queue-aware diversity filter (per-artist cap, dedup, MMR) | n/a |
 
 This crate is **server-only**. It pulls in `usearch` (ships C++),
 `sqlx`, `reqwest`. Mobile clients won't link this.
@@ -62,8 +70,15 @@ use music_recommend::{
     EmbeddingStore, EmbeddingKey, ModelVersion, IngestStatus,
     EmbedderClient, EmbedderConfig, EmbedderHealth,
     EventStore, EventInput, EventType,
+    FeedbackStore, FeedbackAggregate, FeedbackCounts,
+    PlayHistoryStore,
+    ProjectionStore, Projection2D, ProjectionVersionSummary,
+    MetadataStore, TrackMetadata, BackfillStats, backfill_metadata,
+    MmrCandidate, mmr_rerank,
+    QueueFilter, QueueFilterConfig, DiversityMode,
     ann::AnnIndex,
-    ingest::{IngestWorker, AudioFetcher, rebuild_ann_from_store},
+    aggregate::sample_indices,
+    ingest::{IngestWorker, AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store},
 };
 ```
 
@@ -158,6 +173,95 @@ sidecar JSON is missing or stale, so the ANN is always
 reconstructable from SQLite. The ANN is a derived cache; SQLite is
 authoritative.
 
+### `MetadataStore`
+
+The track-metadata cache. Populated by the ingest worker (via
+`MetadataIngest`) at the same time as the embedding, so by the time a
+track is in the ANN we also have its artist / title / album /
+duration_ms / year / genre on hand. The queue filter reads from here
+on every recommend call — it cannot afford a per-track Subsonic round
+trip.
+
+```rust
+let store = MetadataStore::new(embedding_pool.clone());
+store.upsert(&track_id, &TrackMetadata { ... }).await?;
+let row = store.get(&track_id).await?;          // Option<TrackMetadata>
+let rows = store.get_many(&track_ids).await?;   // HashMap<TrackId, TrackMetadata>
+```
+
+The `backfill_metadata` helper (also reachable via the
+`backfill-genre` binary in `music-gateway`) fills in genre + year for
+older rows that were embedded before the metadata columns existed.
+
+### `PlayHistoryStore`
+
+Fast-path "when was this track last played" lookup, used by the MMR
+recency penalty. One row per track, upserted by the `/rest/scrobble`
+interceptor on every submission scrobble. Distinct from the event log
+(which is append-only) — this table is *the* recency clock; the event
+log is *all* signals.
+
+```rust
+let store = PlayHistoryStore::new(embedding_pool.clone());
+store.record_play(&track_id, occurred_ms).await?;
+let rows = store.last_played_many(&track_ids).await?;
+```
+
+### `FeedbackStore`
+
+Per-session thumbs-up / thumbs-down on recommended tracks.
+
+```rust
+let store = FeedbackStore::new(embedding_pool.clone());
+store.record(&track_id, "session-id", +1, occurred_ms, now_ms).await?;
+store.clear(&track_id, "session-id").await?;
+let counts = store.counts_for_track(&track_id).await?;
+let downvotes = store.downvoted_in_session("session-id").await?;
+```
+
+`downvoted_in_session` is what the recommend handlers consult to add
+session-scoped excludes to the ANN exclusion list. Downvotes from
+other sessions are not consulted by design — the user's mood may have
+changed.
+
+### `ProjectionStore`
+
+2D UMAP projection of every embedded track. Computed offline by the
+`backfill-projection` workflow; read at request time by the
+`/v1/diagnostics/recommend/latent_space` endpoint.
+
+```rust
+let store = ProjectionStore::new(embedding_pool.clone());
+store.upsert_many(&model_version, &points).await?;
+let points = store.all_for_version(&model_version).await?;
+let summaries = store.list_versions().await?;
+```
+
+### Queue filter + MMR
+
+`QueueFilter` implements the post-ANN filtering described in
+[ARCHITECTURE.md](../ARCHITECTURE.md#beyond-raw-similarity):
+
+```rust
+let filter = QueueFilter::new(QueueFilterConfig {
+    diversity_mode: DiversityMode::Mmr,
+    mmr_lambda: 0.8,
+    artist_penalty_weight: 0.15,
+    max_per_artist: 0,        // hard cap; 0 disables, soft penalty does the work
+    dedup_titles: true,
+});
+let admitted: Vec<MmrCandidate> = filter.admit(
+    candidates,                  // ANN results, with vectors + metadata
+    &queue_context,              // upcoming queue + now playing
+    top_n,
+);
+```
+
+`mmr_rerank` is the underlying primitive — pure function, no I/O, no
+SQLite. The filter assembles the inputs (artist/title metadata,
+last-played timestamps) and calls `mmr_rerank` with the assembled
+candidate list.
+
 ### `EventStore`
 
 ```rust
@@ -187,6 +291,10 @@ new event kinds without a server release.
 |---|---|
 | `0001_embeddings.sql` | `track_embeddings` table + indices for queue + track lookup. |
 | `0002_events.sql` | `events` table + indices on `occurred_at`, `track_id`, `event_type`. |
+| `0003_track_metadata.sql` | `track_metadata` cache. Columns extended over time with `year`, `genre`. |
+| `0004_play_history.sql` | `play_history` (track_id PK, last_played_ms). MMR recency clock. |
+| `0005_recommend_feedback.sql` | `recommend_feedback` (track_id, session_id, vote, occurred_ms). |
+| `0006_embedding_projection_2d.sql` | `embedding_projection_2d` (track_id, model_version, x, y). |
 
 The store owns its own SQLite file
 (`gateway-state.recommend.sqlite`), separate from the OAuth state DB.
@@ -196,8 +304,10 @@ keeps each migration timeline self-contained.
 
 ## Tests
 
-54 tests across 4 integration files (`ann.rs`, `embedder_client.rs`,
-`ingest.rs`, `store.rs`) plus inline unit tests. Coverage:
+206 tests as of last update, mostly inline unit tests on the new
+post-retrieval modules (queue_filter, mmr, aggregate, metadata,
+play_history, feedback, projection). Coverage at the integration
+level:
 
 - `EmbeddingStore`: enqueue, claim, mark done, mark failed, reset
   paths, idempotent insert behaviour, status counts.
