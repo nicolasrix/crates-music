@@ -233,10 +233,14 @@ layer three post-retrieval steps on top:
    are excluded. Per-session, not global — the user may have been
    in a different mood last week.
 
-The `/rest/scrobble` interceptor writes to a `play_history` table
-that the MMR recency penalty reads from. That gives "song I played
-yesterday" a different penalty than "song I played 6 months ago"
-without scanning the full event log on every recommend call.
+The `/rest/scrobble` interceptor writes a `last_played_ms` per track
+to a dedicated `play_history` table. That row is reserved for a planned
+MMR recency term — "song played yesterday" pays more than "song played
+six months ago" without scanning the full event log on every recommend
+call. The table is populated today; the scorer doesn't read it yet.
+See [`components/music-recommend.md#algorithm-reference`](./components/music-recommend.md#algorithm-reference)
+for the exact MMR formula (currently `λ`·relevance − `(1−λ)`·novelty −
+`μ`·artist_count) and the recency-term follow-up.
 
 See [components/music-recommend.md](./components/music-recommend.md)
 and [components/embedder.md](./components/embedder.md).

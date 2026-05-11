@@ -14,7 +14,7 @@ tables.
 | `store` | `track_embeddings` table + ingest queue (status column) | `0001_embeddings.sql` |
 | `events` | `events` append-only log | `0002_events.sql` |
 | `metadata` | `track_metadata` cache (artist/title/album/year/genre/duration) | `0003_track_metadata.sql` |
-| `play_history` | `play_history` (track_id PK, last_played_ms) — MMR recency clock | `0004_play_history.sql` |
+| `play_history` | `play_history` (track_id PK, last_played_ms) — recency clock (populated by scrobble interceptor; reserved for the planned MMR recency term, see [Algorithm reference](#algorithm-reference)) | `0004_play_history.sql` |
 | `feedback` | `recommend_feedback` (track_id, session_id, vote, occurred_ms) | `0005_recommend_feedback.sql` |
 | `projection` | `embedding_projection_2d` (track_id, model_version, x, y) for UMAP visualisation | `0006_embedding_projection_2d.sql` |
 | `ann` | `usearch` HNSW + sidecar `(TrackId ↔ u64)` map | n/a (derived cache) |
@@ -62,6 +62,139 @@ Crash recovery is `UPDATE … SET status = 'not_started' WHERE status = 'in_prog
 The cost is that we can't represent "this is being processed by
 worker N" — there's only one worker. Multi-worker would need a
 proper claim-with-fencing pattern. Not yet needed.
+
+## Algorithm reference
+
+The recommend hot path is **retrieval → aggregate → filter → rerank**.
+This section pins down the exact scoring used at each stage. Source of
+truth is the code (`crates/music-recommend/src/{ann,aggregate,queue_filter,mmr}.rs`);
+if a number here diverges from a constant in the code, the code wins.
+
+### 1. Retrieval — cosine ANN
+
+`AnnIndex::query` against the `usearch` HNSW (cosine metric, 512-dim
+CLAP vectors). Returns top-K with `similarity ∈ [-1, 1]`. CLAP outputs
+are unit-norm, so in practice scores cluster in `[0, 1]`.
+
+### 2. Multi-seed aggregation — Σ-similarity
+
+Used only by `POST /v1/recommend/from-seeds`. Given a list of seed
+tracks, the gateway samples up to N (via `aggregate::sample_indices`,
+partial Fisher–Yates) and fans out one ANN query per sampled seed.
+Per-seed top-K results are folded with **weighted Σ-similarity**:
+
+```
+score(t) = Σᵢ wᵢ · cos(seedᵢ, t)         for each seed i that surfaced t
+seed_hits(t) = |{i : t ∈ topK(seedᵢ)}|
+```
+
+- `wᵢ` defaults to 1.0; negative weights are clamped to 0; zero-weight
+  seeds contribute nothing. Out-of-range indices in the weights slice
+  fall back to 1.0.
+- Sampled seed ids are added to the exclude set so a seed can't surface
+  as a recommendation of itself.
+- Final ranking: `score` desc, then `seed_hits` desc, then `track_id`
+  asc (deterministic tiebreak).
+- A track that appears under 3 seeds at similarity 0.6 each
+  (`score = 1.8`) outranks one that appears under 1 seed at similarity
+  0.95 (`score = 0.95`). This is the "centroid of the seed set"
+  heuristic; tracks that are broadly close beat tracks that are
+  laser-close to one outlier seed.
+
+Source: `aggregate::aggregate_seed_results_weighted`.
+
+### 3. Queue exclusion + per-`(artist, title)` dedup
+
+`QueueFilter::build` consumes the queue snapshot (queue track ids +
+now-playing) and a metadata lookup, then walks candidates with
+`try_accept`. Decisions:
+
+- **`Accept`** — survived all checks. Internal counts bump.
+- **`RejectArtistCap`** — the artist's queue footprint is already at
+  `max_per_artist` (`0` disables; the default disables it because the
+  MMR soft penalty does the diversity work).
+- **`RejectDedup`** — `(artist_key, title_normalized)` matches an entry
+  already in the queue or already accepted in this call. Catches
+  cross-edition duplicates (album version vs single, remaster vs
+  original). `artist_key` is `"id:<artist_id>"` when available,
+  `"name:<lowercased>"` otherwise.
+
+The now-playing track *counts toward* the artist + dedup state but is
+not itself excluded — its constraint applies to upcoming picks, not to
+itself.
+
+Source: `queue_filter::QueueFilter`.
+
+### 4. MMR rerank — `λ` / `μ`
+
+Used when `diversity_mode = "mmr"`. Greedy selection: at each step,
+pick the surviving candidate maximising
+
+```
+score(c | admitted) = λ · sim(c, seed)                              (relevance)
+                    − (1 − λ) · max_{a ∈ admitted} sim(c, a)        (novelty penalty)
+                    − μ · artist_count(c.artist)                    (artist penalty, linear)
+```
+
+with the special case that the **first slot omits the novelty term**
+(`max_sim_to_admitted` starts at 0 for everyone, and a literal
+`(1 − λ)·0` would make the λ=0 case collapse to "first candidate wins"
+on ties). The artist penalty still applies to the first slot, so the
+opening pick already respects same-artist saturation from the queue.
+
+Parameters:
+
+| Symbol | Field | Range | Default | Effect |
+|---|---|---|---|---|
+| `λ` | `mmr_lambda` | `[0, 1]` (clamped) | `0.7` | `1.0` = pure relevance (== `DiversityMode::Off`). `0.0` = pure novelty after the relevance-driven first pick. |
+| `μ` | `artist_penalty_weight` | `≥ 0` (clamped) | `0.15` | Per-occurrence cost. The 2nd same-artist admit pays `2μ`, the 3rd pays `3μ`. `μ = 0` degrades to plain MMR. |
+| — | `max_per_artist` | `0..` | `0` | `0` disables the **hard** cap; the soft `μ` penalty does the diversity work. Non-zero keeps the hard cap as an emergency knob. |
+| — | `dedup_titles` | bool | `true` | Runs orthogonally to `λ`/`μ` — catches cross-edition redundancy regardless of artist diversity. |
+
+`initial_artist_counts` is seeded from the queue's existing footprint,
+so a candidate that matches an artist already played twice in the
+upcoming queue pays `2μ` on its *first* MMR admit.
+
+Cosine in the novelty term uses the candidate's embedding vector.
+Candidates with **no vector** (rare; only happens if the embedding
+store and ANN drift out of sync) are scored on relevance alone — the
+diversity penalty is treated as 0. Same fail-open posture for missing
+`artist_key`.
+
+Ties break on input order (strict `>` in argmax). Combined with the
+deterministic post-aggregation sort, this makes the slate reproducible
+for a given `(candidates, λ, μ, initial_counts)` tuple.
+
+Source: `mmr::mmr_rerank`. Pure function — no I/O, no SQLite. The
+queue filter assembles inputs (vectors via `AnnIndex::get_vector`,
+metadata via `MetadataStore::get_many`) and calls it.
+
+### 5. Session-scoped downvotes
+
+When the client supplies `session_id` and the user has thumbs-downed
+tracks within *that* session, those track ids are added to the queue
+exclusion set before candidates are scored. Per-session, not global —
+the user may have been in a different mood last week.
+
+Source: `feedback::FeedbackStore::downvoted_in_session`, consumed in
+the recommend handlers.
+
+### Planned: recency penalty
+
+The `play_history` table is populated today (scrobble interceptor
+upserts `MAX(last_played_ms, …)` per track), but the MMR scorer does
+**not** yet read it. The intent is an additional term like
+
+```
+− ρ · recency_decay(now − last_played_ms)
+```
+
+that demotes recently-played tracks without scanning the full event
+log on every call. Tracked as a follow-up; the table + index are in
+place so the wiring is a `last_played_for_many` lookup plus one extra
+penalty term in the score formula.
+
+Source: `play_history::PlayHistoryStore`. Not yet imported by `mmr.rs`.
 
 ## Public API
 
