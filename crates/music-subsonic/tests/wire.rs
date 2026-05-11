@@ -186,6 +186,118 @@ fn parses_error_envelope_into_typed_error() {
 }
 
 #[test]
+fn parses_play_count_and_played_on_song() {
+    // OpenSubsonic extension fields. Navidrome emits both on getSong /
+    // getAlbum responses; older Subsonic servers may omit them and the
+    // parse must still succeed (covered by parses_get_song_with_sparse_fields).
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-1",
+                "title": "1/1",
+                "playCount": 17,
+                "played": "2026-04-15T12:34:56Z"
+            }
+        }
+    }"#;
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.play_count, Some(17));
+    assert_eq!(track.played_at.as_deref(), Some("2026-04-15T12:34:56Z"));
+}
+
+#[test]
+fn parses_genre_on_song() {
+    // Subsonic emits `<song genre="Ambient">` on song elements when the
+    // server has the tag. We need it on the wire so the recommender's
+    // metadata cache can store it and the latent-space diagnostics page
+    // can colour clusters by reported genre. Older / untagged songs
+    // omit the field entirely — `song_without_play_count_or_played_parses_with_none`
+    // already covers the null-genre case.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-genre",
+                "title": "1/1",
+                "genre": "Ambient"
+            }
+        }
+    }"#;
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.genre.as_deref(), Some("Ambient"));
+}
+
+#[test]
+fn parses_year_on_song() {
+    // Subsonic emits `<song year="…">` for tracks. We need it on the
+    // wire so the recommender's track_metadata cache can store year and
+    // the diagnostics panel can render "Album · 1978". Older servers
+    // that omit it must still parse — covered by
+    // parses_get_song_with_sparse_fields.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": {
+                "id": "t-1",
+                "title": "1/1",
+                "year": 1978
+            }
+        }
+    }"#;
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.year, Some(1978));
+}
+
+#[test]
+fn song_without_play_count_or_played_parses_with_none() {
+    // Older Subsonic servers — no OpenSubsonic extension. The fields
+    // must default to None so existing libraries don't 422.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "song": { "id": "t-9", "title": "Untitled" }
+        }
+    }"#;
+    let track = wire::parse_get_song(body).unwrap();
+    assert_eq!(track.play_count, None);
+    assert_eq!(track.played_at, None);
+    // Genre defaults to None on servers that don't emit the tag.
+    assert_eq!(track.genre, None);
+}
+
+#[test]
+fn parses_play_count_and_played_on_album() {
+    // Albums also surface playCount/played in the OpenSubsonic spec.
+    // Navidrome derives album.playCount from track.playCount sums.
+    let body = r#"{
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "album": {
+                "id": "al-1",
+                "name": "Music for Airports",
+                "artist": "Brian Eno",
+                "songCount": 0,
+                "duration": 0,
+                "playCount": 42,
+                "played": "2026-05-01T10:00:00Z"
+            }
+        }
+    }"#;
+    let album_with_songs = wire::parse_get_album(body).unwrap();
+    assert_eq!(album_with_songs.album.play_count, Some(42));
+    assert_eq!(
+        album_with_songs.album.played_at.as_deref(),
+        Some("2026-05-01T10:00:00Z")
+    );
+}
+
+#[test]
 fn parses_empty_album_list_when_field_missing() {
     // Subsonic returns no `album` array when the list is empty.
     let body = r#"{

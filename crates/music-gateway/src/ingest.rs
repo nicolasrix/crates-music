@@ -163,10 +163,9 @@ impl MetadataFetcher for SubsonicMetadataFetcher {
             .await
             .map_err(|e| FetchError::Transport(format!("getSong: {e}")))?;
         // Map the music-core::Track shape onto the recommend metadata
-        // row. Fields that aren't on the core Track today (genre, year,
-        // bpm, musical_key) stay None; the schema columns are already
-        // nullable so a follow-up can extend the core type and start
-        // populating them without a migration.
+        // row. `bpm` and `musical_key` are still None because they're
+        // not on the core Track today — extending the wire layer for
+        // those is a separate piece of work.
         let title_normalized = normalize_title(&track.title);
         Ok(TrackMetadata {
             track_id: track.id.clone(),
@@ -177,8 +176,8 @@ impl MetadataFetcher for SubsonicMetadataFetcher {
             title: track.title,
             title_normalized,
             duration_seconds: track.duration_seconds,
-            genre: None,
-            year: None,
+            genre: track.genre,
+            year: track.year.map(i32::from),
             track_number: track.track_number,
             disc_number: track.disc_number,
             bpm: None,

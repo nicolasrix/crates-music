@@ -18,6 +18,7 @@ pub mod feedback;
 pub mod ingest;
 pub mod metadata;
 pub mod mmr;
+pub mod play_history;
 pub mod queue_filter;
 pub mod store;
 pub mod types;
@@ -30,6 +31,7 @@ pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };
 pub use mmr::{Candidate as MmrCandidate, mmr_rerank};
+pub use play_history::PlayHistoryStore;
 pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};

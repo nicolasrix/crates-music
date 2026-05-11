@@ -20,6 +20,14 @@ pub struct Album {
     pub duration_seconds: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_art_id: Option<String>,
+    /// Sum of track-level play counts when surfaced by Navidrome.
+    /// See `Track::play_count` for the same caveat on freshness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_count: Option<u32>,
+    /// ISO8601 wall-clock timestamp of the most recent play across the
+    /// album's tracks; raw from upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played_at: Option<String>,
 }
 
 impl Album {

@@ -14,7 +14,7 @@ import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
-import { fmtDuration } from "../utils/format";
+import { fmtDuration, fmtPlays, fmtRelativePast } from "../utils/format";
 import type { Track } from "../api/types";
 
 export function Album({ id }: { id: string }) {
@@ -87,6 +87,13 @@ export function Album({ id }: { id: string }) {
 
   const { album, tracks } = q.data;
   const totalSeconds = tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0);
+  // Per A2's "derive on read" decision (see project_play_counts_decisions.md):
+  // when Navidrome doesn't surface album.playCount itself, fall back to
+  // summing track-level counts. Either path produces the same number for
+  // the user; this keeps the hero meaningful even on older Subsonic builds.
+  const albumPlays = album.playCount ?? tracks.reduce((sum, t) => sum + (t.playCount ?? 0), 0);
+  const playsLabel = fmtPlays(albumPlays);
+  const lastPlayedLabel = fmtRelativePast(album.played);
 
   return (
     <Layout breadcrumb={`albums · ${album.name}`} palette={palette}>
@@ -122,6 +129,10 @@ export function Album({ id }: { id: string }) {
             )}
             {totalSeconds > 0 && <span aria-hidden>·</span>}
             {totalSeconds > 0 && <span>{fmtDuration(totalSeconds)}</span>}
+            {playsLabel && <span aria-hidden>·</span>}
+            {playsLabel && <span>{playsLabel}</span>}
+            {lastPlayedLabel && <span aria-hidden>·</span>}
+            {lastPlayedLabel && <span>last played {lastPlayedLabel}</span>}
           </div>
           <div className="actions">
             <button

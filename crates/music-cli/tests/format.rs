@@ -13,6 +13,8 @@ fn sample_album(id: &str, name: &str, artist: &str, year: u16) -> Album {
         song_count: 4,
         duration_seconds: 1234,
         cover_art_id: None,
+        play_count: None,
+        played_at: None,
     }
 }
 
@@ -30,6 +32,10 @@ fn sample_track(id: &str, title: &str) -> Track {
         bit_rate_kbps: None,
         content_type: None,
         suffix: None,
+        year: None,
+        play_count: None,
+        played_at: None,
+        genre: None,
     }
 }
 

@@ -29,6 +29,8 @@ fn album_roundtrips() {
         song_count: 4,
         duration_seconds: 2880,
         cover_art_id: Some("cover-1".to_string()),
+        play_count: Some(3),
+        played_at: Some("2026-04-15T12:00:00Z".to_string()),
     };
     let json = serde_json::to_string(&album).unwrap();
     let back: Album = serde_json::from_str(&json).unwrap();
@@ -50,6 +52,10 @@ fn track_roundtrips() {
         bit_rate_kbps: Some(320),
         content_type: Some("audio/flac".to_string()),
         suffix: Some("flac".to_string()),
+        year: None,
+        play_count: Some(7),
+        played_at: Some("2026-04-15T12:00:00Z".to_string()),
+        genre: Some("Ambient".to_string()),
     };
     let json = serde_json::to_string(&track).unwrap();
     let back: Track = serde_json::from_str(&json).unwrap();
@@ -78,6 +84,8 @@ fn album_duration_helper_returns_std_duration() {
         song_count: 0,
         duration_seconds: 90,
         cover_art_id: None,
+        play_count: None,
+        played_at: None,
     };
     assert_eq!(album.duration(), std::time::Duration::from_secs(90));
 }
@@ -253,6 +261,10 @@ fn track_duration_helper_returns_optional_std_duration() {
         bit_rate_kbps: None,
         content_type: None,
         suffix: None,
+        year: None,
+        play_count: None,
+        played_at: None,
+        genre: None,
     };
     assert_eq!(track.duration(), Some(std::time::Duration::from_secs(125)));
     track.duration_seconds = None;
