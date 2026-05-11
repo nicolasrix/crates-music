@@ -246,8 +246,7 @@ export async function listRandomTracks(size = 100): Promise<Track[]> {
 // row sample is fine. Tracks with no `playCount` field are excluded —
 // "most played" of zero plays would just be the search3 default order.
 export async function listMostPlayedTracks(size = 100): Promise<Track[]> {
-  type SongWithPlay = Track & { playCount?: number };
-  type Resp = { song?: SongWithPlay[] };
+  type Resp = { song?: Track[] };
   const result = await getSubsonic<Resp>(
     `/rest/search3?query=${encodeURIComponent("")}&songCount=1000&albumCount=0&artistCount=0`,
     "searchResult3"
@@ -282,6 +281,28 @@ export async function searchAll(
     albums: result.album ?? [],
     tracks: result.song ?? [],
   };
+}
+
+// Scrobble — Subsonic's /rest/scrobble endpoint. `submission=false` is a
+// "now playing" ping, `submission=true` is a final play count. The
+// gateway intercepts both: on submission it writes a fast-path
+// last_played_ms row before forwarding to Navidrome (which remains the
+// canonical play-count ledger). Fire-and-forget at the caller — a
+// failed scrobble is not a UI-facing error, and the audio keeps playing.
+export async function scrobble(
+  trackId: string,
+  submission: boolean
+): Promise<void> {
+  const params = new URLSearchParams({
+    id: trackId,
+    submission: submission ? "true" : "false",
+    time: String(Date.now()),
+    f: "json",
+    v: "1.16.1",
+    c: "music-web",
+  });
+  const res = await apiFetch(`/rest/scrobble?${params.toString()}`);
+  if (!res.ok) throw new Error(`scrobble HTTP ${res.status}`);
 }
 
 export function streamUrl(trackId: string): string {

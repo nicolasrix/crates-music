@@ -8,10 +8,11 @@
 // flips local state and this effect picks up the change.
 
 import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { coverArtUrl, streamUrl } from "../api/client";
+import { coverArtUrl, scrobble, streamUrl } from "../api/client";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
+import { evaluateScrobble, type ScrobbleState } from "./scrobble";
 
 interface PlayerCtx {
   /** The currently-playing item's metadata, if known. */
@@ -66,9 +67,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // use `loadedmetadata` because metadata can arrive long before the
   // browser actually starts decoding.
   const startTsRef = useRef<number | null>(null);
+  // Per-track scrobble state. Reset on every track change so the
+  // now_playing/submission flags follow the cursor. evaluateScrobble
+  // lives in scrobble.ts and is purely a function of these four numbers.
+  const scrobbleStateRef = useRef<ScrobbleState>({
+    trackDurationMs: 0,
+    elapsedMs: 0,
+    hasEmittedNowPlaying: false,
+    hasEmittedSubmission: false,
+  });
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
+    scrobbleStateRef.current = {
+      trackDurationMs: 0,
+      elapsedMs: 0,
+      hasEmittedNowPlaying: false,
+      hasEmittedSubmission: false,
+    };
     if (!currentTrackId) {
       audio.pause();
       return;
@@ -78,22 +94,76 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (is_playing) void audio.play().catch(() => {});
   }, [currentTrackId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // One-shot `playing` listener per src change emits the latency mark.
+  // One-shot `playing` listener per src change emits the latency mark
+  // and fires the now_playing scrobble. Both are gated by their own
+  // ref-state and so are safe against duplicate `playing` events
+  // (which fire on every resume after a pause).
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrackId) return;
     const onPlaying = () => {
       const start = startTsRef.current;
-      if (start === null) return;
-      const elapsed = performance.now() - start;
-      startTsRef.current = null; // one-shot — don't double-emit on resume
-      markEvent("playback.start", {
-        value_ms: elapsed,
-        fields: { track_id: currentTrackId },
-      });
+      if (start !== null) {
+        const elapsed = performance.now() - start;
+        startTsRef.current = null; // one-shot — don't double-emit on resume
+        markEvent("playback.start", {
+          value_ms: elapsed,
+          fields: { track_id: currentTrackId },
+        });
+      }
+      // Now-playing scrobble. We pull duration off the audio element
+      // here rather than the timeupdate handler because the duration
+      // may not be known on a `play` event (Chrome) yet is reliably
+      // populated by the time the first `playing` event fires.
+      const durMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+      const next: ScrobbleState = {
+        ...scrobbleStateRef.current,
+        trackDurationMs: durMs,
+        elapsedMs: audio.currentTime * 1000,
+      };
+      const decision = evaluateScrobble(next);
+      if (decision === "now_playing") {
+        scrobbleStateRef.current = { ...next, hasEmittedNowPlaying: true };
+        void scrobble(currentTrackId, false).catch(() => {});
+      } else {
+        scrobbleStateRef.current = next;
+      }
     };
     audio.addEventListener("playing", onPlaying);
     return () => audio.removeEventListener("playing", onPlaying);
+  }, [currentTrackId]);
+
+  // Submission scrobble: re-evaluate on every timeupdate (fires ~4 Hz
+  // in modern browsers — cheap). Captures duration off the element
+  // each tick to handle late-arriving metadata changes (rare but real
+  // on some HLS-like sources). The pure decision function gates the
+  // network call, so this is a no-op once submission has fired.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !currentTrackId) return;
+    const onTimeUpdate = () => {
+      const durMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+      const next: ScrobbleState = {
+        ...scrobbleStateRef.current,
+        trackDurationMs: durMs,
+        elapsedMs: audio.currentTime * 1000,
+      };
+      const decision = evaluateScrobble(next);
+      if (decision === "submission") {
+        scrobbleStateRef.current = { ...next, hasEmittedSubmission: true };
+        void scrobble(currentTrackId, true).catch(() => {});
+      } else if (decision === "now_playing") {
+        // Rare path: `playing` never fired but timeupdates already are
+        // (some autoplay-resume edge cases). Send the now_playing here
+        // so the gateway sees a heartbeat for this track.
+        scrobbleStateRef.current = { ...next, hasEmittedNowPlaying: true };
+        void scrobble(currentTrackId, false).catch(() => {});
+      } else {
+        scrobbleStateRef.current = next;
+      }
+    };
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    return () => audio.removeEventListener("timeupdate", onTimeUpdate);
   }, [currentTrackId]);
 
   // Reflect the play/pause flag.

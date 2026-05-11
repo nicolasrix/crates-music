@@ -16,6 +16,7 @@ pub mod oauth;
 pub mod proxy;
 pub mod recommend;
 pub mod recommend_feedback;
+pub mod scrobble;
 pub mod state;
 pub mod sync;
 

@@ -17,6 +17,7 @@ use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
 use crate::recommend;
 use crate::recommend_feedback;
+use crate::scrobble;
 use crate::state::AppState;
 use crate::sync::handlers as sync_handlers;
 
@@ -57,6 +58,12 @@ pub fn build_router(state: AppState) -> Router {
             get(diagnostics_handlers::list_client_events)
                 .post(diagnostics_handlers::submit_client_events),
         )
+        // /rest/scrobble is intercepted to write the recommender's
+        // recency clock before delegating to the same proxy used by
+        // every other /rest/* call. axum's matchit prefers the more
+        // specific path over the wildcard, so this wins regardless of
+        // registration order.
+        .route("/rest/scrobble", any(scrobble::scrobble))
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 

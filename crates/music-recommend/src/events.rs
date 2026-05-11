@@ -137,6 +137,47 @@ impl EventStore {
         Ok(u64::try_from(n.max(0)).unwrap_or(0))
     }
 
+    /// Recently scrobbled tracks, newest first by `occurred_at`.
+    ///
+    /// Filters server-side to `event_type = 'scrobble'` and optionally
+    /// bounds by `occurred_at >= since_ms`. Ordering is by the
+    /// user-facing clock (`occurred_at`), tiebroken by `id DESC` for
+    /// stability when two scrobbles arrive in the same millisecond.
+    /// Diagnostic-only — used to eyeball recency-window defaults
+    /// before MMR's recency penalty consumes the same column.
+    pub async fn recently_played(
+        &self,
+        limit: u32,
+        since_ms: Option<i64>,
+    ) -> Result<Vec<StoredEvent>> {
+        let rows = if let Some(since) = since_ms {
+            sqlx::query(
+                "SELECT id, event_type, track_id, occurred_at, received_at, metadata
+                     FROM events
+                     WHERE event_type = 'scrobble' AND occurred_at >= ?
+                     ORDER BY occurred_at DESC, id DESC
+                     LIMIT ?",
+            )
+            .bind(since)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, event_type, track_id, occurred_at, received_at, metadata
+                     FROM events
+                     WHERE event_type = 'scrobble'
+                     ORDER BY occurred_at DESC, id DESC
+                     LIMIT ?",
+            )
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        rows.iter().map(row_to_stored).collect()
+    }
+
     /// Most recent `limit` events, newest first. Diagnostic / debug.
     pub async fn recent(&self, limit: u32) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
@@ -149,24 +190,24 @@ impl EventStore {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(|row| {
-                let metadata: Option<String> = row.get("metadata");
-                let metadata = metadata
-                    .map(|s| serde_json::from_str(&s))
-                    .transpose()
-                    .map_err(|e| Error::InvalidStatus(format!("metadata json: {e}")))?;
-                Ok(StoredEvent {
-                    id: row.get("id"),
-                    event_type: EventType::parse(row.get::<String, _>("event_type").as_str()),
-                    track_id: TrackId::from(row.get::<String, _>("track_id")),
-                    occurred_at: row.get("occurred_at"),
-                    received_at: row.get("received_at"),
-                    metadata,
-                })
-            })
-            .collect()
+        rows.iter().map(row_to_stored).collect()
     }
+}
+
+fn row_to_stored(row: &sqlx::sqlite::SqliteRow) -> Result<StoredEvent> {
+    let metadata: Option<String> = row.get("metadata");
+    let metadata = metadata
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|e| Error::InvalidStatus(format!("metadata json: {e}")))?;
+    Ok(StoredEvent {
+        id: row.get("id"),
+        event_type: EventType::parse(row.get::<String, _>("event_type").as_str()),
+        track_id: TrackId::from(row.get::<String, _>("track_id")),
+        occurred_at: row.get("occurred_at"),
+        received_at: row.get("received_at"),
+        metadata,
+    })
 }
 
 fn now_ms() -> i64 {
@@ -311,6 +352,151 @@ mod tests {
         }
         store.append_batch(&events).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 50);
+    }
+
+    #[tokio::test]
+    async fn recently_played_filters_to_scrobble_only() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        store
+            .append_batch(&[
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("t1"),
+                    occurred_at: 1_000,
+                    metadata: None,
+                },
+                EventInput {
+                    event_type: EventType::Skip,
+                    track_id: TrackId::from("t2"),
+                    occurred_at: 1_500,
+                    metadata: None,
+                },
+                EventInput {
+                    event_type: EventType::Like,
+                    track_id: TrackId::from("t3"),
+                    occurred_at: 2_000,
+                    metadata: None,
+                },
+            ])
+            .await
+            .unwrap();
+
+        let recent = store.recently_played(10, None).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].track_id.as_str(), "t1");
+        assert_eq!(recent[0].event_type, EventType::Scrobble);
+    }
+
+    #[tokio::test]
+    async fn recently_played_orders_by_occurred_at_desc() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        // Insert in non-monotonic occurred_at order — out-of-order
+        // delivery is the realistic case after offline batches.
+        for occurred in [3_000_i64, 1_000, 5_000, 2_000, 4_000] {
+            store
+                .append_batch(&[EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from(format!("t-{occurred}")),
+                    occurred_at: occurred,
+                    metadata: None,
+                }])
+                .await
+                .unwrap();
+        }
+
+        let recent = store.recently_played(10, None).await.unwrap();
+        let occurred: Vec<i64> = recent.iter().map(|e| e.occurred_at).collect();
+        assert_eq!(occurred, vec![5_000, 4_000, 3_000, 2_000, 1_000]);
+    }
+
+    #[tokio::test]
+    async fn recently_played_respects_limit() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        for i in 0..10 {
+            store
+                .append_batch(&[EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from(format!("t{i}")),
+                    occurred_at: 1_000 + i64::from(i),
+                    metadata: None,
+                }])
+                .await
+                .unwrap();
+        }
+
+        let recent = store.recently_played(3, None).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        // Newest 3: t9, t8, t7
+        assert_eq!(recent[0].track_id.as_str(), "t9");
+        assert_eq!(recent[2].track_id.as_str(), "t7");
+    }
+
+    #[tokio::test]
+    async fn recently_played_filters_by_since_ms() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        for occurred in [1_000_i64, 2_000, 3_000, 4_000, 5_000] {
+            store
+                .append_batch(&[EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from(format!("t-{occurred}")),
+                    occurred_at: occurred,
+                    metadata: None,
+                }])
+                .await
+                .unwrap();
+        }
+
+        // since_ms is inclusive: 3_000 → t-3000, t-4000, t-5000.
+        let recent = store.recently_played(10, Some(3_000)).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        assert!(recent.iter().all(|e| e.occurred_at >= 3_000));
+    }
+
+    #[tokio::test]
+    async fn recently_played_empty_when_only_non_scrobble_events() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        store
+            .append_batch(&[EventInput {
+                event_type: EventType::Skip,
+                track_id: TrackId::from("t1"),
+                occurred_at: 1_000,
+                metadata: None,
+            }])
+            .await
+            .unwrap();
+
+        let recent = store.recently_played(10, None).await.unwrap();
+        assert!(recent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recently_played_preserves_metadata() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+
+        let payload = serde_json::json!({"played_ms": 180_000});
+        store
+            .append_batch(&[EventInput {
+                event_type: EventType::Scrobble,
+                track_id: TrackId::from("t1"),
+                occurred_at: 1_000,
+                metadata: Some(payload.clone()),
+            }])
+            .await
+            .unwrap();
+
+        let recent = store.recently_played(1, None).await.unwrap();
+        assert_eq!(recent[0].metadata.as_ref().unwrap(), &payload);
     }
 
     #[test]
