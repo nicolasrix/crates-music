@@ -294,6 +294,33 @@ impl MetadataStore {
             .collect())
     }
 
+    /// Track ids for which the metadata row exists but `genre` is
+    /// null. Powers the one-shot backfill that ran after extending the
+    /// Subsonic decoder to capture the `genre` tag — pre-fix rows are
+    /// otherwise stuck without a genre until they're re-ingested.
+    ///
+    /// Ordered by `track_id` for a stable resume point if the backfill
+    /// loop is interrupted and re-run.
+    pub async fn null_genre_ids(&self, limit: i64) -> Result<Vec<TrackId>> {
+        let rows = sqlx::query(
+            "SELECT track_id
+               FROM track_metadata
+              WHERE genre IS NULL
+              ORDER BY track_id
+              LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let id: String = r.get("track_id");
+                TrackId::from(id)
+            })
+            .collect())
+    }
+
     /// Total row count. Useful for `/v1/recommend/health` and ops.
     pub async fn count(&self) -> Result<u64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM track_metadata")
@@ -743,5 +770,38 @@ mod tests {
         store.upsert(&sample_metadata("t1")).await.unwrap();
         store.upsert(&sample_metadata("t2")).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn null_genre_ids_returns_only_rows_with_null_genre() {
+        // Drives the genre backfill: existing rows that predate the
+        // ingest fix have `genre IS NULL`, and need to be re-fetched
+        // from Subsonic to populate the field. Rows that already have
+        // a genre must not be returned — re-fetching them would be
+        // wasted work and could clobber a manually-corrected value.
+        let store = MetadataStore::new(test_pool().await);
+        let mut with_genre = sample_metadata("t-rock");
+        with_genre.genre = Some("Rock".into());
+        let mut no_genre = sample_metadata("t-null");
+        no_genre.genre = None;
+        store.upsert(&with_genre).await.unwrap();
+        store.upsert(&no_genre).await.unwrap();
+
+        let got = store.null_genre_ids(100).await.unwrap();
+        assert_eq!(got, vec![TrackId::from("t-null")]);
+    }
+
+    #[tokio::test]
+    async fn null_genre_ids_respects_limit() {
+        // Limits the per-pass walk so a misconfigured backfill on a huge
+        // library doesn't return megabytes in one go.
+        let store = MetadataStore::new(test_pool().await);
+        for i in 0..5 {
+            let mut m = sample_metadata(&format!("t{i}"));
+            m.genre = None;
+            store.upsert(&m).await.unwrap();
+        }
+        let got = store.null_genre_ids(2).await.unwrap();
+        assert_eq!(got.len(), 2);
     }
 }
