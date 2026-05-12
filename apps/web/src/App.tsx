@@ -7,7 +7,12 @@ import { Albums } from "./pages/Albums";
 import { Artist } from "./pages/Artist";
 import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
-import { Diagnostics } from "./pages/Diagnostics";
+import { DiagnosticsHome } from "./pages/diagnostics/DiagnosticsHome";
+import { Ingest } from "./pages/diagnostics/Ingest";
+import { Listening } from "./pages/diagnostics/Listening";
+import { Recommender } from "./pages/diagnostics/Recommender";
+import { Rum } from "./pages/diagnostics/Rum";
+import { Tracing } from "./pages/diagnostics/Tracing";
 import { Home } from "./pages/Home";
 import { LatentSpace } from "./pages/LatentSpace";
 import { Playlist } from "./pages/Playlist";
@@ -81,7 +86,12 @@ function Routed({ path }: { path: string }) {
   if (path === "/search/albums") return <SearchBucket bucket="albums" />;
   if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
-  if (path === "/diagnostics") return <Diagnostics />;
+  if (path === "/diagnostics") return <DiagnosticsHome />;
+  if (path === "/diagnostics/recommender") return <Recommender />;
   if (path === "/diagnostics/latent") return <LatentSpace />;
+  if (path === "/diagnostics/ingest") return <Ingest />;
+  if (path === "/diagnostics/tracing") return <Tracing />;
+  if (path === "/diagnostics/rum") return <Rum />;
+  if (path === "/diagnostics/listening") return <Listening />;
   return <Home />;
 }
