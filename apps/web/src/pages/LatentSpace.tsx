@@ -36,13 +36,16 @@ import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
 
 // 3-D scene + three.js are heavy (~250 KB gzipped). The rest of the app
-// shouldn't pay that cost; lazy() defers the load to the first render
-// of UMAP-z mode. Suspense boundary below absorbs the loading flash.
+// shouldn't pay that cost; lazy() defers the load until the user flips
+// the view toggle to 3-D. Suspense boundary below absorbs the load flash.
 const LatentSpace3D = React.lazy(() =>
   import("./LatentSpace3D").then((m) => ({ default: m.LatentSpace3D })),
 );
+import { Cover } from "../components/Cover";
+import { Legend, PcGradientLegend } from "./LatentSpaceLegend";
 import {
   bucketByGenre,
+  buildSessionTrackRows,
   colorChannelValue,
   computeBounds,
   cosineDistanceToWidth,
@@ -56,8 +59,9 @@ import {
   type ContinuousColorMode,
   type DataBounds,
   type CanvasGeometry,
-  type GenreBucket,
   type ScatterPoint,
+  type SessionTrackRow,
+  type TrackMetadata,
 } from "./latentSpace";
 
 /// Color-by selector states. "genre" keeps the legacy bucketed palette;
@@ -71,7 +75,6 @@ const COLOR_MODES: ReadonlyArray<{ value: ColorMode; label: string }> = [
   { value: "pc2", label: "PC2" },
   { value: "pc3", label: "PC3" },
   { value: "pc4", label: "PC4" },
-  { value: "umap_z", label: "UMAP z" },
 ];
 
 function continuousValue(
@@ -110,20 +113,24 @@ const SESSION_NONE = "__none__";
 // `[0, 1]`, so cap there. Closer in latent space → thicker stroke.
 const PATH_WIDTH_RANGE = { minWidth: 0.6, maxWidth: 4, cap: 1 } as const;
 
+type ViewMode = "2d" | "3d";
+
 export function LatentSpace() {
   // Dropdown state for the session overlay. Defaults to "none" — the
   // scatter is useful without a path, and fetching event-bundled
   // sessions has a real cost on the gateway side.
   const [sessionPick, setSessionPick] = useState<string>(SESSION_NONE);
-  // What channel each dot's colour encodes. Genre / PC modes anchor on
-  // the 2D-UMAP layout; "umap_z" mode anchors on the 3D-UMAP layout
-  // (so x, y, z all come from the same 3-component run). The active
-  // dataset below pivots on this.
+  // Independent toggles: `view` picks the layout (2-D UMAP vs 3-D UMAP
+  // run); `colorMode` picks the channel encoded as dot colour. PCs and
+  // genre apply to either layout — the third UMAP axis lives in the
+  // 3-D scene's vertical position, so we don't surface it as a colour
+  // channel (would be redundant with the spatial axis it already is).
+  const [view, setView] = useState<ViewMode>("2d");
   const [colorMode, setColorMode] = useState<ColorMode>("genre");
 
   // Two parallel queries — one per layout. Both fetched eagerly so the
-  // UMAP-z toggle is instantaneous after the initial load. TanStack
-  // Query caches each independently by its queryKey.
+  // view toggle is instantaneous after the initial load. TanStack Query
+  // caches each independently by its queryKey.
   const data2dQ = useQuery({
     queryKey: ["diag", "latent_space", "prefer:2d"],
     queryFn: () => fetchRecommendLatentSpace({ prefer: "2d" }),
@@ -135,19 +142,18 @@ export function LatentSpace() {
     refetchInterval: 30_000,
   });
 
-  // Active dataset: 3D run drives the canvas only when the user picks
-  // the "UMAP z" colour mode. Every other colour mode renders against
-  // the 2D-UMAP layout so PC/genre intuitions stay anchored.
-  const data = colorMode === "umap_z" ? data3dQ.data : data2dQ.data;
-  const isLoading = colorMode === "umap_z" ? data3dQ.isLoading : data2dQ.isLoading;
-  const error = colorMode === "umap_z" ? data3dQ.error : data2dQ.error;
+  // Active dataset follows the view toggle. The 3-D run drives the
+  // 3-D scene; the 2-D run drives the canvas scatter. PCs are present
+  // in both (PCA on the same 512-D embedding space) so the colour
+  // picker can offer them on either layout.
+  const data = view === "3d" ? data3dQ.data : data2dQ.data;
+  const isLoading = view === "3d" ? data3dQ.isLoading : data2dQ.isLoading;
+  const error = view === "3d" ? data3dQ.error : data2dQ.error;
 
-  // The colour-mode picker needs to know whether UMAP-z is available
-  // *across both queries* — disabling the option until the 3D run's
-  // data lands. We feed it the 3D points so its `points.some(p.z!==null)`
-  // check sees the right dataset.
-  const colorModePoints = data2dQ.data?.points ?? [];
-  const hasUmapZ = (data3dQ.data?.points ?? []).some((p) => p.z !== null);
+  // The colour picker disables a PC option that the active dataset
+  // doesn't populate, so it needs the active points.
+  const colorModePoints = data?.points ?? [];
+  const canSwitchTo3d = (data3dQ.data?.points ?? []).some((p) => p.z !== null);
 
   // Only fetch sessions+events once the user actually picks one (or
   // "all"). Listing sessions without events is cheap; including events
@@ -190,40 +196,70 @@ export function LatentSpace() {
               loading={wantSessions && sessionsQ.isFetching}
               onChange={setSessionPick}
             />
+            <ViewToggle
+              view={view}
+              canSwitchTo3d={canSwitchTo3d}
+              onChange={setView}
+            />
             <ColorModePicker
               value={colorMode}
               points={colorModePoints}
-              umapZAvailable={hasUmapZ}
               onChange={setColorMode}
             />
             {data.points.length === 0 ? (
               <EmptyHint
                 hasProjection={data.proj_version !== null}
                 modelVersion={data.model_version}
-                isUmapZ={colorMode === "umap_z"}
+                is3dView={view === "3d"}
               />
-            ) : colorMode === "umap_z" ? (
-              // The 3-D run drives the camera, layout, and colour. The
-              // Suspense fallback shows briefly the first time the user
-              // picks UMAP-z (three.js + the scene module load on demand).
-              <Suspense fallback={<p className="text-sm">loading 3-D view…</p>}>
-                <LatentSpace3D
-                  points={data.points}
+            ) : (
+              // Outer row hosts the scatter / 3-D scene on the left and
+              // the session-tracks panel on the right. Both children flex
+              // so the canvas reclaims the column when no sessions are
+              // selected. `flexWrap` lets the panel drop below the scene
+              // on narrow viewports instead of squeezing the scatter.
+              <div
+                style={{
+                  display: "flex",
+                  gap: "var(--space-4)",
+                  alignItems: "flex-start",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                  {view === "3d" ? (
+                    // The 3-D run drives the camera and layout; colour
+                    // follows the picker independently. Suspense covers
+                    // the on-demand load of three.js + the scene module.
+                    <Suspense fallback={<p className="text-sm">loading 3-D view…</p>}>
+                      <LatentSpace3D
+                        points={data.points}
+                        colorMode={colorMode}
+                        sessions={selectSessionsForOverlay(
+                          sessionPick,
+                          sessionsQ.data?.items ?? []
+                        )}
+                      />
+                    </Suspense>
+                  ) : (
+                    <ScatterCanvas
+                      points={data.points}
+                      colorMode={colorMode}
+                      sessions={selectSessionsForOverlay(
+                        sessionPick,
+                        sessionsQ.data?.items ?? []
+                      )}
+                    />
+                  )}
+                </div>
+                <SessionTracksPanel
                   sessions={selectSessionsForOverlay(
                     sessionPick,
                     sessionsQ.data?.items ?? []
                   )}
+                  points={data.points}
                 />
-              </Suspense>
-            ) : (
-              <ScatterCanvas
-                points={data.points}
-                colorMode={colorMode}
-                sessions={selectSessionsForOverlay(
-                  sessionPick,
-                  sessionsQ.data?.items ?? []
-                )}
-              />
+              </div>
             )}
           </>
         )}
@@ -246,19 +282,95 @@ function selectSessionsForOverlay(
   return sessions.filter((s) => s.session_id === pick);
 }
 
+/// Independent 2-D / 3-D layout toggle. Disabled into the 3-D position
+/// until the 3-D reducer run lands in the cache — otherwise picking
+/// "3-D" would just show the empty-state hint and look broken.
+function ViewToggle({
+  view,
+  canSwitchTo3d,
+  onChange,
+}: {
+  view: ViewMode;
+  canSwitchTo3d: boolean;
+  onChange: (v: ViewMode) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-3)",
+        alignItems: "center",
+        marginBottom: "var(--space-3)",
+        flexWrap: "wrap",
+      }}
+    >
+      <fieldset
+        style={{
+          display: "inline-flex",
+          gap: "var(--space-2)",
+          alignItems: "center",
+          border: 0,
+          padding: 0,
+          margin: 0,
+        }}
+      >
+        <legend
+          className="text-sm"
+          style={{ float: "left", marginRight: "var(--space-2)" }}
+        >
+          view
+        </legend>
+        <label
+          className="text-sm"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          <input
+            type="radio"
+            name="latent-view"
+            value="2d"
+            checked={view === "2d"}
+            onChange={() => onChange("2d")}
+          />
+          2-D
+        </label>
+        <label
+          className="text-sm"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            color: canSwitchTo3d ? undefined : "var(--muted)",
+          }}
+          title={
+            canSwitchTo3d
+              ? "Drag to rotate, scroll to zoom"
+              : "No 3-D projection has been written yet. Run the reducer with --n-components 3."
+          }
+        >
+          <input
+            type="radio"
+            name="latent-view"
+            value="3d"
+            checked={view === "3d"}
+            // Allow flipping back to 2-D even if 3-D's disabled; only
+            // gate the "enter 3-D" direction.
+            disabled={!canSwitchTo3d && view !== "3d"}
+            onChange={() => onChange("3d")}
+          />
+          3-D
+        </label>
+      </fieldset>
+    </div>
+  );
+}
+
 function ColorModePicker({
   value,
   points,
-  umapZAvailable,
   onChange,
 }: {
   value: ColorMode;
   points: readonly LatentSpacePoint[];
-  /** Whether the 3-D UMAP companion has loaded with z values
-   *  populated. Decoupled from `points` because the picker is fed the
-   *  2-D points (which never carry z), while UMAP-z availability is
-   *  determined by a separate query against the 3-D run. */
-  umapZAvailable: boolean;
   onChange: (v: ColorMode) => void;
 }) {
   // A PC mode without any rows that have that PC is misleading — the
@@ -270,7 +382,6 @@ function ColorModePicker({
     pc2: points.some((p) => p.pc2 !== null),
     pc3: points.some((p) => p.pc3 !== null),
     pc4: points.some((p) => p.pc4 !== null),
-    umap_z: umapZAvailable,
   };
   return (
     <div
@@ -288,28 +399,22 @@ function ColorModePicker({
           <strong>Different reductions of the same 512-D CLAP space.</strong>
           <ul style={{ margin: "6px 0 0 0", paddingLeft: 18 }}>
             <li>
-              <strong>x, y</strong> — UMAP (non-linear, locally faithful).
-              Tight clusters mean "these sound similar."
+              <strong>genre</strong> — Subsonic-reported genre tag,
+              bucketed into the top {TOP_GENRE_BUCKETS} + "Other" +
+              "Unknown". Useful for a sanity check: do dots that
+              <em>sound</em> similar share a tag?
             </li>
             <li>
-              <strong>colour → PCn</strong> — the n-th PCA component on
-              the original embedding. Linear, ordered by variance,
-              orthogonal to PC1…PC(n-1). Rendered on top of the 2-D
-              UMAP layout.
-            </li>
-            <li>
-              <strong>colour → UMAP z</strong> — switches the canvas to
-              a real 3-D point cloud (independent UMAP run with
-              proj_version suffix <code>-d3</code>). Drag to rotate,
-              scroll to zoom; colour is the third axis. Only enabled
-              when a 3-D run exists.
+              <strong>PCn</strong> — the n-th PCA component on the
+              original 512-D embedding. Linear, ordered by variance,
+              orthogonal to PC1…PC(n-1). Available on both layouts.
             </li>
           </ul>
           <div style={{ marginTop: 6 }}>
-            Picking the colour mode also picks the layout: PC / genre
-            modes use the 2-D reduction, "UMAP z" uses the 3-D one.
-            They're independent fits, so dot positions <em>will</em>{" "}
-            move when you toggle between them.
+            Layout (2-D vs 3-D) is picked separately by the{" "}
+            <strong>view</strong> toggle. The two runs are independent
+            UMAP fits, so dot positions <em>will</em> move when you
+            switch layouts; PCs and genre stay the same per track.
           </div>
           <div style={{ marginTop: 6 }}>
             The colour axis is <em>not</em> geometrically aligned with
@@ -408,11 +513,11 @@ function SessionPicker({
 }
 
 /// Read-only badge replacing the old proj_version dropdown. The active
-/// projection now follows the colour-mode selector (2-D for most modes,
-/// 3-D when "UMAP z" is picked) — exposing a manual proj_version
-/// dropdown alongside that logic invited the bug the user just hit
-/// ("why are the dots in the same place?"). We still echo the embedding
-/// model since it's useful context for the page.
+/// projection now follows the view toggle (2-D run for 2-D view, 3-D
+/// run for 3-D view) — exposing a manual proj_version dropdown
+/// alongside that logic invited a "why are the dots in the same place?"
+/// confusion. We still echo the embedding model since it's useful
+/// context for the page.
 function ModelHint({ modelVersion }: { modelVersion: string }) {
   return (
     <div
@@ -437,19 +542,19 @@ function ModelHint({ modelVersion }: { modelVersion: string }) {
 function EmptyHint({
   hasProjection,
   modelVersion,
-  isUmapZ,
+  is3dView,
 }: {
   hasProjection: boolean;
   modelVersion: string;
-  /** True when the user is on the UMAP-z colour mode — points being
-   *  empty means the 3-D reducer hasn't run, not the 2-D one. */
-  isUmapZ: boolean;
+  /** True when the user has flipped to the 3-D view — an empty points
+   *  list then means the 3-D reducer hasn't run, not the 2-D one. */
+  is3dView: boolean;
 }) {
   if (!hasProjection) {
-    const components = isUmapZ ? " --n-components 3" : "";
+    const components = is3dView ? " --n-components 3" : "";
     return (
       <p className="text-sm" style={{ color: "var(--muted)" }}>
-        no {isUmapZ ? "3-D" : "2-D"} projection has been written yet for{" "}
+        no {is3dView ? "3-D" : "2-D"} projection has been written yet for{" "}
         <code>{modelVersion}</code>. Run{" "}
         <code>
           uv run --extra reduce python -m embedder.reduce --db &lt;path&gt; --model-version{" "}
@@ -910,144 +1015,6 @@ function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function Legend({
-  buckets,
-  hidden,
-  onToggle,
-}: {
-  buckets: GenreBucket[];
-  hidden: Set<string>;
-  onToggle: (label: string) => void;
-}) {
-  if (buckets.length === 0) return null;
-  return (
-    <ul
-      style={{
-        listStyle: "none",
-        padding: 0,
-        margin: 0,
-        minWidth: 160,
-        fontSize: "0.85em",
-      }}
-    >
-      {buckets.map((b) => {
-        const isHidden = hidden.has(b.label);
-        return (
-          <li
-            key={b.label}
-            // Buttons-in-a-list would be more semantic; the visual is a
-            // colour swatch + label row so a plain <li> with role=button
-            // gives keyboard users the right affordance without breaking
-            // the layout.
-            role="button"
-            tabIndex={0}
-            onClick={() => onToggle(b.label)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onToggle(b.label);
-              }
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "var(--space-2, 8px)",
-              padding: "2px 4px",
-              borderRadius: "var(--radius-1, 2px)",
-              cursor: "pointer",
-              opacity: isHidden ? 0.4 : 1,
-              userSelect: "none",
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                background: b.color,
-                flexShrink: 0,
-                // Strike-through when hidden gives a visual cue beyond opacity.
-                outline: isHidden ? "1px solid var(--muted)" : "none",
-              }}
-            />
-            <span
-              style={{
-                textDecoration: isHidden ? "line-through" : "none",
-                color: isHidden ? "var(--muted)" : "inherit",
-                flex: 1,
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title={b.label}
-            >
-              {b.label}
-            </span>
-            <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
-              {b.count}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function PcGradientLegend({
-  mode,
-  range,
-}: {
-  mode: ColorMode;
-  range: { min: number; max: number } | null;
-}) {
-  if (mode === "genre") return null;
-  // Pretty-print: PC modes uppercase to "PC1"; the UMAP-z mode reads
-  // as "UMAP z" since underscore-uppercase would be ugly in the chart.
-  const label = mode === "umap_z" ? "UMAP z" : mode.toUpperCase();
-  if (!range) {
-    return (
-      <div style={{ minWidth: 160, fontSize: "0.85em" }}>
-        <div style={{ color: "var(--muted)" }}>
-          {label} not yet populated for this projection. Re-run the reducer
-          to compute it.
-        </div>
-      </div>
-    );
-  }
-  // Build the CSS gradient from the same 5 stops the viridis() helper
-  // uses, so the legend matches the canvas exactly.
-  const stops = [0, 0.25, 0.5, 0.75, 1].map((t) => viridis(t)).join(", ");
-  return (
-    <div style={{ minWidth: 160, fontSize: "0.85em" }}>
-      <div style={{ color: "var(--muted)", marginBottom: 4 }}>
-        {label} (continuous)
-      </div>
-      <div
-        aria-hidden="true"
-        style={{
-          height: 12,
-          background: `linear-gradient(to right, ${stops})`,
-          borderRadius: "var(--radius-1, 2px)",
-          marginBottom: 4,
-        }}
-      />
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          color: "var(--muted)",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        <span>{range.min.toFixed(2)}</span>
-        <span>{range.max.toFixed(2)}</span>
-      </div>
-    </div>
-  );
-}
-
 function HoverTooltip({
   point,
   bounds,
@@ -1200,5 +1167,244 @@ function InfoTooltip({ children }: { children: React.ReactNode }) {
         </div>
       )}
     </span>
+  );
+}
+
+/// Narrow right-side panel listing the tracks of each selected session.
+///
+/// Cover thumbnails reuse the `Cover` component, which already handles
+/// missing-art fallbacks. We pass `track_id` as the Subsonic cover-art
+/// id — Navidrome accepts a track id directly; if it doesn't have art
+/// for that id, the gateway falls through to a placeholder anyway.
+///
+/// Clicking a row plays the track. Failures are logged and the row
+/// returns to its idle state.
+function SessionTracksPanel({
+  sessions,
+  points,
+}: {
+  sessions: readonly SessionItem[];
+  points: readonly LatentSpacePoint[];
+}) {
+  // Build the (track_id → metadata) lookup once. Sessions can reference
+  // tracks not present in this projection — rows for those render with
+  // just the id, no cover/title.
+  const byTrack = useMemo<Map<string, TrackMetadata>>(() => {
+    const m = new Map<string, TrackMetadata>();
+    for (const p of points) {
+      m.set(p.track_id, { title: p.title, artist: p.artist, album: p.album });
+    }
+    return m;
+  }, [points]);
+
+  const totalTracks = useMemo(
+    () => sessions.reduce((acc, s) => acc + (s.events?.length ?? 0), 0),
+    [sessions]
+  );
+
+  if (sessions.length === 0) return null;
+
+  return (
+    <aside
+      style={{
+        // Narrow column — wide enough for cover + two stacked lines +
+        // distance pill, narrow enough to leave the scatter most of the
+        // width. flex: 0 0 auto keeps it from competing with the canvas
+        // for stretch space.
+        flex: "0 0 320px",
+        maxWidth: 320,
+        // Match the canvas backdrop so the panel reads as part of the
+        // same surface, not a floating card.
+        background: "var(--surface-2, #0e1116)",
+        borderRadius: "var(--radius-2, 4px)",
+        border: "1px solid var(--border, #2a2f3a)",
+        padding: "var(--space-3, 12px)",
+        // Cap height to the viewport so long sessions scroll inside the
+        // panel rather than pushing the page down indefinitely.
+        maxHeight: "calc(100vh - 220px)",
+        overflowY: "auto",
+        fontSize: "0.85em",
+      }}
+    >
+      <div
+        style={{
+          color: "var(--muted)",
+          marginBottom: "var(--space-3, 12px)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {sessions.length} session{sessions.length === 1 ? "" : "s"} ·{" "}
+        {totalTracks} track{totalTracks === 1 ? "" : "s"}
+      </div>
+      {sessions.map((s) => (
+        <SessionGroup
+          key={s.session_id}
+          session={s}
+          rows={buildSessionTrackRows(s.events ?? [], s.segments, byTrack)}
+        />
+      ))}
+    </aside>
+  );
+}
+
+/// One session block in the panel: coloured header (matching the
+/// scatter path hue) plus the ordered track list.
+function SessionGroup({
+  session,
+  rows,
+}: {
+  session: SessionItem;
+  rows: readonly SessionTrackRow[];
+}) {
+  const hue = sessionHue(session.session_id);
+  const accent = `hsl(${hue}deg 80% 65%)`;
+  const fmtTs = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  return (
+    <div style={{ marginBottom: "var(--space-3, 12px)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-2, 8px)",
+          marginBottom: 6,
+          paddingBottom: 4,
+          borderBottom: `1px solid ${accent}`,
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: "50%",
+            background: accent,
+            flexShrink: 0,
+          }}
+        />
+        <span style={{ color: "var(--muted)", flex: 1, minWidth: 0 }}>
+          {fmtTs(session.started_ms)}
+        </span>
+        <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+          {rows.length}
+        </span>
+      </div>
+      <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+        {rows.map((row, i) => (
+          <SessionTrackRowView key={`${session.session_id}-${i}-${row.track_id}`} row={row} />
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/// A single track row: cover, title/artist stack, and a right-aligned
+/// "distance to previous" label. Click → play.
+function SessionTrackRowView({ row }: { row: SessionTrackRow }) {
+  const playback = usePlayback();
+  const [busy, setBusy] = useState(false);
+  const onPlay = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const track = await getSong(row.track_id);
+      playback.playSingle(track);
+    } catch (err) {
+      console.error("session_panel: getSong failed", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  // "—" for the first row (no predecessor) and for rows where the
+  // segment's cosine_distance is null (embedding missing). Both are
+  // ambiguous in the UI by design; the dashed line in the scatter is
+  // the user-visible signal for "embedding missing".
+  const distLabel =
+    row.prev_distance === null ? "—" : row.prev_distance.toFixed(3);
+  const seed = row.title ?? row.artist ?? row.track_id;
+  return (
+    <li
+      role="button"
+      tabIndex={0}
+      onClick={onPlay}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onPlay();
+        }
+      }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-2, 8px)",
+        padding: "4px 2px",
+        cursor: busy ? "wait" : "pointer",
+        opacity: busy ? 0.6 : 1,
+        userSelect: "none",
+      }}
+    >
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          flexShrink: 0,
+          borderRadius: "var(--radius-1, 2px)",
+          overflow: "hidden",
+        }}
+      >
+        <Cover
+          coverArt={row.track_id}
+          seed={seed}
+          size={72}
+          alt={row.title ?? row.track_id}
+        />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          title={row.title ?? row.track_id}
+          style={{
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {row.title ?? <code>{row.track_id}</code>}
+        </div>
+        {row.artist && (
+          <div
+            title={row.artist}
+            style={{
+              color: "var(--muted)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              fontSize: "0.92em",
+            }}
+          >
+            {row.artist}
+          </div>
+        )}
+      </div>
+      <span
+        title={
+          row.prev_distance === null
+            ? "no preceding track (or embedding missing)"
+            : "cosine distance to previous track"
+        }
+        style={{
+          color: "var(--muted)",
+          fontVariantNumeric: "tabular-nums",
+          fontSize: "0.85em",
+          flexShrink: 0,
+        }}
+      >
+        {distLabel}
+      </span>
+    </li>
   );
 }

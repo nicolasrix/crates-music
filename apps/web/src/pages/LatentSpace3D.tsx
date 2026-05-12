@@ -1,7 +1,7 @@
 // 3-D scatter view for the latent-space page. Rendered with
-// react-three-fiber when colourMode is "umap_z" so the third UMAP axis
-// becomes a real spatial dimension instead of a 2-D-with-z-as-colour
-// flatten. OrbitControls give drag-to-rotate, scroll-to-zoom,
+// react-three-fiber when the user flips the view toggle to 3-D so the
+// third UMAP axis becomes a real spatial dimension instead of a colour
+// stand-in. OrbitControls give drag-to-rotate, scroll-to-zoom,
 // right-drag-to-pan.
 //
 // Performance shape: one buffer-geometry with two attributes (position
@@ -27,13 +27,26 @@ import {
 import { usePlayback } from "../sync/usePlayback";
 
 import {
+  bucketByGenre,
+  colorChannelValue,
   compute3dBounds,
+  genreColorByTrackId,
   normalizeInto01,
   normalizeTo3dCube,
   rangeOfFiniteValues,
   sessionHue,
   viridis,
+  type ContinuousColorMode,
 } from "./latentSpace";
+import { Legend, PcGradientLegend } from "./LatentSpaceLegend";
+
+/// Same set the 2-D canvas accepts. The 3-D run's z lives in the
+/// vertical spatial axis — there is no separate "z as colour" mode.
+export type ColorMode3D = "genre" | ContinuousColorMode;
+
+// Cap on named-genre buckets, mirroring the 2-D canvas. Kept in sync so
+// hopping between views doesn't reshuffle the palette assignment.
+const TOP_GENRE_BUCKETS = 10;
 
 const POINT_SIZE = 0.04;
 
@@ -85,12 +98,17 @@ const CAMERA_DISTANCE = 2.5;
 export function LatentSpace3D({
   points,
   sessions = [],
+  colorMode = "genre",
 }: {
   points: readonly LatentSpacePoint[];
   /** Sessions the user has chosen to overlay (none by default). Each
    *  becomes a coloured polyline through its events' 3-D positions,
    *  with anchor + terminal markers. Empty array = no overlay. */
   sessions?: readonly SessionItem[];
+  /** Which channel drives dot colour. Matches the 2-D canvas's set —
+   *  genre, PC1–4. The third UMAP axis is the spatial vertical axis
+   *  here, not a colour channel. */
+  colorMode?: ColorMode3D;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
@@ -118,10 +136,40 @@ export function LatentSpace3D({
     return () => ro.disconnect();
   }, []);
 
-  // Pre-compute the float32 position / colour arrays. Recomputed only
-  // when points change — orbit / hover should never trigger a re-upload
-  // (positions are static for a given dataset).
-  const { positions, colors } = useMemo(() => buildBuffers(points), [points]);
+  // Bucket-by-genre once per dataset. Reused for both the colour buffer
+  // (when colorMode === "genre") and the side legend. Continuous modes
+  // ignore it — we keep the memo unconditional so dropdown switches
+  // don't re-bucket.
+  const bucketing = useMemo(
+    () =>
+      bucketByGenre(
+        points.map((p) => ({
+          track_id: p.track_id,
+          x: p.x,
+          y: p.y,
+          genre: p.genre,
+        })),
+        TOP_GENRE_BUCKETS,
+      ),
+    [points],
+  );
+  const genreColors = useMemo(() => genreColorByTrackId(bucketing), [bucketing]);
+  // Min/max of the active continuous channel. `null` for "genre" mode
+  // (legend renders a categorical list instead of a gradient strip).
+  const pcRange = useMemo(() => {
+    if (colorMode === "genre") return null;
+    return rangeOfFiniteValues(
+      points.map((p) => colorChannelValue(p, colorMode)),
+    );
+  }, [points, colorMode]);
+
+  // Pre-compute the float32 position / colour arrays. Recomputed when
+  // points *or* colorMode change — switching modes re-uploads the
+  // colour buffer but reuses positions.
+  const { positions, colors } = useMemo(
+    () => buildBuffers(points, colorMode, genreColors, pcRange),
+    [points, colorMode, genreColors, pcRange],
+  );
 
   const hover = hoverIdx !== null ? points[hoverIdx] ?? null : null;
   const [debouncedHoverId, setDebouncedHoverId] = useState<string | null>(null);
@@ -222,6 +270,14 @@ export function LatentSpace3D({
         {points.length} tracks · drag to rotate · scroll to zoom · click to play
       </p>
       <div
+        style={{
+          display: "flex",
+          gap: "var(--space-3)",
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+        }}
+      >
+      <div
         ref={wrapRef}
         style={{ position: "relative", flex: "1 1 0", minWidth: 0 }}
       >
@@ -282,16 +338,34 @@ export function LatentSpace3D({
           />
         )}
       </div>
+      {colorMode === "genre" ? (
+        // Display-only — toggling buckets in 3-D would require
+        // re-uploading the colour buffer or moving points outside the
+        // visible frustum. Out of scope for the toggle work; revisit
+        // if the use case justifies the complexity.
+        <Legend buckets={bucketing.buckets} />
+      ) : (
+        <PcGradientLegend mode={colorMode} range={pcRange} />
+      )}
+      </div>
     </div>
   );
 }
 
 /// Build the position / colour Float32Arrays once per dataset. Position
-/// space is `[-1, 1]^3`; colour comes from a viridis sample on the
-/// normalised z. Points missing z or any of x/y are mapped to a neutral
-/// grey at the cube centre — they still draw so the count matches the
-/// header but they don't pollute the layout.
-function buildBuffers(points: readonly LatentSpacePoint[]): {
+/// space is `[-1, 1]^3`. Colour comes from the active `colorMode`:
+///   * "genre"   — bucketed palette via `genreColors` lookup.
+///   * "pc1..4"  — viridis sampled on the chosen PC value.
+///
+/// Points missing z or x/y are placed at the cube centre in neutral
+/// grey — they still draw so the count matches the header but they
+/// don't pollute the layout.
+function buildBuffers(
+  points: readonly LatentSpacePoint[],
+  colorMode: ColorMode3D,
+  genreColors: ReadonlyMap<string, string>,
+  pcRange: { min: number; max: number } | null,
+): {
   positions: Float32Array;
   colors: Float32Array;
 } {
@@ -300,7 +374,6 @@ function buildBuffers(points: readonly LatentSpacePoint[]): {
       .filter((p) => p.z !== null)
       .map((p) => ({ track_id: p.track_id, x: p.x, y: p.y, z: p.z as number })),
   );
-  const zRange = rangeOfFiniteValues(points.map((p) => p.z));
   const positions = new Float32Array(points.length * 3);
   const colors = new Float32Array(points.length * 3);
   for (let i = 0; i < points.length; i++) {
@@ -318,14 +391,34 @@ function buildBuffers(points: readonly LatentSpacePoint[]): {
     positions[i * 3] = n.x;
     positions[i * 3 + 1] = n.y;
     positions[i * 3 + 2] = n.z;
-    const hex =
-      zRange === null ? "#888888" : viridis(normalizeInto01(p.z, zRange));
+    const hex = resolveColorHex(p, colorMode, genreColors, pcRange);
     const c = hexToLinearRgb(hex);
     colors[i * 3] = c.r;
     colors[i * 3 + 1] = c.g;
     colors[i * 3 + 2] = c.b;
   }
   return { positions, colors };
+}
+
+/// Per-point colour picker shared by every mode. Returns a hex string
+/// because `hexToLinearRgb` is the cheap parser already in use; we
+/// keep that boundary so the helper stays trivially testable as a
+/// string-in / string-out function.
+function resolveColorHex(
+  point: LatentSpacePoint,
+  mode: ColorMode3D,
+  genreColors: ReadonlyMap<string, string>,
+  pcRange: { min: number; max: number } | null,
+): string {
+  if (mode === "genre") {
+    // Fallback for tracks not present in the bucketing (e.g. dropped
+    // from a filter pass). UNKNOWN bucket colour is also #3a3f4c — close
+    // enough that the eye reads it as a single "no info" cluster.
+    return genreColors.get(point.track_id) ?? "#3a3f4c";
+  }
+  const v = colorChannelValue(point, mode);
+  if (v === null || pcRange === null) return "#888888";
+  return viridis(normalizeInto01(v, pcRange));
 }
 
 function PointsCloud({

@@ -394,7 +394,7 @@ export function pickPointsByIds<P extends { track_id: string }>(
 /// Continuous-channel modes the "colour by" dropdown can map to a
 /// viridis gradient. Excludes "genre" (which uses the bucketed palette
 /// pathway) so callers can statically distinguish the two regimes.
-export type ContinuousColorMode = "pc1" | "pc2" | "pc3" | "pc4" | "umap_z";
+export type ContinuousColorMode = "pc1" | "pc2" | "pc3" | "pc4";
 
 /// Subset of `LatentSpacePoint` the colour-channel readers care about.
 /// Keeps the helper independent of the API module so it stays in the
@@ -404,7 +404,6 @@ export interface ContinuousChannelPoint {
   pc2: number | null;
   pc3: number | null;
   pc4: number | null;
-  z: number | null;
 }
 
 /// Read the value of `mode` from `point`. `null` when the projection
@@ -423,9 +422,81 @@ export function colorChannelValue(
       return point.pc3;
     case "pc4":
       return point.pc4;
-    case "umap_z":
-      return point.z;
   }
+}
+
+/// Invert `bucketByGenre`'s output into a track_id → bucket-colour
+/// lookup. Used by the 3-D scene where colour has to be resolved per
+/// point (one Float32Array slot per dot, all uploaded as a single
+/// buffer) rather than per bucket as the 2-D canvas does.
+///
+/// Returns an empty Map for the empty bucketing — callers should fall
+/// back to a neutral grey for unmapped tracks.
+export function genreColorByTrackId(
+  bucketing: GenreBucketingResult,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const bucket of bucketing.buckets) {
+    const slice = bucketing.pointsByLabel.get(bucket.label);
+    if (!slice) continue;
+    for (const p of slice) out.set(p.track_id, bucket.color);
+  }
+  return out;
+}
+
+/// Minimal track metadata the session-tracks panel needs. Sourced from
+/// the latent-space points (which already carry these fields) so the
+/// panel doesn't need to issue per-track `getSong` calls just to label
+/// rows. Album is included for the (eventual) tooltip / secondary line.
+export interface TrackMetadata {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+/// One row in the session-tracks panel. `prev_distance` is the cosine
+/// distance to the immediately preceding event in the same session.
+/// Two flavours of null:
+///   * Row 0 — there is no predecessor.
+///   * Row i>0 — the segment's distance was null (one of the tracks
+///     lacks a `done` embedding under the active model).
+/// The panel renders both the same way ("—"), but keeping them distinct
+/// in the data model means callers can surface "embedding missing" later
+/// without re-deriving the chain.
+export interface SessionTrackRow {
+  track_id: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  prev_distance: number | null;
+}
+
+/// Build the row data for a session's track panel.
+///
+/// `events` and `segments` come straight from the `SessionItem`
+/// returned by `fetchRecommendSessions({ includeEvents: true })`; the
+/// metadata map is keyed by `track_id` and typically built once per
+/// (sessions, points) change in the caller.
+export function buildSessionTrackRows(
+  events: readonly { track_id: string }[],
+  segments: readonly { cosine_distance: number | null }[] | undefined,
+  byTrack: ReadonlyMap<string, TrackMetadata>,
+): SessionTrackRow[] {
+  const rows: SessionTrackRow[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i]!;
+    const meta = byTrack.get(ev.track_id);
+    // i === 0 has no left segment; later rows look one to the left.
+    const seg = i === 0 ? null : (segments?.[i - 1] ?? null);
+    rows.push({
+      track_id: ev.track_id,
+      title: meta?.title ?? null,
+      artist: meta?.artist ?? null,
+      album: meta?.album ?? null,
+      prev_distance: seg ? seg.cosine_distance : null,
+    });
+  }
+  return rows;
 }
 
 /// Nearest scatter point to the cursor in *pixel space*, or null if no

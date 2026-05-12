@@ -8,6 +8,8 @@
 import { describe, expect, it } from "vitest";
 import {
   bucketByGenre,
+  buildSessionTrackRows,
+  genreColorByTrackId,
   colorChannelValue,
   compute3dBounds,
   computeBounds,
@@ -25,6 +27,8 @@ import {
   type ContinuousChannelPoint,
   type ScatterPoint,
   type ScatterPoint3D,
+  type SessionTrackRow,
+  type TrackMetadata,
 } from "./latentSpace";
 
 const pt = (track_id: string, x: number, y: number): ScatterPoint => ({
@@ -450,16 +454,14 @@ describe("pickPointsByIds", () => {
 
 describe("colorChannelValue", () => {
   // Single source of truth for the "colour by" dropdown: PCs map to
-  // their named fields; "umap_z" maps to z. Every continuous mode must
-  // return a number-or-null without falling through to undefined —
-  // otherwise the canvas would render `undefined` dots as the bottom
-  // of the gradient.
+  // their named fields. Every continuous mode must return number-or-
+  // null without falling through to undefined — otherwise the canvas
+  // would render `undefined` dots as the bottom of the gradient.
   const point: ContinuousChannelPoint = {
     pc1: 0.5,
     pc2: -0.5,
     pc3: 0.25,
     pc4: null,
-    z: 1.25,
   };
 
   it("reads each PC field by mode", () => {
@@ -469,22 +471,13 @@ describe("colorChannelValue", () => {
     expect(colorChannelValue(point, "pc4")).toBeNull();
   });
 
-  it("maps umap_z to the z field", () => {
-    // The whole point of the "UMAP z" mode: it's the 3D UMAP's third
-    // axis surfaced through colour. The naming must not silently slip
-    // back to a PC field.
-    expect(colorChannelValue(point, "umap_z")).toBe(1.25);
-  });
-
   it("returns null for a point with no value in the chosen channel", () => {
     const empty: ContinuousChannelPoint = {
       pc1: null,
       pc2: null,
       pc3: null,
       pc4: null,
-      z: null,
     };
-    expect(colorChannelValue(empty, "umap_z")).toBeNull();
     expect(colorChannelValue(empty, "pc1")).toBeNull();
   });
 });
@@ -583,5 +576,148 @@ describe("normalizeTo3dCube", () => {
       y: 0,
       z: 0,
     });
+  });
+});
+
+describe("genreColorByTrackId", () => {
+  const ptg = (id: string, genre: string | null) => ({
+    track_id: id,
+    x: 0,
+    y: 0,
+    genre,
+  });
+
+  it("returns an empty map for an empty bucketing", () => {
+    expect(genreColorByTrackId(bucketByGenre([], 10)).size).toBe(0);
+  });
+
+  it("assigns each tracked point the colour of its bucket", () => {
+    // Two-genre dataset: every "rock" track gets the rock bucket's
+    // colour, every "jazz" track gets the jazz bucket's colour. The
+    // map should contain one entry per input point.
+    const bucketing = bucketByGenre(
+      [ptg("a", "rock"), ptg("b", "rock"), ptg("c", "jazz")],
+      10,
+    );
+    const map = genreColorByTrackId(bucketing);
+    expect(map.size).toBe(3);
+    expect(map.get("a")).toBe(map.get("b"));
+    expect(map.get("a")).not.toBe(map.get("c"));
+  });
+
+  it("collapses tail-genre tracks into the OTHER bucket colour", () => {
+    // topN=1 forces every non-leader genre into OTHER. Both "jazz"
+    // and "metal" tracks should share the OTHER colour even though
+    // they don't share a genre.
+    const bucketing = bucketByGenre(
+      [
+        ptg("r1", "rock"),
+        ptg("r2", "rock"),
+        ptg("j", "jazz"),
+        ptg("m", "metal"),
+      ],
+      1,
+    );
+    const map = genreColorByTrackId(bucketing);
+    const jazzColor = map.get("j");
+    const metalColor = map.get("m");
+    expect(jazzColor).toBeDefined();
+    expect(jazzColor).toBe(metalColor);
+    expect(jazzColor).not.toBe(map.get("r1"));
+  });
+
+  it("places null-genre tracks in the UNKNOWN bucket colour", () => {
+    // Genre=null is a distinct bucket from OTHER (it's "we don't know
+    // the genre", not "this is a rare named genre"). Track should
+    // resolve to a colour different from any named bucket.
+    const bucketing = bucketByGenre([ptg("a", "rock"), ptg("u", null)], 10);
+    const map = genreColorByTrackId(bucketing);
+    expect(map.get("u")).toBeDefined();
+    expect(map.get("u")).not.toBe(map.get("a"));
+  });
+});
+
+describe("buildSessionTrackRows", () => {
+  const meta = (
+    title: string | null,
+    artist: string | null,
+    album: string | null = null,
+  ): TrackMetadata => ({ title, artist, album });
+
+  it("returns the empty array when the session has no events", () => {
+    expect(buildSessionTrackRows([], [], new Map())).toEqual([]);
+  });
+
+  it("returns a single row with null prev_distance for a one-event session", () => {
+    // First (and only) event has no left segment — prev_distance is null
+    // because there *is* no previous track, not because of a missing
+    // embedding. Caller renders "—" rather than a distance.
+    const rows = buildSessionTrackRows(
+      [{ track_id: "t1" }],
+      [],
+      new Map([["t1", meta("Track 1", "Artist 1")]]),
+    );
+    expect(rows).toEqual<SessionTrackRow[]>([
+      { track_id: "t1", title: "Track 1", artist: "Artist 1", album: null, prev_distance: null },
+    ]);
+  });
+
+  it("pairs each non-first event with the cosine distance to its predecessor", () => {
+    // segments[i] is between events[i] and events[i+1]; so row[i+1].prev_distance
+    // = segments[i].cosine_distance. The first row stays null.
+    const rows = buildSessionTrackRows(
+      [{ track_id: "a" }, { track_id: "b" }, { track_id: "c" }],
+      [{ cosine_distance: 0.12 }, { cosine_distance: 0.34 }],
+      new Map([
+        ["a", meta("A", "X")],
+        ["b", meta("B", "Y")],
+        ["c", meta("C", "Z")],
+      ]),
+    );
+    expect(rows.map((r) => r.prev_distance)).toEqual([null, 0.12, 0.34]);
+  });
+
+  it("preserves the difference between 'first event' and 'embedding missing'", () => {
+    // Row 0: prev_distance null because no previous track.
+    // Row 1: prev_distance null because the segment's distance is null
+    //   (one of the tracks lacks a `done` embedding). Both render the
+    //   same in the panel; the distinction matters if a caller ever
+    //   wants to surface "embedding missing" separately.
+    const rows = buildSessionTrackRows(
+      [{ track_id: "a" }, { track_id: "b" }],
+      [{ cosine_distance: null }],
+      new Map([
+        ["a", meta("A", "X")],
+        ["b", meta("B", "Y")],
+      ]),
+    );
+    expect(rows[0]!.prev_distance).toBeNull();
+    expect(rows[1]!.prev_distance).toBeNull();
+  });
+
+  it("falls back to null fields when a track has no metadata in the map", () => {
+    // Sessions reference track_ids that may not have a projection point
+    // yet (e.g. ingest still in flight). Render the row anyway so the
+    // session structure is visible, and let the UI fall back to the id.
+    const rows = buildSessionTrackRows(
+      [{ track_id: "missing" }],
+      [],
+      new Map(),
+    );
+    expect(rows).toEqual<SessionTrackRow[]>([
+      { track_id: "missing", title: null, artist: null, album: null, prev_distance: null },
+    ]);
+  });
+
+  it("treats a missing segments array as a fully-null distance chain", () => {
+    // `includeEvents=true` always sends segments in the response, but
+    // making the helper tolerate `undefined` keeps the call-site free
+    // of "segments ?? []" boilerplate.
+    const rows = buildSessionTrackRows(
+      [{ track_id: "a" }, { track_id: "b" }],
+      undefined,
+      new Map(),
+    );
+    expect(rows.map((r) => r.prev_distance)).toEqual([null, null]);
   });
 });

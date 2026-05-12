@@ -282,9 +282,9 @@ export interface LatentSpacePoint {
   pc3: number | null;
   pc4: number | null;
   /** Third UMAP axis from an `n_components=3` reducer run (migration
-   *  0010). Null on 2D projections. Used by the "colour by → UMAP z"
-   *  mode — a true UMAP-discovered axis, in contrast to the PCA
-   *  components which are linear combinations of the embedding dims. */
+   *  0010). Null on 2-D projections. Drives the vertical spatial axis
+   *  in the 3-D scene; not exposed as a colour channel since spatial
+   *  position already encodes it. */
   z: number | null;
 }
 
