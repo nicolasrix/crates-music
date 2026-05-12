@@ -31,6 +31,18 @@ pub struct Projection2D {
     pub track_id: String,
     pub x: f64,
     pub y: f64,
+    /// PCA components on the original embedding space, computed by the
+    /// reducer alongside `(x, y)` and tied to the same `proj_version`.
+    /// `None` for projections that predate migration 0009 or for
+    /// components past the dataset's natural rank (N < 4 or D < 4).
+    pub pc1: Option<f64>,
+    pub pc2: Option<f64>,
+    pub pc3: Option<f64>,
+    pub pc4: Option<f64>,
+    /// Third UMAP axis from an `n_components=3` reducer run (migration
+    /// 0010). `None` for 2D projections — populated only when the
+    /// `proj_version` string carries the `-d3` suffix.
+    pub z: Option<f64>,
 }
 
 /// One entry in the projection-version catalogue: which `proj_version`
@@ -58,7 +70,7 @@ impl ProjectionStore {
         model_version: &ModelVersion,
     ) -> Result<Vec<Projection2D>> {
         let rows = sqlx::query(
-            "SELECT track_id, x, y
+            "SELECT track_id, x, y, pc1, pc2, pc3, pc4, z
                FROM embedding_projection_2d
               WHERE proj_version = ? AND model_version = ?
               ORDER BY track_id",
@@ -74,6 +86,11 @@ impl ProjectionStore {
                 track_id: r.get::<String, _>("track_id"),
                 x: r.get::<f64, _>("x"),
                 y: r.get::<f64, _>("y"),
+                pc1: r.get::<Option<f64>, _>("pc1"),
+                pc2: r.get::<Option<f64>, _>("pc2"),
+                pc3: r.get::<Option<f64>, _>("pc3"),
+                pc4: r.get::<Option<f64>, _>("pc4"),
+                z: r.get::<Option<f64>, _>("z"),
             })
             .collect())
     }
@@ -174,8 +191,75 @@ mod tests {
                 track_id: "t1".into(),
                 x: 1.0,
                 y: 2.0,
+                pc1: None,
+                pc2: None,
+                pc3: None,
+                pc4: None,
+                z: None,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_reads_pca_columns_when_present() {
+        let (s, pool) = store().await;
+        sqlx::query(
+            "INSERT INTO embedding_projection_2d
+                 (track_id, model_version, proj_version, x, y, created_at_ms,
+                  pc1, pc2, pc3, pc4)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("t1")
+        .bind("m1")
+        .bind("pv1")
+        .bind(0.0)
+        .bind(0.0)
+        .bind(100)
+        .bind(0.5_f64)
+        .bind(-0.5_f64)
+        .bind(0.25_f64)
+        // pc4 is left null on purpose — a small-N dataset would land here.
+        .bind::<Option<f64>>(None)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pc1, Some(0.5));
+        assert_eq!(got[0].pc2, Some(-0.5));
+        assert_eq!(got[0].pc3, Some(0.25));
+        assert_eq!(got[0].pc4, None);
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_reads_z_when_present() {
+        let (s, pool) = store().await;
+        sqlx::query(
+            "INSERT INTO embedding_projection_2d
+                 (track_id, model_version, proj_version, x, y, created_at_ms, z)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("t1")
+        .bind("m1")
+        .bind("pv1")
+        .bind(0.0)
+        .bind(0.0)
+        .bind(100)
+        .bind(1.25_f64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].z, Some(1.25));
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_z_is_none_for_2d_projection() {
+        let (s, pool) = store().await;
+        insert_point(&pool, "t1", "m1", "pv1", 1.0, 2.0, 100).await;
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got[0].z, None);
     }
 
     #[tokio::test]

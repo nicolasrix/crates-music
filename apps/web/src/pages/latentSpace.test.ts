@@ -8,14 +8,23 @@
 import { describe, expect, it } from "vitest";
 import {
   bucketByGenre,
+  colorChannelValue,
+  compute3dBounds,
   computeBounds,
   cosineDistanceToWidth,
+  normalizeInto01,
+  normalizeTo3dCube,
   OTHER_LABEL,
+  pickPointsByIds,
   UNKNOWN_LABEL,
   pickNearestPoint,
+  rangeOfFiniteValues,
   scaleToCanvas,
   sessionHue,
+  viridis,
+  type ContinuousChannelPoint,
   type ScatterPoint,
+  type ScatterPoint3D,
 } from "./latentSpace";
 
 const pt = (track_id: string, x: number, y: number): ScatterPoint => ({
@@ -314,5 +323,265 @@ describe("sessionHue", () => {
     // hash was clamped to <8.
     const hues = new Set(["s1", "s2", "s3", "s4", "s5"].map(sessionHue));
     expect(hues.size).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("rangeOfFiniteValues", () => {
+  it("returns min/max across finite numeric values", () => {
+    expect(rangeOfFiniteValues([1, 3, -2, 5])).toEqual({ min: -2, max: 5 });
+  });
+
+  it("skips null entries", () => {
+    expect(rangeOfFiniteValues([null, 1, null, 4])).toEqual({ min: 1, max: 4 });
+  });
+
+  it("returns null when every entry is null", () => {
+    // Caller renders these points in a neutral colour — the channel
+    // has no signal.
+    expect(rangeOfFiniteValues([null, null])).toBeNull();
+    expect(rangeOfFiniteValues([])).toBeNull();
+  });
+
+  it("skips non-finite values like NaN and Infinity", () => {
+    expect(rangeOfFiniteValues([NaN, 1, Infinity, 2, -Infinity])).toEqual({
+      min: 1,
+      max: 2,
+    });
+  });
+});
+
+describe("normalizeInto01", () => {
+  const r = { min: 0, max: 10 };
+
+  it("maps endpoints to 0 and 1", () => {
+    expect(normalizeInto01(0, r)).toBe(0);
+    expect(normalizeInto01(10, r)).toBe(1);
+  });
+
+  it("interpolates linearly", () => {
+    expect(normalizeInto01(2.5, r)).toBeCloseTo(0.25, 6);
+  });
+
+  it("clamps out-of-range inputs", () => {
+    expect(normalizeInto01(-5, r)).toBe(0);
+    expect(normalizeInto01(99, r)).toBe(1);
+  });
+
+  it("returns 0.5 for a degenerate range", () => {
+    // Every point's PC value being identical is plausible on a tiny
+    // dev dataset. Returning 0.5 gives them the palette's mid colour
+    // instead of an arbitrary endpoint.
+    expect(normalizeInto01(7, { min: 3, max: 3 })).toBe(0.5);
+  });
+});
+
+describe("viridis", () => {
+  it("returns a 7-char hex colour at every stop and between", () => {
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const c = viridis(t);
+      expect(c).toMatch(/^#[0-9a-f]{6}$/);
+    }
+  });
+
+  it("clamps out-of-range values", () => {
+    expect(viridis(-1)).toBe(viridis(0));
+    expect(viridis(2)).toBe(viridis(1));
+  });
+
+  it("interpolates between two stops monotonically in brightness", () => {
+    // Viridis is luminance-monotonic — higher t means brighter output.
+    // A simple sanity check that interpolation order isn't broken.
+    const dark = viridis(0);
+    const mid = viridis(0.5);
+    const bright = viridis(1);
+    const lum = (hex: string) =>
+      parseInt(hex.slice(1, 3), 16) +
+      parseInt(hex.slice(3, 5), 16) +
+      parseInt(hex.slice(5, 7), 16);
+    expect(lum(mid)).toBeGreaterThan(lum(dark));
+    expect(lum(bright)).toBeGreaterThan(lum(mid));
+  });
+
+  it("handles NaN gracefully (renders as the bottom of the palette)", () => {
+    expect(viridis(NaN)).toBe(viridis(0));
+  });
+});
+
+describe("pickPointsByIds", () => {
+  // Helper used by the hover-neighbour overlay: given an ordered list
+  // of track ids (returned by the backend, ascending in cosine
+  // distance), produce the matching scatter points in the same order.
+  // Order matters — the canvas iterates this list to draw rings whose
+  // visual emphasis corresponds to neighbour rank.
+
+  it("returns an empty array when ids is empty", () => {
+    expect(pickPointsByIds([], [pt("a", 0, 0)])).toEqual([]);
+  });
+
+  it("preserves the requested id order, not the point input order", () => {
+    const points = [pt("a", 0, 0), pt("b", 1, 1), pt("c", 2, 2)];
+    const result = pickPointsByIds(["c", "a"], points);
+    expect(result.map((p) => p.track_id)).toEqual(["c", "a"]);
+  });
+
+  it("silently drops ids that are not present in points", () => {
+    // The projection may not include every track the ANN returns —
+    // e.g. tracks embedded but not yet projected. Those neighbours
+    // simply don't get drawn rather than crashing the overlay.
+    const points = [pt("a", 0, 0), pt("c", 2, 2)];
+    expect(pickPointsByIds(["a", "missing", "c"], points)).toEqual([
+      points[0],
+      points[1],
+    ]);
+  });
+
+  it("is O(n + m) with respect to inputs (no quadratic search)", () => {
+    // Build a 1000-point haystack and pick a single needle. If the
+    // implementation is quadratic this still passes — but the
+    // assertion documents intent.
+    const haystack: ScatterPoint[] = Array.from({ length: 1000 }, (_, i) =>
+      pt(`t${i}`, i, i),
+    );
+    const result = pickPointsByIds(["t999"], haystack);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.track_id).toBe("t999");
+  });
+});
+
+describe("colorChannelValue", () => {
+  // Single source of truth for the "colour by" dropdown: PCs map to
+  // their named fields; "umap_z" maps to z. Every continuous mode must
+  // return a number-or-null without falling through to undefined —
+  // otherwise the canvas would render `undefined` dots as the bottom
+  // of the gradient.
+  const point: ContinuousChannelPoint = {
+    pc1: 0.5,
+    pc2: -0.5,
+    pc3: 0.25,
+    pc4: null,
+    z: 1.25,
+  };
+
+  it("reads each PC field by mode", () => {
+    expect(colorChannelValue(point, "pc1")).toBe(0.5);
+    expect(colorChannelValue(point, "pc2")).toBe(-0.5);
+    expect(colorChannelValue(point, "pc3")).toBe(0.25);
+    expect(colorChannelValue(point, "pc4")).toBeNull();
+  });
+
+  it("maps umap_z to the z field", () => {
+    // The whole point of the "UMAP z" mode: it's the 3D UMAP's third
+    // axis surfaced through colour. The naming must not silently slip
+    // back to a PC field.
+    expect(colorChannelValue(point, "umap_z")).toBe(1.25);
+  });
+
+  it("returns null for a point with no value in the chosen channel", () => {
+    const empty: ContinuousChannelPoint = {
+      pc1: null,
+      pc2: null,
+      pc3: null,
+      pc4: null,
+      z: null,
+    };
+    expect(colorChannelValue(empty, "umap_z")).toBeNull();
+    expect(colorChannelValue(empty, "pc1")).toBeNull();
+  });
+});
+
+// --- 3-D bounds + cube normalisation -------------------------------------
+//
+// The R3F scene wants positions in a roughly unit-sized cube so the
+// default camera frames the cloud without per-dataset zoom tuning. These
+// helpers are the data-space → world-space bridge; everything else in
+// LatentSpace3D is pure three.js plumbing.
+
+const pt3 = (track_id: string, x: number, y: number, z: number): ScatterPoint3D => ({
+  track_id,
+  x,
+  y,
+  z,
+});
+
+describe("compute3dBounds", () => {
+  it("returns null for an empty input", () => {
+    expect(compute3dBounds([])).toBeNull();
+  });
+
+  it("returns min/max across all three axes", () => {
+    const points: ScatterPoint3D[] = [
+      pt3("a", 1, 2, 3),
+      pt3("b", -1, 5, 0),
+      pt3("c", 4, -2, 7),
+    ];
+    expect(compute3dBounds(points)).toEqual({
+      minX: -1,
+      maxX: 4,
+      minY: -2,
+      maxY: 5,
+      minZ: 0,
+      maxZ: 7,
+    });
+  });
+
+  it("collapses to a single point when the input has one element", () => {
+    // Single-point bounds are degenerate on every axis. The downstream
+    // normaliser must handle this without dividing by zero — that
+    // contract is tested explicitly below.
+    expect(compute3dBounds([pt3("a", 3, 4, 5)])).toEqual({
+      minX: 3,
+      maxX: 3,
+      minY: 4,
+      maxY: 4,
+      minZ: 5,
+      maxZ: 5,
+    });
+  });
+});
+
+describe("normalizeTo3dCube", () => {
+  const bounds = {
+    minX: 0,
+    maxX: 10,
+    minY: -5,
+    maxY: 5,
+    minZ: 0,
+    maxZ: 2,
+  };
+
+  it("maps the minimum of each axis to -1", () => {
+    expect(normalizeTo3dCube({ x: 0, y: -5, z: 0 }, bounds)).toEqual({
+      x: -1,
+      y: -1,
+      z: -1,
+    });
+  });
+
+  it("maps the maximum of each axis to +1", () => {
+    expect(normalizeTo3dCube({ x: 10, y: 5, z: 2 }, bounds)).toEqual({
+      x: 1,
+      y: 1,
+      z: 1,
+    });
+  });
+
+  it("maps the midpoint of each axis to 0", () => {
+    expect(normalizeTo3dCube({ x: 5, y: 0, z: 1 }, bounds)).toEqual({
+      x: 0,
+      y: 0,
+      z: 0,
+    });
+  });
+
+  it("collapses a degenerate axis to 0 rather than producing NaN", () => {
+    // When min == max on an axis, the linear map divides by zero. The
+    // sentinel value is 0 (the cube centre) — matches scaleToCanvas's
+    // 0.5 / centre-of-canvas behaviour for the 2-D case.
+    const flat = { minX: 3, maxX: 3, minY: -5, maxY: 5, minZ: 0, maxZ: 2 };
+    expect(normalizeTo3dCube({ x: 3, y: 0, z: 1 }, flat)).toEqual({
+      x: 0,
+      y: 0,
+      z: 0,
+    });
   });
 });

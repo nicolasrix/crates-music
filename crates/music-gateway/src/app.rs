@@ -87,6 +87,10 @@ pub fn build_router(state: AppState) -> Router {
             get(diagnostics_handlers::recommend_latent_space),
         )
         .route(
+            "/v1/diagnostics/recommend/latent_neighbours",
+            get(diagnostics_handlers::recommend_latent_neighbours),
+        )
+        .route(
             "/v1/diagnostics/recommend/sessions",
             get(diagnostics_handlers::recommend_sessions),
         )

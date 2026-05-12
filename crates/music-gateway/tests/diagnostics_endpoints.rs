@@ -966,10 +966,34 @@ async fn insert_projection_point(
     y: f64,
     created_at_ms: i64,
 ) {
+    insert_projection_point_with_pcs(
+        state,
+        track_id,
+        model_version,
+        proj_version,
+        x,
+        y,
+        created_at_ms,
+        [None, None, None, None],
+    )
+    .await;
+}
+
+async fn insert_projection_point_with_pcs(
+    state: &music_gateway::AppState,
+    track_id: &str,
+    model_version: &str,
+    proj_version: &str,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+    pcs: [Option<f64>; 4],
+) {
     sqlx::query(
         "INSERT INTO embedding_projection_2d
-             (track_id, model_version, proj_version, x, y, created_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?)",
+             (track_id, model_version, proj_version, x, y, created_at_ms,
+              pc1, pc2, pc3, pc4)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(track_id)
     .bind(model_version)
@@ -977,6 +1001,10 @@ async fn insert_projection_point(
     .bind(x)
     .bind(y)
     .bind(created_at_ms)
+    .bind(pcs[0])
+    .bind(pcs[1])
+    .bind(pcs[2])
+    .bind(pcs[3])
     .execute(state.embedding_store().pool())
     .await
     .unwrap();
@@ -1149,6 +1177,290 @@ async fn latent_space_joins_metadata_when_available() {
     assert!(points[1]["artist"].is_null());
     assert!(points[1]["album"].is_null());
     assert!(points[1]["genre"].is_null());
+}
+
+#[tokio::test]
+async fn latent_space_surfaces_pca_components_when_present() {
+    // PCA components are nullable, but when the reducer has written
+    // them they must flow through the endpoint as `pc1..pc4` numbers
+    // — the frontend's colour-by-PC mode reads them by name. A track
+    // with partial PCs (e.g. small dataset, only 2 PCs viable) keeps
+    // the rest null.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point_with_pcs(
+        &state,
+        "t1",
+        &model,
+        "pv1",
+        0.0,
+        0.0,
+        100,
+        [Some(0.5), Some(-0.5), Some(0.25), Some(-0.25)],
+    )
+    .await;
+    insert_projection_point_with_pcs(
+        &state,
+        "t2",
+        &model,
+        "pv1",
+        1.0,
+        1.0,
+        100,
+        [Some(1.5), Some(0.0), None, None],
+    )
+    .await;
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let points = json["points"].as_array().unwrap();
+    assert_eq!(points.len(), 2);
+    // SELECT orders by track_id, so t1 first.
+    assert_eq!(points[0]["pc1"], 0.5);
+    assert_eq!(points[0]["pc2"], -0.5);
+    assert_eq!(points[0]["pc3"], 0.25);
+    assert_eq!(points[0]["pc4"], -0.25);
+    assert_eq!(points[1]["pc1"], 1.5);
+    assert_eq!(points[1]["pc2"], 0.0);
+    assert!(points[1]["pc3"].is_null());
+    assert!(points[1]["pc4"].is_null());
+}
+
+#[tokio::test]
+async fn latent_space_pcs_are_null_when_reducer_did_not_write_them() {
+    // Backward-compat: rows from a pre-migration-0009 reducer still
+    // render correctly — the PC columns are simply null and the
+    // frontend's colour-by-PC dropdown grays out those options.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv-legacy", 0.0, 0.0, 100).await;
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pt = &json["points"].as_array().unwrap()[0];
+    for k in ["pc1", "pc2", "pc3", "pc4"] {
+        assert!(pt[k].is_null(), "{k} should be null on legacy row");
+    }
+}
+
+async fn insert_projection_point_with_z(
+    state: &music_gateway::AppState,
+    track_id: &str,
+    model_version: &str,
+    proj_version: &str,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+    z: Option<f64>,
+) {
+    sqlx::query(
+        "INSERT INTO embedding_projection_2d
+             (track_id, model_version, proj_version, x, y, created_at_ms, z)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(track_id)
+    .bind(model_version)
+    .bind(proj_version)
+    .bind(x)
+    .bind(y)
+    .bind(created_at_ms)
+    .bind(z)
+    .execute(state.embedding_store().pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn latent_space_3d_projection_serves_its_own_xyz() {
+    // 2D and 3D UMAP runs are independent layouts; nothing joins
+    // across them. Selecting a `-d3` projection must return its own
+    // (x, y, z) — the canvas geometry comes from the 3D run's first
+    // two dims, z from the third.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv1-d3", 7.0, 8.0, 200, Some(1.5),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?proj_version=pv1-d3",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["proj_version"], "pv1-d3");
+    let points = json["points"].as_array().unwrap();
+    assert_eq!(points[0]["x"], 7.0);
+    assert_eq!(points[0]["y"], 8.0);
+    assert_eq!(points[0]["z"], 1.5);
+}
+
+#[tokio::test]
+async fn latent_space_2d_projection_z_is_null() {
+    // A 2D-UMAP row has no z column populated. The colour-by dropdown
+    // disables "UMAP z" when this is the active projection — the
+    // backend just surfaces the null so the UI can decide.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv1", 1.0, 2.0, 100).await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["proj_version"], "pv1");
+    let pt = &json["points"].as_array().unwrap()[0];
+    assert_eq!(pt["x"], 1.0);
+    assert_eq!(pt["y"], 2.0);
+    assert!(pt["z"].is_null());
+}
+
+#[tokio::test]
+async fn latent_space_prefer_2d_picks_newest_non_d3_projection() {
+    // The web UI uses `?prefer=2d` for non-UMAP-z colour modes so the
+    // canvas always lands on the 2D-UMAP layout regardless of how many
+    // -d3 companions exist or how recently they were written.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv-old-2d", 0.0, 0.0, 100).await;
+    insert_projection_point(&state, "t1", &model, "pv-new-2d", 1.0, 1.0, 500).await;
+    // -d3 companion written latest — must NOT win for prefer=2d.
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv-new-2d-d3", 9.0, 9.0, 900, Some(0.5),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?prefer=2d",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["proj_version"], "pv-new-2d");
+    assert_eq!(json["points"].as_array().unwrap()[0]["x"], 1.0);
+}
+
+#[tokio::test]
+async fn latent_space_prefer_3d_picks_newest_d3_projection() {
+    // UMAP-z mode in the web UI uses `?prefer=3d` to land on the 3D
+    // run's layout (x,y from first two dims, z as the colour channel).
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv-2d", 1.0, 1.0, 100).await;
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv-old-d3", 5.0, 5.0, 200, Some(0.3),
+    )
+    .await;
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv-new-d3", 7.0, 7.0, 500, Some(0.7),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?prefer=3d",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["proj_version"], "pv-new-d3");
+    let pt = &json["points"].as_array().unwrap()[0];
+    assert_eq!(pt["x"], 7.0);
+    assert_eq!(pt["z"], 0.7);
+}
+
+#[tokio::test]
+async fn latent_space_prefer_2d_returns_empty_when_only_d3_exists() {
+    // Edge: only a 3D run exists. prefer=2d resolves to no projection
+    // — the UI shows the "no 2D projection yet" hint rather than
+    // accidentally falling back to the 3D layout.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv-d3", 1.0, 1.0, 100, Some(0.5),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?prefer=2d",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["proj_version"].is_null());
+    assert!(json["points"].as_array().unwrap().is_empty());
+    // The full versions catalogue still includes the -d3 entry — the
+    // UI uses this to know that UMAP-z is available even if 2D isn't.
+    assert_eq!(json["versions"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn latent_space_prefer_3d_returns_empty_when_only_2d_exists() {
+    // Symmetric case: prefer=3d but no -d3 projection exists. UMAP-z
+    // dropdown will stay disabled.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv-2d", 1.0, 1.0, 100).await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?prefer=3d",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["proj_version"].is_null());
+    assert!(json["points"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn latent_space_explicit_proj_version_overrides_prefer() {
+    // `?proj_version=…` is the power-user debug pathway and must win
+    // even when `prefer` is also passed. Documents the precedence so
+    // a future frontend doesn't accidentally lose explicit selection
+    // by also sending `prefer`.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv-2d", 1.0, 2.0, 100).await;
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv-d3", 7.0, 8.0, 200, Some(0.5),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space?proj_version=pv-2d&prefer=3d",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["proj_version"], "pv-2d");
+}
+
+#[tokio::test]
+async fn latent_space_dropdown_lists_both_2d_and_3d_projections() {
+    // The 2D and 3D runs coexist in the dropdown — the user picks
+    // which layout to view. The two layouts are independent UMAP
+    // results, not a primary/companion pair.
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().as_str().to_string();
+    insert_projection_point(&state, "t1", &model, "pv1", 0.0, 0.0, 100).await;
+    insert_projection_point_with_z(
+        &state, "t1", &model, "pv1-d3", 9.0, 9.0, 200, Some(0.5),
+    )
+    .await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_space",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    // Sorted by MAX(created_at_ms) DESC: 3D (200) before 2D (100).
+    assert_eq!(versions[0]["proj_version"], "pv1-d3");
+    assert_eq!(versions[1]["proj_version"], "pv1");
 }
 
 // --- /v1/diagnostics/recommend/sessions ----------------------------------
@@ -1439,4 +1751,193 @@ async fn recommend_sessions_include_events_handles_session_with_no_events() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["events"].as_array().unwrap().len(), 0);
     assert_eq!(items[0]["segments"].as_array().unwrap().len(), 0);
+}
+
+// --- /v1/diagnostics/recommend/latent_neighbours -------------------------
+//
+// On-hover overlay for the latent-space scatter: returns the k nearest
+// neighbours of a track in the original 512-D CLAP space. UMAP doesn't
+// preserve global distances, so the response is the "ground truth" the
+// 2D layout glosses over.
+
+/// Build a tiny family of unit vectors. `unit_at(i)` is the canonical
+/// basis vector e_i. Pairwise cosine distance for distinct i, j is
+/// exactly 1.0 (orthogonal); cosine distance to itself is 0.0. That
+/// gives the test deterministic distances without depending on usearch
+/// internals.
+fn unit_at_dim(i: usize, dim: usize) -> Vec<f32> {
+    let mut v = vec![0.0_f32; dim];
+    v[i] = 1.0;
+    v
+}
+
+#[tokio::test]
+async fn latent_neighbours_requires_auth() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/recommend/latent_neighbours?track_id=t0&k=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn latent_neighbours_404_when_seed_not_embedded() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/recommend/latent_neighbours?track_id=does-not-exist")
+                .header("authorization", AUTH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn latent_neighbours_returns_top_k_excluding_seed() {
+    let state = common::build_state(common::test_config()).await;
+    let dim = 8;
+    let ann = state.ann();
+    for i in 0..dim {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at_dim(i, dim))
+            .unwrap();
+    }
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_neighbours?track_id=t0&k=3",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["track_id"], "t0");
+    let n = json["neighbours"].as_array().unwrap();
+    assert!(n.len() <= 3, "respect k cap");
+    assert!(!n.is_empty(), "should return at least one neighbour");
+    for entry in n {
+        assert_ne!(entry["track_id"], "t0", "seed must not appear in own neighbours");
+        // Distances are non-negative and bounded by ~2 (cosine).
+        let d = entry["cosine_distance"].as_f64().unwrap();
+        assert!(d >= 0.0 && d <= 2.0, "distance in cosine range: {d}");
+    }
+}
+
+#[tokio::test]
+async fn latent_neighbours_default_k_when_param_missing() {
+    let state = common::build_state(common::test_config()).await;
+    let dim = 8;
+    let ann = state.ann();
+    for i in 0..dim {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at_dim(i, dim))
+            .unwrap();
+    }
+    // No `k` query param: handler uses its built-in default (>= 1).
+    // We don't pin the exact default; we only require "returns something
+    // sensible without an explicit k."
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_neighbours?track_id=t0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let n = json["neighbours"].as_array().unwrap();
+    assert!(!n.is_empty(), "default k should return neighbours");
+}
+
+#[tokio::test]
+async fn latent_neighbours_clamps_oversized_k() {
+    let state = common::build_state(common::test_config()).await;
+    let dim = 8;
+    let ann = state.ann();
+    for i in 0..dim {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at_dim(i, dim))
+            .unwrap();
+    }
+    // k=1000 is far above any sensible cap; the handler must clamp
+    // rather than crash or fan out to a giant search.
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_neighbours?track_id=t0&k=1000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let n = json["neighbours"].as_array().unwrap();
+    // Index has dim=8 tracks total; after excluding the seed, at most 7.
+    assert!(n.len() <= 7, "clamped to index size minus seed, got {}", n.len());
+}
+
+#[tokio::test]
+async fn latent_neighbours_400_when_k_is_zero() {
+    let state = common::build_state(common::test_config()).await;
+    let dim = 8;
+    let ann = state.ann();
+    ann.upsert(&TrackId::from("t0"), &unit_at_dim(0, dim)).unwrap();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/recommend/latent_neighbours?track_id=t0&k=0")
+                .header("authorization", AUTH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn latent_neighbours_orders_by_ascending_cosine_distance() {
+    let state = common::build_state(common::test_config()).await;
+    let dim = 8;
+    let ann = state.ann();
+    // Seed lives at e_0. Three crafted neighbours at known distances:
+    //   - "close":  vector aligned with e_0 plus a tiny perpendicular
+    //               component (smallest cosine distance after t_0).
+    //   - "mid":    a 45° vector in (e_0, e_1) plane.
+    //   - "far":    pure e_1 (orthogonal: cosine distance ≈ 1.0).
+    let seed = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let mut close = vec![0.0_f32; dim];
+    close[0] = 0.99;
+    close[1] = (1.0_f32 - 0.99 * 0.99).sqrt();
+    let mid = {
+        let v = 1.0_f32 / (2.0_f32).sqrt();
+        let mut m = vec![0.0_f32; dim];
+        m[0] = v;
+        m[1] = v;
+        m
+    };
+    let far = unit_at_dim(1, dim);
+    ann.upsert(&TrackId::from("t0"), &seed).unwrap();
+    ann.upsert(&TrackId::from("close"), &close).unwrap();
+    ann.upsert(&TrackId::from("mid"), &mid).unwrap();
+    ann.upsert(&TrackId::from("far"), &far).unwrap();
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/latent_neighbours?track_id=t0&k=3",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let n = json["neighbours"].as_array().unwrap();
+    assert_eq!(n.len(), 3);
+    // Distances must be monotonically non-decreasing.
+    let dists: Vec<f64> = n
+        .iter()
+        .map(|e| e["cosine_distance"].as_f64().unwrap())
+        .collect();
+    for w in dists.windows(2) {
+        assert!(w[0] <= w[1] + 1e-6, "not monotone: {dists:?}");
+    }
+    // The closest neighbour must be "close" (smallest cosine distance).
+    assert_eq!(n[0]["track_id"], "close", "closest should rank first");
 }

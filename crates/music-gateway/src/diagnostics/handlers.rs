@@ -784,6 +784,10 @@ pub async fn recommend_feedback(
 
 // --- /v1/diagnostics/recommend/latent_space -------------------------------
 
+/// Suffix marking a 3-D UMAP projection. Matches the Python reducer's
+/// convention in `default_proj_version(n_components=3)`.
+const D3_PROJ_SUFFIX: &str = "-d3";
+
 #[derive(Debug, Deserialize)]
 pub struct LatentSpaceQuery {
     /// Explicit projection version to render. When omitted, the handler
@@ -795,6 +799,12 @@ pub struct LatentSpaceQuery {
     /// gateway's active `recommend_model_version` (matches what the
     /// rest of the recommender pipeline writes).
     model_version: Option<String>,
+    /// Layout preference: `"2d"` snaps to the newest non-`-d3`
+    /// projection, `"3d"` to the newest `-d3` projection. Ignored when
+    /// `proj_version` is explicitly set (debug pathway). The web UI
+    /// uses this to drive the canvas off the colour-by selector
+    /// without needing a separate `proj_version` dropdown.
+    prefer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -810,6 +820,20 @@ pub struct LatentSpacePoint {
     /// rough validation of "does the audio embedding recover the
     /// human-labelled grouping?"
     genre: Option<String>,
+    /// First four PCA components on the original embedding space,
+    /// computed by the reducer alongside `(x, y)` (migration 0009).
+    /// `null` per-component on projections that predate the migration
+    /// or for components past the dataset's natural rank. Powers the
+    /// web "colour by → PCn" mode.
+    pc1: Option<f64>,
+    pc2: Option<f64>,
+    pc3: Option<f64>,
+    pc4: Option<f64>,
+    /// Third UMAP axis from an `n_components=3` reducer run (migration
+    /// 0010). `null` for 2D projections. Powers the web "colour by →
+    /// UMAP z" mode — the only continuous channel whose interpretation
+    /// is "another UMAP-discovered axis" rather than a PCA component.
+    z: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -838,9 +862,15 @@ pub struct LatentSpaceResponse {
 ///
 /// Two-step resolution:
 ///   1. Figure out which `proj_version` to render — explicit param wins,
-///      otherwise pick the newest from `proj_versions_for_model`.
+///      otherwise pick the newest from `proj_versions_for_model`. The
+///      2-D and 3-D UMAP runs are independent layouts; the dropdown
+///      surfaces both and the user picks one.
 ///   2. Fetch the points, then bulk-join the metadata cache so the UI
 ///      can show titles + artists without a per-row round-trip.
+///
+/// Each row is self-contained: `(x, y)` plus PCs and (for `-d3` runs)
+/// `z` all come from the same UMAP run, so a 2-D-vs-3-D toggle is just
+/// a `proj_version` switch — no cross-projection joining.
 pub async fn recommend_latent_space(
     State(state): State<AppState>,
     Query(q): Query<LatentSpaceQuery>,
@@ -855,11 +885,25 @@ pub async fn recommend_latent_space(
         .await
         .map_err(db_error)?;
 
-    // Resolve the active proj_version. Explicit param wins even if no
-    // row matches — that's the user asking "show me pv-X"; we return
-    // an empty point list rather than silently swapping in a different
-    // projection.
-    let proj_version = q.proj_version.or_else(|| versions.first().map(|v| v.proj_version.clone()));
+    // Resolve the active proj_version. Precedence:
+    //   1. Explicit `proj_version` query param (debug pathway) — even
+    //      if no row matches, return its empty result rather than
+    //      silently swapping in a different projection.
+    //   2. `prefer=2d|3d` — newest projection matching the suffix
+    //      convention. `None` (and an empty point list) when no
+    //      matching projection exists.
+    //   3. Newest overall (legacy callers without either param).
+    let proj_version = q.proj_version.or_else(|| match q.prefer.as_deref() {
+        Some("2d") => versions
+            .iter()
+            .find(|v| !v.proj_version.ends_with(D3_PROJ_SUFFIX))
+            .map(|v| v.proj_version.clone()),
+        Some("3d") => versions
+            .iter()
+            .find(|v| v.proj_version.ends_with(D3_PROJ_SUFFIX))
+            .map(|v| v.proj_version.clone()),
+        _ => versions.first().map(|v| v.proj_version.clone()),
+    });
 
     let points = if let Some(pv) = &proj_version {
         let raw = state
@@ -888,6 +932,11 @@ pub async fn recommend_latent_space(
                     artist: md.map(|m| m.artist.clone()),
                     album: md.and_then(|m| m.album.clone()),
                     genre: md.and_then(|m| m.genre.clone()),
+                    pc1: p.pc1,
+                    pc2: p.pc2,
+                    pc3: p.pc3,
+                    pc4: p.pc4,
+                    z: p.z,
                 }
             })
             .collect()
@@ -909,6 +958,84 @@ pub async fn recommend_latent_space(
         proj_version,
         points,
         versions: version_entries,
+    }))
+}
+
+// --- /v1/diagnostics/recommend/latent_neighbours --------------------------
+//
+// Hover overlay for the latent-space scatter. Returns the k nearest
+// neighbours of a seed track in the **original** CLAP space — the
+// distances UMAP doesn't preserve. Cheap (HNSW query is sub-ms at our
+// scale) and fetched on demand from the web client, so the
+// /latent_space payload stays small.
+
+const DEFAULT_LATENT_NEIGHBOURS_K: usize = 10;
+const MAX_LATENT_NEIGHBOURS_K: usize = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct LatentNeighboursQuery {
+    track_id: String,
+    /// Number of neighbours to return. Defaults to
+    /// `DEFAULT_LATENT_NEIGHBOURS_K`. Clamped to
+    /// `MAX_LATENT_NEIGHBOURS_K` to keep the response bounded.
+    k: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentNeighbourEntry {
+    track_id: String,
+    /// Cosine distance in CLAP space: `1 - cosine_similarity`. Range
+    /// `[0, 2]`, with `0` = identical direction and `1` = orthogonal.
+    /// Reported (instead of similarity) because the visual encoding
+    /// reads as distance: short line = close, long line = far.
+    cosine_distance: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentNeighboursResponse {
+    /// Echoed back so the client can correlate the response to its
+    /// (possibly stale) hover state.
+    track_id: String,
+    /// Ordered by ascending `cosine_distance`. Seed itself is filtered
+    /// out, so the list contains at most `k` entries.
+    neighbours: Vec<LatentNeighbourEntry>,
+}
+
+/// k nearest neighbours of `track_id` in the full embedding space.
+/// Returns 404 if the seed has no vector in the ANN — the caller is
+/// hovering a point that exists in the projection (otherwise they
+/// couldn't hover it) but the embedding can in principle be missing
+/// after a model-version flip; the UI degrades to "no overlay" for
+/// that point.
+pub async fn recommend_latent_neighbours(
+    State(state): State<AppState>,
+    Query(q): Query<LatentNeighboursQuery>,
+) -> Result<Json<LatentNeighboursResponse>, (StatusCode, &'static str)> {
+    let k_raw = q.k.unwrap_or(DEFAULT_LATENT_NEIGHBOURS_K);
+    if k_raw == 0 {
+        return Err((StatusCode::BAD_REQUEST, "k must be >= 1"));
+    }
+    let k = k_raw.min(MAX_LATENT_NEIGHBOURS_K);
+    let seed_id = music_core::TrackId::from(q.track_id.as_str());
+    let ann = state.ann();
+    let vector = match ann.get_vector(&seed_id) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "seed not embedded")),
+        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "ann query failed")),
+    };
+    let results = ann
+        .query_excluding(&vector, k, std::slice::from_ref(&seed_id))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+    let neighbours = results
+        .into_iter()
+        .map(|r| LatentNeighbourEntry {
+            track_id: r.track_id.into_inner(),
+            cosine_distance: (1.0 - r.similarity as f64).max(0.0),
+        })
+        .collect();
+    Ok(Json(LatentNeighboursResponse {
+        track_id: q.track_id,
+        neighbours,
     }))
 }
 
