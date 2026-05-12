@@ -55,10 +55,23 @@ Pages today (`apps/web/src/pages/`):
   search with bucketed top-results re-ranking.
 - `Playlist` — playlist view + management.
 - `Queue` — current play queue with reorder / remove.
-- `LatentSpace` + `latentSpace.ts`/`.test.ts` — the 2D UMAP plot
-  view (reads `/v1/diagnostics/recommend/latent_space`).
-- `Diagnostics` — recommend + RUM + trace dashboards. Reachable via
-  the `/diagnostics` nav link.
+- `Station` — natural-language "playlist for a prompt." Posts to
+  `/v1/recommend/station`, hydrates the returned track ids, plays
+  them through the shared `PlayerContext`. State machine is a
+  discriminated union (`idle`/`loading`/`ready`/`empty`/
+  `unavailable`/`error`); results are deliberately not cached via
+  TanStack Query (a stale "sunny afternoon" from yesterday would
+  hide newly-ingested tracks).
+- `LatentSpace` / `LatentSpace3D` + `latentSpace.ts`/`.test.ts` —
+  2D and 3D UMAP plot views (read
+  `/v1/diagnostics/recommend/latent_space`). 2-D / 3-D toggle is
+  decoupled from the colour mode.
+- `diagnostics/` — the diagnostics page has been split into
+  topical subpages: `DiagnosticsHome` (landing), `Recommender`
+  (per-feature dashboards), `LatentSpace` (above), `Ingest` (queue
+  + ingest worker state), `Tracing` (M0 span ring), `Rum` (browser
+  RUM events), `Listening` (recommend-session reconstruction with
+  per-session events panel).
 - `SignIn`, `Callback` — OAuth PKCE flow.
 
 ## Provider tree
@@ -187,7 +200,7 @@ versions:
 ```bash
 npm run build
 # Outputs to apps/web/dist/
-# Bundle size: ~74 KB JS gzipped (the recommend page added ~8 KB)
+# Bundle size: ~80 KB JS gzipped (web-vitals + diagnostics surface + station)
 ```
 
 The production target is to be served by the gateway from the same

@@ -12,7 +12,7 @@ use music_recommend::normalize_title;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use common::{TEST_BEARER, build_state, test_config};
+use common::{TEST_BEARER, build_state, build_state_with_embedder, test_config};
 
 const DIM: usize = 8;
 
@@ -1387,4 +1387,153 @@ async fn from_any_unknown_diversity_mode_rejected() {
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- /v1/recommend/station -------------------------------------------
+//
+// Text-query playlist. The sidecar is faked with wiremock so the test
+// is deterministic: it returns a unit vector that the ANN's
+// pre-populated tracks will match cleanly.
+
+mod station {
+    use super::*;
+    use music_gateway::embedder::EmbedderHandle;
+    use music_recommend::embedder::{EmbedderClient, EmbedderConfig, EmbedderHealth};
+    use music_recommend::types::ModelVersion;
+    use std::time::Duration;
+    use url::Url;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fake_embed_response(vector: Vec<f32>) -> Value {
+        json!({
+            "vector": vector,
+            "dim": vector.len(),
+            "model_version": "test-v1",
+        })
+    }
+
+    fn ready_handle(server: &MockServer) -> EmbedderHandle {
+        let url: Url = server.uri().parse().unwrap();
+        let client = EmbedderClient::new(EmbedderConfig {
+            url,
+            timeout: Duration::from_secs(2),
+        })
+        .expect("client builds");
+        let health = EmbedderHealth {
+            reachable: true,
+            model_loaded: true,
+            model_version: ModelVersion::from("test-v1"),
+            dim: DIM,
+            device: Some("cpu".to_string()),
+        };
+        EmbedderHandle::new(Some(client), Some(health))
+    }
+
+    #[tokio::test]
+    async fn returns_top_k_for_text_query() {
+        let server = MockServer::start().await;
+        // Sidecar returns the unit vector that exactly matches t3 — we
+        // expect t3 first in the ANN results.
+        Mock::given(method("POST"))
+            .and(path("/embed/text"))
+            .and(body_json(json!({ "text": "sunny afternoon" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(fake_embed_response(unit_at(3))),
+            )
+            .mount(&server)
+            .await;
+
+        let handle = ready_handle(&server);
+        let state = build_state_with_embedder(test_config(), handle).await;
+        let ann = state.ann();
+        for i in 0..DIM {
+            ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+                .unwrap();
+        }
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_get(
+                "/v1/recommend/station?text=sunny+afternoon&n=3",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json(resp).await;
+        assert_eq!(body["query"], "sunny afternoon");
+        let results = body["results"].as_array().expect("results array");
+        assert!(!results.is_empty());
+        assert!(results.len() <= 3);
+        // The track whose stored vector matches the embedder's response
+        // should come back first.
+        assert_eq!(results[0]["track_id"], "t3");
+    }
+
+    #[tokio::test]
+    async fn returns_503_when_embedder_disabled() {
+        let state = build_state(test_config()).await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_get("/v1/recommend/station?text=hello&n=5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_or_whitespace_text() {
+        let server = MockServer::start().await;
+        let handle = ready_handle(&server);
+        let state = build_state_with_embedder(test_config(), handle).await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_get("/v1/recommend/station?text=&n=3"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Whitespace-only is also rejected — it would be a meaningless
+        // CLAP query and we don't want to burn a sidecar round-trip on it.
+        let server2 = MockServer::start().await;
+        let app = build_router(
+            build_state_with_embedder(test_config(), ready_handle(&server2)).await,
+        );
+        let resp = app
+            .oneshot(auth_get("/v1/recommend/station?text=%20%20&n=3"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rejects_n_zero() {
+        let server = MockServer::start().await;
+        let handle = ready_handle(&server);
+        let state = build_state_with_embedder(test_config(), handle).await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_get("/v1/recommend/station?text=hello&n=0"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn surfaces_embedder_failure_as_bad_gateway() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embed/text"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("kaboom"))
+            .mount(&server)
+            .await;
+        let handle = ready_handle(&server);
+        let state = build_state_with_embedder(test_config(), handle).await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_get("/v1/recommend/station?text=rainy&n=5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
 }

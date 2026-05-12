@@ -166,19 +166,22 @@ WebSocket for sync fan-out. Send `ClientMessage`s, receive
 
 ### Recommender
 
-There are three recommend endpoints. They share the same
-post-filter / queue-context / session-id machinery; the difference is
-how they pick the *seed vector* the ANN is queried with.
+There are four recommend endpoints. They share the same ANN; the
+difference is how they pick the *query vector*.
 
-| Endpoint | Seed strategy |
+| Endpoint | Query vector source |
 |---|---|
-| `GET /v1/recommend/next` | Single track id. 404 if not embedded. |
-| `POST /v1/recommend/from-any` | First indexed track in a candidate list (album-start case). |
+| `GET /v1/recommend/next` | Embedding of a single track id. 404 if not embedded. |
+| `POST /v1/recommend/from-any` | Embedding of the first indexed track in a candidate list (album-start case). |
 | `POST /v1/recommend/from-seeds` | Multi-seed Σ-similarity fan-out (playlist case). |
+| `GET /v1/recommend/station` | CLAP **text** embedding of a natural-language prompt. |
 
-All three accept an optional `queue_context` for server-side
-diversity filtering and an optional `session_id` for per-session
-downvote exclusion. See "Queue context & filtering" below.
+The track-seeded variants accept an optional `queue_context` for
+server-side diversity filtering and an optional `session_id` for
+per-session downvote exclusion (see "Queue context & filtering"
+below). `/v1/recommend/station` is currently a thin "embed text →
+ANN top-N" pass; the queue-context / filter machinery is not wired
+into it yet.
 
 #### `GET /v1/recommend/next`
 
@@ -277,6 +280,41 @@ been embedded yet" from "we just don't have anything more to suggest."
 Note: with Σ-similarity scoring, `similarity` values are *sums* and
 can exceed 1.0. They are still comparable within a single response,
 but not across responses.
+
+#### `GET /v1/recommend/station`
+
+Natural-language "playlist from a prompt." The gateway sends the
+prompt to the embedder's `/embed/text` endpoint (CLAP text encoder),
+then runs the resulting 512-dim vector through the same content ANN
+that powers `/v1/recommend/next`.
+
+| Query param | Required | Default | Description |
+|---|---|---|---|
+| `text` | yes | — | Prompt. Trimmed; must be non-empty and ≤ 500 chars. |
+| `n` | no | `20` | How many results. Capped at 100. `0` returns 400. |
+
+Response:
+```json
+{
+  "query": "sunny afternoon",
+  "model_version": "clap-music_audioset_epoch_15_esc_90.14",
+  "results": [
+    {"track_id": "track_xyz", "similarity": 0.387}
+  ]
+}
+```
+
+- 400 if `text` is empty or `n == 0`.
+- 400 if `text` exceeds 500 chars.
+- 502 if the embedder returns an error (e.g. text too long for the
+  encoder).
+- 503 if the embedder isn't configured or wasn't ready at the last
+  health probe. **No degraded-mode fallback** — without the text
+  encoder there's no seed track to derive tag-similarity from.
+
+There is no `degraded` field on the response (unlike track-seeded
+endpoints): the operation either has the text encoder available or
+it returns 503.
 
 #### Queue context & filtering
 

@@ -3,6 +3,11 @@
 //! - `GET /v1/recommend/next?seed=<id>&n=<N>` — top-N similar tracks.
 //!   Returns 404 if the seed isn't in the ANN. Caps `n` at MAX_N to
 //!   keep responses bounded.
+//! - `GET /v1/recommend/station?text=<q>&n=<N>` — natural-language
+//!   playlist. Calls the embedder's text encoder once and queries
+//!   the same ANN as `/next`. Returns 503 if the embedder isn't
+//!   ready (degraded mode has no text fallback — there's no seed
+//!   track to read tags from).
 //! - `POST /v1/recommend/enqueue {track_ids: [...]}` — admin-style
 //!   enqueue for the ingest queue. Idempotent on (track_id,
 //!   model_version): duplicates collapse via the store's
@@ -120,6 +125,93 @@ pub async fn next(
         seed: q.seed,
         model_version: Some(model_version.as_str().to_string()),
         degraded: false,
+        results: results
+            .into_iter()
+            .map(|r| RecommendItem {
+                track_id: r.track_id.into_inner(),
+                similarity: r.similarity,
+            })
+            .collect(),
+    }))
+}
+
+// --- /v1/recommend/station -------------------------------------------
+//
+// "Give me a playlist for `sunny afternoon`." We embed the text on the
+// hot path (single round-trip to the sidecar) and reuse the same
+// content-ANN as /next.
+//
+// Length cap: the CLAP text encoder is happy with short prompts; long
+// essays don't make better playlists. Refuse at 500 chars so a bad
+// client can't push large bodies through.
+
+const MAX_TEXT_LEN: usize = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct RecommendStationQuery {
+    pub text: String,
+    #[serde(default = "default_n")]
+    pub n: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecommendStationResponse {
+    pub query: String,
+    pub model_version: Option<String>,
+    pub results: Vec<RecommendItem>,
+}
+
+#[tracing::instrument(
+    name = "recommend.station",
+    skip_all,
+    fields(
+        text_len = q.text.len(),
+        n = tracing::field::Empty,
+        results = tracing::field::Empty,
+    ),
+)]
+pub async fn station(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendStationQuery>,
+) -> Result<Json<RecommendStationResponse>, (StatusCode, &'static str)> {
+    let trimmed = q.text.trim();
+    if trimmed.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "text must not be empty"));
+    }
+    if trimmed.len() > MAX_TEXT_LEN {
+        return Err((StatusCode::BAD_REQUEST, "text too long"));
+    }
+    if q.n == 0 {
+        return Err((StatusCode::BAD_REQUEST, "n must be >= 1"));
+    }
+    let n = q.n.min(MAX_N);
+    tracing::Span::current().record("n", n);
+
+    // Embedder must be reachable AND loaded. We could also accept a
+    // probed-but-loading sidecar and let the embed call return 503,
+    // but the explicit upfront check gives the client a clearer error.
+    let Some(client) = state.embedder().client() else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "embedder not configured"));
+    };
+    if !state.embedder().ready() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "embedder not ready"));
+    }
+
+    let model_version = state.recommend_model_version().clone();
+    let embed = client.embed_text(trimmed).await.map_err(|e| {
+        tracing::warn!(error = %e, "recommend.station: embed_text failed");
+        (StatusCode::BAD_GATEWAY, "embedder error")
+    })?;
+
+    let results = state
+        .ann()
+        .query(&embed.vector, n)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+    tracing::Span::current().record("results", results.len());
+
+    Ok(Json(RecommendStationResponse {
+        query: trimmed.to_string(),
+        model_version: Some(model_version.as_str().to_string()),
         results: results
             .into_iter()
             .map(|r| RecommendItem {

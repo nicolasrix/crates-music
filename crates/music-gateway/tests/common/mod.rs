@@ -52,14 +52,26 @@ pub async fn build_state(config: Config) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    build_state_full(config, cache, oauth, SetupToken::none()).await
+    build_state_full(config, cache, oauth, SetupToken::none(), EmbedderHandle::disabled()).await
+}
+
+/// Build state with a caller-provided embedder handle. Used by tests
+/// that wire wiremock-backed clients (recommend station, etc.).
+pub async fn build_state_with_embedder(config: Config, embedder: EmbedderHandle) -> AppState {
+    let cache = Cache::open_in_memory()
+        .await
+        .expect("in-memory cache opens cleanly");
+    let oauth = OauthStore::open_in_memory()
+        .await
+        .expect("in-memory oauth store opens cleanly");
+    build_state_full(config, cache, oauth, SetupToken::none(), embedder).await
 }
 
 pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    build_state_full(config, cache, oauth, SetupToken::none()).await
+    build_state_full(config, cache, oauth, SetupToken::none(), EmbedderHandle::disabled()).await
 }
 
 pub async fn build_state_with_oauth(
@@ -70,7 +82,7 @@ pub async fn build_state_with_oauth(
     let cache = Cache::open_in_memory()
         .await
         .expect("in-memory cache opens cleanly");
-    build_state_full(config, cache, oauth, setup_token).await
+    build_state_full(config, cache, oauth, setup_token, EmbedderHandle::disabled()).await
 }
 
 async fn build_state_full(
@@ -78,6 +90,7 @@ async fn build_state_full(
     cache: Cache,
     oauth: OauthStore,
     setup_token: SetupToken,
+    embedder: EmbedderHandle,
 ) -> AppState {
     // EmbeddingStore lives in its own SQLite file in production; tests
     // use an in-memory variant so we never touch disk.
@@ -96,7 +109,7 @@ async fn build_state_full(
         cache,
         oauth,
         setup_token,
-        EmbedderHandle::disabled(),
+        embedder,
         embedding_store,
         metadata_store,
         ann,

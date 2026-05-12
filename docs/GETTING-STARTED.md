@@ -143,8 +143,10 @@ the local mkcert CA isn't in Node's trust store by default — see
 ## 7. (Optional) Start the embedder
 
 The recommender requires the Python sidecar. For most onboarding work
-you don't need it — the gateway runs in degraded mode without it and
-recommend endpoints just return 404 until tracks are embedded.
+you don't need it — the gateway runs in degraded mode without it:
+track-seeded recommend endpoints (`/v1/recommend/next` etc.) return
+404 for every seed, and the text-query station endpoint
+(`/v1/recommend/station`) returns 503. Everything else still works.
 
 If you want it:
 

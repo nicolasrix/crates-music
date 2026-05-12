@@ -82,8 +82,10 @@ redirect_uris = [
 ### `[embedder]` (optional)
 
 Python sidecar for CLAP audio + text embeddings. If absent, the
-gateway runs in degraded mode and recommend endpoints fall back to
-tag-only similarity.
+gateway runs in degraded mode: track-seeded recommend endpoints 404,
+the text-query station endpoint 503s. (A tag-only fallback is
+reserved for the future — see
+[components/music-recommend.md](./components/music-recommend.md).)
 
 If present but unreachable at boot, same outcome — a warning is
 logged and the gateway proceeds without embedder support.

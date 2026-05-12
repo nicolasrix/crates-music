@@ -2,7 +2,7 @@
 
 **Path:** `crates/music-recommend/`
 **Type:** library, server-only
-**Test count:** 224
+**Test count:** ≈227
 
 The recommender's state layer. The original "embeddings + queue + ANN"
 core has grown into several focused modules; all share the same
@@ -473,7 +473,7 @@ keeps each migration timeline self-contained.
 
 ## Tests
 
-224 tests as of last update, mostly inline unit tests on the new
+≈227 tests as of last update, mostly inline unit tests on the
 post-retrieval modules (queue_filter, mmr, aggregate, metadata,
 play_history, feedback, projection, sessions). Coverage at the
 integration level:
@@ -496,9 +496,12 @@ integration level:
   multi-worker. Probably needs a dedicated test.
 - **No behavioural index.** Track2vec on session windows is the
   natural next step, with the event log as input. Deferred.
-- **No CLAP text path wired into recommend endpoints.** The
-  embedder client supports `embed_text`; the gateway doesn't expose
-  a text-query endpoint yet. Deferred.
+- **Text-station handler is filter-bypass.** `GET /v1/recommend/station`
+  embeds the prompt and runs the ANN top-N — that's it. No queue
+  context, no MMR rerank, no per-session downvote exclusion. The
+  same `EmbedderClient::embed_text` + `AnnIndex::query` primitives
+  used here are wired through; layering the queue filter onto the
+  text path is a small follow-up.
 - **No re-embedding on track edit.** If track audio is replaced
   upstream, we'd serve stale embeddings. Detection requires polling
   Navidrome for ETag changes per track — feasible, not done.
