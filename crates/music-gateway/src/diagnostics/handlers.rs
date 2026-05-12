@@ -22,7 +22,7 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
 };
-use music_recommend::types::ModelVersion;
+use music_recommend::types::{EmbeddingKey, ModelVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -937,10 +937,41 @@ pub async fn queue_depth(
 
 const DEFAULT_SESSIONS_LIMIT: i64 = 50;
 const MAX_SESSIONS_LIMIT: i64 = 500;
+/// Cap on events fetched per session when `include_events=1`. Sessions
+/// don't realistically grow this large (they auto-close on the next
+/// StartSession), but a hard cap protects the endpoint from a
+/// pathological queue.
+const MAX_EVENTS_PER_SESSION: u32 = 500;
 
 #[derive(Debug, Deserialize)]
 pub struct SessionsQuery {
     limit: Option<i64>,
+    /// `1` to attach `events` + `segments` to each item. Defaults to off
+    /// because the join is O(events × embedding-fetches) per session
+    /// and the unaugmented response is what list views actually need.
+    include_events: Option<u8>,
+    /// Model version used when looking up embeddings for the per-
+    /// segment cosine distances. Defaults to the gateway's active
+    /// `recommend_model_version`. Ignored when `include_events != 1`.
+    model_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionEventItem {
+    track_id: String,
+    /// Lowercase enum string: "scrobble" | "skip" | "seek" | …
+    /// Matches the wire format the event log already exposes elsewhere.
+    event_type: String,
+    occurred_at_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSegment {
+    /// Cosine distance in `[0, 2]` between event[i].track and
+    /// event[i+1].track under the active model_version. `None` when
+    /// either track has no `done` embedding row (a session can hop
+    /// through not-yet-ingested tracks).
+    cosine_distance: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -955,11 +986,43 @@ pub struct SessionItem {
     /// id. 0 when nothing has been logged yet — useful indicator of
     /// "user opened a queue but didn't actually listen."
     event_count: i64,
+    /// Present only when `include_events=1`. Oldest-first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events: Option<Vec<SessionEventItem>>,
+    /// Present only when `include_events=1`. Length = events.len() - 1;
+    /// `segments[i]` is the gap between `events[i]` and `events[i+1]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segments: Option<Vec<SessionSegment>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SessionsListResponse {
     items: Vec<SessionItem>,
+}
+
+/// Cosine distance between two equal-length vectors, in `[0, 2]`.
+/// Returns `None` for length mismatch / empty input / zero-norm — all
+/// "no meaningful distance" cases that should surface as JSON `null`,
+/// not 500.
+fn cosine_distance(a: &[f32], b: &[f32]) -> Option<f64> {
+    if a.is_empty() || a.len() != b.len() {
+        return None;
+    }
+    let mut dot = 0.0_f64;
+    let mut norm_a = 0.0_f64;
+    let mut norm_b = 0.0_f64;
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        let x = f64::from(*ai);
+        let y = f64::from(*bi);
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return None;
+    }
+    let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+    Some(1.0 - sim)
 }
 
 /// Recent recommend-session lifetimes, newest started_ms first. Each
@@ -973,6 +1036,7 @@ pub async fn recommend_sessions(
         .limit
         .unwrap_or(DEFAULT_SESSIONS_LIMIT)
         .clamp(1, MAX_SESSIONS_LIMIT);
+    let include_events = q.include_events.unwrap_or(0) == 1;
     let rows = state.sessions().recent(limit).await.map_err(db_error)?;
     let session_ids: Vec<music_core::SessionId> =
         rows.iter().map(|r| r.session_id.clone()).collect();
@@ -981,19 +1045,83 @@ pub async fn recommend_sessions(
         .count_events_per_session(&session_ids)
         .await
         .map_err(db_error)?;
-    let items = rows
-        .into_iter()
-        .map(|r| {
-            let event_count = counts.get(&r.session_id).copied().unwrap_or(0);
-            SessionItem {
-                session_id: r.session_id.as_str().to_string(),
-                anchor_track_id: r.anchor_track_id.as_str().to_string(),
-                items_count: r.items_count,
-                started_ms: r.started_ms,
-                ended_ms: r.ended_ms,
-                event_count,
-            }
-        })
-        .collect();
+
+    let model_version = if include_events {
+        Some(
+            q.model_version
+                .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from),
+        )
+    } else {
+        None
+    };
+
+    let mut items = Vec::with_capacity(rows.len());
+    for r in rows {
+        let event_count = counts.get(&r.session_id).copied().unwrap_or(0);
+        let (events, segments) = if let Some(model) = model_version.as_ref() {
+            let session_events = state
+                .event_store()
+                .by_session(&r.session_id, MAX_EVENTS_PER_SESSION)
+                .await
+                .map_err(db_error)?;
+            let segs = compute_session_segments(&state, model, &session_events)
+                .await
+                .map_err(db_error)?;
+            let evs: Vec<SessionEventItem> = session_events
+                .into_iter()
+                .map(|e| SessionEventItem {
+                    track_id: e.track_id.as_str().to_string(),
+                    event_type: e.event_type.as_str().to_string(),
+                    occurred_at_ms: e.occurred_at,
+                })
+                .collect();
+            (Some(evs), Some(segs))
+        } else {
+            (None, None)
+        };
+        items.push(SessionItem {
+            session_id: r.session_id.as_str().to_string(),
+            anchor_track_id: r.anchor_track_id.as_str().to_string(),
+            items_count: r.items_count,
+            started_ms: r.started_ms,
+            ended_ms: r.ended_ms,
+            event_count,
+            events,
+            segments,
+        });
+    }
     Ok(Json(SessionsListResponse { items }))
+}
+
+/// Compute per-segment cosine distances for an ordered event list. We
+/// dedupe by track_id before fetching embeddings so a session that
+/// loops the same track only does one lookup per unique id.
+async fn compute_session_segments(
+    state: &AppState,
+    model_version: &ModelVersion,
+    events: &[music_recommend::StoredEvent],
+) -> Result<Vec<SessionSegment>, music_recommend::Error> {
+    use std::collections::HashMap;
+    if events.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let mut vectors: HashMap<music_core::TrackId, Option<Vec<f32>>> = HashMap::new();
+    for e in events {
+        if !vectors.contains_key(&e.track_id) {
+            let key = EmbeddingKey::new(e.track_id.clone(), model_version.clone());
+            let vec = state.embedding_store().get(&key).await?.map(|emb| emb.vector);
+            vectors.insert(e.track_id.clone(), vec);
+        }
+    }
+    let mut out = Vec::with_capacity(events.len() - 1);
+    for win in events.windows(2) {
+        let a = vectors.get(&win[0].track_id).and_then(|v| v.as_deref());
+        let b = vectors.get(&win[1].track_id).and_then(|v| v.as_deref());
+        let cosine_distance = match (a, b) {
+            (Some(a), Some(b)) => cosine_distance(a, b),
+            _ => None,
+        };
+        out.push(SessionSegment { cosine_distance });
+    }
+    Ok(out)
 }

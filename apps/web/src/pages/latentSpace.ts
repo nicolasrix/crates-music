@@ -187,6 +187,49 @@ export function bucketByGenre(
   return { buckets, pointsByLabel };
 }
 
+// --- session path encoding -----------------------------------------------
+//
+// A session is rendered on top of the scatter as a polyline through the
+// projected points of its events. Each segment carries cosine_distance
+// in the original 512-D CLAP space — UMAP doesn't preserve that
+// globally, so we encode it on the line itself. Closer in latent space
+// → thicker stroke ("natural neighbour"); further → thinner ("a leap").
+
+export interface PathWidthRange {
+  /** Stroke width (px) at `cosine_distance = 0` — colinear in CLAP space. */
+  maxWidth: number;
+  /** Stroke width (px) at `cosine_distance ≥ cap`. */
+  minWidth: number;
+  /** Distance value at which the line collapses to `minWidth`. CLAP
+   *  cosine distances cluster in `[0, 1]` in practice, so 1.0 is a
+   *  sensible default cap. */
+  cap: number;
+}
+
+/// Map a cosine distance to a stroke width. `null` (missing embedding)
+/// returns `maxWidth` so the segment still draws — the dashed style
+/// rendered alongside conveys the "unknown" state, not the width.
+export function cosineDistanceToWidth(
+  distance: number | null,
+  range: PathWidthRange,
+): number {
+  if (distance === null) return range.maxWidth;
+  if (distance <= 0) return range.maxWidth;
+  if (distance >= range.cap) return range.minWidth;
+  const t = distance / range.cap;
+  return range.maxWidth + (range.minWidth - range.maxWidth) * t;
+}
+
+/// Stable hue for a session id. Hash → degree on the colour wheel; we
+/// keep saturation/lightness fixed for legibility on the dark canvas.
+export function sessionHue(sessionId: string): number {
+  let h = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    h = (h * 31 + sessionId.charCodeAt(i)) >>> 0;
+  }
+  return h % 360;
+}
+
 /// Nearest scatter point to the cursor in *pixel space*, or null if no
 /// point lies within `radiusPx`. Linear scan — adequate at our N.
 export function pickNearestPoint(

@@ -1278,3 +1278,165 @@ async fn recommend_sessions_respects_limit_query() {
     assert_eq!(items[0]["session_id"], "s4");
     assert_eq!(items[1]["session_id"], "s3");
 }
+
+// --- include_events=1 ------------------------------------------------------
+//
+// Verifies that when callers ask for the full session trace, each item
+// gains `events` (oldest-first) plus `segments` (length = events-1).
+// Each segment carries the cosine distance between the two adjacent
+// tracks' embeddings — `None` when either embedding is missing under
+// the active model_version.
+
+/// Store a 'done' embedding for `(track, model)`. Goes through
+/// `enqueue` → `claim_next` → `mark_done` so we use the same code path
+/// as the worker; that gives us a more honest end-to-end test than
+/// raw-SQL injection.
+async fn seed_embedding(
+    state: &music_gateway::AppState,
+    track: &str,
+    model: &ModelVersion,
+    vector: Vec<f32>,
+) {
+    let key = EmbeddingKey::new(track.to_string(), model.clone());
+    state.embedding_store().enqueue(&key).await.unwrap();
+    // claim_next picks the oldest enqueued row, but tests run isolated
+    // so the FIFO works out. mark_done writes via the key on the
+    // returned Embedding, not the claim result.
+    state
+        .embedding_store()
+        .claim_next(model)
+        .await
+        .unwrap()
+        .expect("queue not empty");
+    state
+        .embedding_store()
+        .mark_done(&music_recommend::Embedding::new(key, vector))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn recommend_sessions_include_events_attaches_events_and_segments() {
+    let state = common::build_state(common::test_config()).await;
+    let model = state.recommend_model_version().clone();
+
+    // t-a and t-b have embeddings; t-c does not. Path: a → b → c → b.
+    seed_embedding(&state, "t-a", &model, vec![1.0, 0.0, 0.0]).await;
+    seed_embedding(&state, "t-b", &model, vec![0.0, 1.0, 0.0]).await;
+
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-a".to_string()),
+                track_id: music_core::TrackId::from("t-a".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s-evt".to_string()),
+        })
+        .await
+        .unwrap();
+    for (track, occurred_at, ev_type) in [
+        ("t-a", 100_i64, music_recommend::EventType::Scrobble),
+        ("t-b", 200, music_recommend::EventType::Scrobble),
+        ("t-c", 300, music_recommend::EventType::Scrobble),
+        ("t-b", 400, music_recommend::EventType::Scrobble),
+    ] {
+        state
+            .event_store()
+            .append_batch(&[music_recommend::EventInput {
+                event_type: ev_type,
+                track_id: music_core::TrackId::from(track),
+                occurred_at,
+                metadata: None,
+                session_id: Some(music_core::SessionId::from("s-evt")),
+            }])
+            .await
+            .unwrap();
+    }
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/sessions?include_events=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+
+    let events = item["events"].as_array().expect("events present when include_events=1");
+    assert_eq!(events.len(), 4);
+    // Oldest first by occurred_at.
+    assert_eq!(events[0]["track_id"], "t-a");
+    assert_eq!(events[0]["occurred_at_ms"], 100);
+    assert_eq!(events[1]["track_id"], "t-b");
+    assert_eq!(events[2]["track_id"], "t-c");
+    assert_eq!(events[3]["track_id"], "t-b");
+
+    let segments = item["segments"].as_array().expect("segments present");
+    assert_eq!(segments.len(), 3, "events.len() - 1");
+
+    // a (1,0,0) and b (0,1,0) are orthogonal → cosine = 0 → distance = 1.
+    let d_ab = segments[0]["cosine_distance"].as_f64().expect("ab distance");
+    assert!((d_ab - 1.0).abs() < 1e-6, "got {d_ab}");
+
+    // b → c: c has no embedding → null.
+    assert!(segments[1]["cosine_distance"].is_null(), "missing embedding => null");
+    // c → b: same reason, null.
+    assert!(segments[2]["cosine_distance"].is_null());
+}
+
+#[tokio::test]
+async fn recommend_sessions_omits_events_by_default() {
+    let state = common::build_state(common::test_config()).await;
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-1".to_string()),
+                track_id: music_core::TrackId::from("t-1".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s-bare".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    // Backward-compatible: bare endpoint never returns events/segments.
+    assert!(items[0].get("events").is_none() || items[0]["events"].is_null());
+    assert!(items[0].get("segments").is_none() || items[0]["segments"].is_null());
+}
+
+#[tokio::test]
+async fn recommend_sessions_include_events_handles_session_with_no_events() {
+    let state = common::build_state(common::test_config()).await;
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-1".to_string()),
+                track_id: music_core::TrackId::from("t-1".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s-empty".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/sessions?include_events=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["events"].as_array().unwrap().len(), 0);
+    assert_eq!(items[0]["segments"].as_array().unwrap().len(), 0);
+}

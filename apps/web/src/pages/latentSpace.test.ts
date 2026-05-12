@@ -9,10 +9,12 @@ import { describe, expect, it } from "vitest";
 import {
   bucketByGenre,
   computeBounds,
+  cosineDistanceToWidth,
   OTHER_LABEL,
   UNKNOWN_LABEL,
   pickNearestPoint,
   scaleToCanvas,
+  sessionHue,
   type ScatterPoint,
 } from "./latentSpace";
 
@@ -258,5 +260,59 @@ describe("bucketByGenre", () => {
     );
     const rock = got.pointsByLabel.get("Rock")!;
     expect(rock.map((p) => p.track_id)).toEqual(["first", "second", "third"]);
+  });
+});
+
+describe("cosineDistanceToWidth", () => {
+  const range = { minWidth: 0.5, maxWidth: 5, cap: 1 };
+
+  it("returns maxWidth for distance = 0 (colinear in latent space)", () => {
+    expect(cosineDistanceToWidth(0, range)).toBe(5);
+  });
+
+  it("returns minWidth at or above the cap", () => {
+    expect(cosineDistanceToWidth(1, range)).toBe(0.5);
+    expect(cosineDistanceToWidth(2, range)).toBe(0.5);
+  });
+
+  it("returns maxWidth for null (unknown distance)", () => {
+    // Stroke still draws — the dashed style elsewhere conveys 'unknown',
+    // not the width. We don't want to silently collapse the segment to a
+    // hairline just because one embedding hadn't been ingested yet.
+    expect(cosineDistanceToWidth(null, range)).toBe(5);
+  });
+
+  it("interpolates linearly between max and min across the cap range", () => {
+    // Half the cap distance → halfway between widths.
+    expect(cosineDistanceToWidth(0.5, range)).toBeCloseTo((5 + 0.5) / 2, 6);
+  });
+
+  it("clamps negative distances to maxWidth (defensive)", () => {
+    // Cosine distance is mathematically ≥ 0, but floats from JSON can
+    // come in as -0 or tiny negatives — don't let those produce widths
+    // above maxWidth.
+    expect(cosineDistanceToWidth(-0.01, range)).toBe(5);
+  });
+});
+
+describe("sessionHue", () => {
+  it("is deterministic for a given id", () => {
+    expect(sessionHue("abc")).toBe(sessionHue("abc"));
+  });
+
+  it("returns a value in [0, 360)", () => {
+    for (const id of ["", "x", "long-session-id-1234", "s1", "s2"]) {
+      const h = sessionHue(id);
+      expect(h).toBeGreaterThanOrEqual(0);
+      expect(h).toBeLessThan(360);
+    }
+  });
+
+  it("usually differs across distinct ids", () => {
+    // Not a hard guarantee (any hash has collisions), but small ids
+    // shouldn't collide trivially. This catches a regression where the
+    // hash was clamped to <8.
+    const hues = new Set(["s1", "s2", "s3", "s4", "s5"].map(sessionHue));
+    expect(hues.size).toBeGreaterThanOrEqual(4);
   });
 });

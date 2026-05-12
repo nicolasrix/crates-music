@@ -301,3 +301,51 @@ export function fetchRecommendLatentSpace(opts: {
     `/v1/diagnostics/recommend/latent_space${suffix}`
   );
 }
+
+// --- recommend sessions --------------------------------------------------
+
+export interface SessionEvent {
+  track_id: string;
+  event_type: string;
+  occurred_at_ms: number;
+}
+
+export interface SessionSegment {
+  /** Cosine distance between this event's track and the next event's
+   *  track in the recommender's CLAP embedding space. `null` when one
+   *  of the tracks lacks a `done` embedding under the active model. */
+  cosine_distance: number | null;
+}
+
+export interface SessionItem {
+  session_id: string;
+  anchor_track_id: string;
+  items_count: number;
+  started_ms: number;
+  /** null while the session is still active. */
+  ended_ms: number | null;
+  event_count: number;
+  /** Present only when `includeEvents=true`. Oldest-first. */
+  events?: SessionEvent[];
+  /** Present only when `includeEvents=true`. Length = events.length - 1. */
+  segments?: SessionSegment[];
+}
+
+export interface SessionsListResponse {
+  items: SessionItem[];
+}
+
+export function fetchRecommendSessions(opts: {
+  limit?: number;
+  includeEvents?: boolean;
+  modelVersion?: string;
+}): Promise<SessionsListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.includeEvents) qs.set("include_events", "1");
+  if (opts.modelVersion) qs.set("model_version", opts.modelVersion);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<SessionsListResponse>(
+    `/v1/diagnostics/recommend/sessions${suffix}`
+  );
+}

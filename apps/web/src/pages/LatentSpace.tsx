@@ -23,15 +23,22 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { getSong } from "../api/client";
-import { fetchRecommendLatentSpace, LatentSpacePoint } from "../api/diagnostics";
+import {
+  fetchRecommendLatentSpace,
+  fetchRecommendSessions,
+  LatentSpacePoint,
+  SessionItem,
+} from "../api/diagnostics";
 import { Layout } from "../components/Layout";
 import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
 import {
   bucketByGenre,
   computeBounds,
+  cosineDistanceToWidth,
   pickNearestPoint,
   scaleToCanvas,
+  sessionHue,
   type DataBounds,
   type CanvasGeometry,
   type GenreBucket,
@@ -53,9 +60,26 @@ const MIN_CANVAS_WIDTH = 320;
 // Cap height to a fraction of the viewport so the chart never pushes
 // the legend / topbar off-screen on tall windows.
 const MAX_HEIGHT_VH = 0.78;
+// How many recent sessions to make pickable. 50 is the gateway default;
+// keep it explicit so changes to the default don't silently grow the
+// dropdown.
+const SESSION_FETCH_LIMIT = 50;
+/// Sentinel for "render every session at once".
+const SESSION_ALL = "__all__";
+/// Sentinel for "render no path overlay".
+const SESSION_NONE = "__none__";
+
+// Stroke-width range for session paths. The recommender's own metric
+// is cosine distance, in `[0, 2]`; in practice CLAP cosines cluster in
+// `[0, 1]`, so cap there. Closer in latent space → thicker stroke.
+const PATH_WIDTH_RANGE = { minWidth: 0.6, maxWidth: 4, cap: 1 } as const;
 
 export function LatentSpace() {
   const [selectedProj, setSelectedProj] = useState<string | undefined>();
+  // Dropdown state for the session overlay. Defaults to "none" — the
+  // scatter is useful without a path, and fetching event-bundled
+  // sessions has a real cost on the gateway side.
+  const [sessionPick, setSessionPick] = useState<string>(SESSION_NONE);
 
   const { data, error, isLoading } = useQuery({
     queryKey: ["diag", "latent_space", selectedProj ?? null],
@@ -66,6 +90,23 @@ export function LatentSpace() {
     // The reducer is a batch job — projection rarely changes during a
     // session. 30s keeps it fresh enough for "I just re-ran the reducer
     // in another terminal" without churn.
+    refetchInterval: 30_000,
+  });
+
+  // Only fetch sessions+events once the user actually picks one (or
+  // "all"). Listing sessions without events is cheap; including events
+  // is per-segment embedding lookups, which we don't want to pay on
+  // every page load.
+  const wantSessions = sessionPick !== SESSION_NONE;
+  const sessionsQ = useQuery({
+    queryKey: ["diag", "sessions_with_events", SESSION_FETCH_LIMIT],
+    queryFn: () =>
+      fetchRecommendSessions({
+        limit: SESSION_FETCH_LIMIT,
+        includeEvents: true,
+      }),
+    enabled: wantSessions,
+    // Sessions change slowly; same refetch cadence as the scatter.
     refetchInterval: 30_000,
   });
 
@@ -93,13 +134,25 @@ export function LatentSpace() {
               selectedProj={data.proj_version}
               onSelect={(pv) => setSelectedProj(pv)}
             />
+            <SessionPicker
+              value={sessionPick}
+              sessions={sessionsQ.data?.items ?? []}
+              loading={wantSessions && sessionsQ.isFetching}
+              onChange={setSessionPick}
+            />
             {data.points.length === 0 ? (
               <EmptyHint
                 hasProjection={data.proj_version !== null}
                 modelVersion={data.model_version}
               />
             ) : (
-              <ScatterCanvas points={data.points} />
+              <ScatterCanvas
+                points={data.points}
+                sessions={selectSessionsForOverlay(
+                  sessionPick,
+                  sessionsQ.data?.items ?? []
+                )}
+              />
             )}
           </>
         )}
@@ -107,6 +160,78 @@ export function LatentSpace() {
         {isLoading && !data && <p className="text-sm">loading projection…</p>}
       </div>
     </Layout>
+  );
+}
+
+/// Decide which sessions to draw for the current dropdown selection.
+/// Kept pure (no hooks) so the picker logic stays separable from
+/// rendering.
+function selectSessionsForOverlay(
+  pick: string,
+  sessions: readonly SessionItem[]
+): SessionItem[] {
+  if (pick === SESSION_NONE) return [];
+  if (pick === SESSION_ALL) return [...sessions];
+  return sessions.filter((s) => s.session_id === pick);
+}
+
+function SessionPicker({
+  value,
+  sessions,
+  loading,
+  onChange,
+}: {
+  value: string;
+  sessions: readonly SessionItem[];
+  loading: boolean;
+  onChange: (v: string) => void;
+}) {
+  const fmtTs = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-3)",
+        alignItems: "center",
+        marginBottom: "var(--space-3)",
+        flexWrap: "wrap",
+      }}
+    >
+      <label className="text-sm">
+        session&nbsp;
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ fontFamily: "var(--font-mono)" }}
+        >
+          <option value={SESSION_NONE}>— none —</option>
+          <option value={SESSION_ALL}>show all ({sessions.length})</option>
+          {sessions.map((s) => (
+            <option key={s.session_id} value={s.session_id}>
+              {fmtTs(s.started_ms)} · {s.items_count} items · {s.event_count}{" "}
+              evts
+            </option>
+          ))}
+        </select>
+      </label>
+      {loading && (
+        <span className="text-sm" style={{ color: "var(--muted)" }}>
+          loading sessions…
+        </span>
+      )}
+      {value !== SESSION_NONE && (
+        <span className="text-sm" style={{ color: "var(--muted)" }}>
+          line thickness ∝ closeness in CLAP space · dashed = track not in this
+          projection
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -187,7 +312,13 @@ function EmptyHint({
   );
 }
 
-function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
+function ScatterCanvas({
+  points,
+  sessions,
+}: {
+  points: LatentSpacePoint[];
+  sessions: readonly SessionItem[];
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<LatentSpacePoint | null>(null);
@@ -307,6 +438,67 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       ctx.fill(path);
     }
 
+    // Session paths overlay. Each session draws as a polyline through
+    // its events' projected positions, with per-segment stroke width
+    // encoding cosine distance in the original CLAP space (UMAP is
+    // locally faithful but globally lossy, so the line length carries
+    // no real meaning — the width does). Segments through tracks not
+    // in this projection are dashed to make the gap visible.
+    if (sessions.length > 0) {
+      // O(N) lookup table: track_id → projection point. Built once per
+      // (points, sessions) change.
+      const byTrack = new Map<string, LatentSpacePoint>();
+      for (const p of points) byTrack.set(p.track_id, p);
+      for (const s of sessions) {
+        const hue = sessionHue(s.session_id);
+        const stroke = `hsl(${hue}deg 80% 65%)`;
+        const events = s.events ?? [];
+        const segments = s.segments ?? [];
+        // Draw each segment individually so stroke width can vary by
+        // segment. A single Path2D with one stroke() would force a
+        // uniform width.
+        for (let i = 0; i + 1 < events.length; i++) {
+          const a = byTrack.get(events[i]!.track_id);
+          const b = byTrack.get(events[i + 1]!.track_id);
+          if (!a || !b) continue;
+          const seg = segments[i];
+          const dist = seg ? seg.cosine_distance : null;
+          ctx.lineWidth = cosineDistanceToWidth(dist, PATH_WIDTH_RANGE);
+          ctx.strokeStyle = stroke;
+          ctx.setLineDash(dist === null ? [4, 3] : []);
+          const pa = scaleToCanvas(a, bounds, geometry);
+          const pb = scaleToCanvas(b, bounds, geometry);
+          ctx.beginPath();
+          ctx.moveTo(pa.px, pa.py);
+          ctx.lineTo(pb.px, pb.py);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        // Anchor as a hollow ring on top of its dot — gives the user a
+        // visual "this is where the session started".
+        const anchor = byTrack.get(s.anchor_track_id);
+        if (anchor) {
+          const { px, py } = scaleToCanvas(anchor, bounds, geometry);
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(px, py, POINT_RADIUS + 4, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        // Terminal marker — small filled dot on the last event so the
+        // direction of travel reads at a glance.
+        const last = events[events.length - 1];
+        const lastPt = last ? byTrack.get(last.track_id) : undefined;
+        if (lastPt) {
+          const { px, py } = scaleToCanvas(lastPt, bounds, geometry);
+          ctx.fillStyle = stroke;
+          ctx.beginPath();
+          ctx.arc(px, py, POINT_RADIUS + 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
     // Highlight the hovered point on top of the bulk pass.
     if (hover) {
       const { px, py } = scaleToCanvas(hover, bounds, geometry);
@@ -315,7 +507,7 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       ctx.arc(px, py, POINT_RADIUS + 2, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [bucketing, bounds, hover, hiddenBuckets, geometry]);
+  }, [bucketing, bounds, hover, hiddenBuckets, geometry, points, sessions]);
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!bounds) return;
