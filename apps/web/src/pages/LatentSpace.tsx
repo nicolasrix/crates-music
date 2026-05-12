@@ -38,8 +38,6 @@ import {
   type ScatterPoint,
 } from "./latentSpace";
 
-const CANVAS_WIDTH = 720;
-const CANVAS_HEIGHT = 540;
 const CANVAS_PADDING = 24;
 const POINT_RADIUS = 2.5;
 // Slightly larger than POINT_RADIUS so the hover target is forgiving
@@ -49,12 +47,12 @@ const HOVER_RADIUS = 8;
 // routinely have 50+ rare tags; we keep the top 10 (matches the
 // palette size) and roll the rest into 'Other'.
 const TOP_GENRE_BUCKETS = 10;
-
-const CANVAS_GEOMETRY: CanvasGeometry = {
-  width: CANVAS_WIDTH,
-  height: CANVAS_HEIGHT,
-  padding: CANVAS_PADDING,
-};
+// Lower bound so the chart stays usable on narrow viewports; without
+// this, a phone-width window would collapse the scatter to a strip.
+const MIN_CANVAS_WIDTH = 320;
+// Cap height to a fraction of the viewport so the chart never pushes
+// the legend / topbar off-screen on tall windows.
+const MAX_HEIGHT_VH = 0.78;
 
 export function LatentSpace() {
   const [selectedProj, setSelectedProj] = useState<string | undefined>();
@@ -191,6 +189,7 @@ function EmptyHint({
 
 function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<LatentSpacePoint | null>(null);
   const playback = usePlayback();
   // Resolving track_id → Track via Subsonic getSong is a separate
@@ -200,8 +199,47 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
   // Legend filter — click a bucket to toggle its visibility. Stored as
   // a Set so the canvas + picker can both consult it cheaply.
   const [hiddenBuckets, setHiddenBuckets] = useState<Set<string>>(new Set());
+  // Live canvas size, driven by a ResizeObserver on the wrapper. Width
+  // tracks the available column; height matches the data's natural
+  // aspect ratio (computed from bounds, with fallback 4:3 before the
+  // first measurement). Capped at MAX_HEIGHT_VH so the chart never
+  // pushes the legend below the fold on tall viewports.
+  const [size, setSize] = useState({ width: MIN_CANVAS_WIDTH, height: Math.round(MIN_CANVAS_WIDTH * 0.75) });
 
   const bounds: DataBounds | null = useMemo(() => computeBounds(points), [points]);
+
+  // Recompute size whenever the wrapper changes width or the data
+  // aspect ratio changes. ResizeObserver fires on layout shifts (window
+  // resize, sidebar toggle, font reflow) — no manual `resize` listener
+  // needed. The wrapper's width is the source of truth; we derive a
+  // height to preserve the data's aspect ratio.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const aspect =
+      bounds && bounds.maxX > bounds.minX && bounds.maxY > bounds.minY
+        ? (bounds.maxX - bounds.minX) / (bounds.maxY - bounds.minY)
+        : 4 / 3;
+    const apply = (width: number) => {
+      const w = Math.max(MIN_CANVAS_WIDTH, Math.floor(width));
+      const maxH = Math.floor(window.innerHeight * MAX_HEIGHT_VH);
+      const h = Math.min(maxH, Math.max(240, Math.round(w / aspect)));
+      setSize((prev) =>
+        prev.width === w && prev.height === h ? prev : { width: w, height: h }
+      );
+    };
+    apply(wrap.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) apply(e.contentRect.width);
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [bounds]);
+
+  const geometry: CanvasGeometry = useMemo(
+    () => ({ width: size.width, height: size.height, padding: CANVAS_PADDING }),
+    [size.width, size.height]
+  );
   // Bucket points by genre once; the canvas effect + picker both read
   // from this memo.
   const bucketing = useMemo(
@@ -232,20 +270,23 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
     if (!ctx) return;
 
     // High-DPI scale so dots stay crisp on retina screens. The CSS size
-    // stays at CANVAS_WIDTH × CANVAS_HEIGHT — only the backing store is
-    // upscaled.
+    // stays at geometry.width × geometry.height — only the backing store
+    // is upscaled. Always reset the transform on size change; otherwise
+    // a previously-applied DPR scale would compound after a resize.
     const dpr = window.devicePixelRatio || 1;
-    if (canvas.width !== CANVAS_WIDTH * dpr) {
-      canvas.width = CANVAS_WIDTH * dpr;
-      canvas.height = CANVAS_HEIGHT * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const targetW = geometry.width * dpr;
+    const targetH = geometry.height * dpr;
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctx.clearRect(0, 0, geometry.width, geometry.height);
     // Subtle backdrop border so the chart's extent is visible even on
     // sparse projections.
     ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.strokeRect(0.5, 0.5, CANVAS_WIDTH - 1, CANVAS_HEIGHT - 1);
+    ctx.strokeRect(0.5, 0.5, geometry.width - 1, geometry.height - 1);
 
     // One Path2D per bucket → one fill() per colour. Order matters: we
     // draw Unknown first so named buckets paint on top — the eye
@@ -259,7 +300,7 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       ctx.fillStyle = withAlpha(bucket.color, 0.65);
       const path = new Path2D();
       for (const p of slice) {
-        const { px, py } = scaleToCanvas(p, bounds, CANVAS_GEOMETRY);
+        const { px, py } = scaleToCanvas(p, bounds, geometry);
         path.moveTo(px + POINT_RADIUS, py);
         path.arc(px, py, POINT_RADIUS, 0, Math.PI * 2);
       }
@@ -268,13 +309,13 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
 
     // Highlight the hovered point on top of the bulk pass.
     if (hover) {
-      const { px, py } = scaleToCanvas(hover, bounds, CANVAS_GEOMETRY);
+      const { px, py } = scaleToCanvas(hover, bounds, geometry);
       ctx.fillStyle = "rgba(245, 158, 11, 1)";
       ctx.beginPath();
       ctx.arc(px, py, POINT_RADIUS + 2, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [bucketing, bounds, hover, hiddenBuckets]);
+  }, [bucketing, bounds, hover, hiddenBuckets, geometry]);
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!bounds) return;
@@ -284,7 +325,7 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       cursor,
       visiblePoints,
       bounds,
-      CANVAS_GEOMETRY,
+      geometry,
       HOVER_RADIUS
     );
     if (picked?.track_id !== hover?.track_id) {
@@ -331,15 +372,21 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
           flexWrap: "wrap",
         }}
       >
-        <div style={{ position: "relative", width: CANVAS_WIDTH, maxWidth: "100%" }}>
+        {/* flex: 1 lets the canvas column claim every pixel the legend
+             doesn't need; minWidth: 0 stops a long-genre legend label
+             from preventing the canvas from shrinking on narrow viewports. */}
+        <div
+          ref={wrapRef}
+          style={{ position: "relative", flex: "1 1 0", minWidth: 0 }}
+        >
           <canvas
             ref={canvasRef}
-            // CSS size is the logical size; canvas.width/.height (set in
-            // the effect) is the backing-store size for DPR.
+            // CSS size matches the measured wrapper width and the
+            // bounds-derived height; canvas.width/.height (set in the
+            // effect) is the backing-store size for DPR.
             style={{
-              width: CANVAS_WIDTH,
-              height: CANVAS_HEIGHT,
-              maxWidth: "100%",
+              width: size.width,
+              height: size.height,
               display: "block",
               cursor: hover ? "pointer" : "crosshair",
               background: "var(--surface-2, #0e1116)",
@@ -350,7 +397,12 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
             onClick={handleClick}
           />
           {hover && bounds && (
-            <HoverTooltip point={hover} bounds={bounds} loading={playingTrackId === hover.track_id} />
+            <HoverTooltip
+              point={hover}
+              bounds={bounds}
+              geometry={geometry}
+              loading={playingTrackId === hover.track_id}
+            />
           )}
         </div>
         <Legend
@@ -461,23 +513,25 @@ function Legend({
 function HoverTooltip({
   point,
   bounds,
+  geometry,
   loading,
 }: {
   point: LatentSpacePoint;
   bounds: DataBounds;
+  geometry: CanvasGeometry;
   loading: boolean;
 }) {
-  const { px, py } = scaleToCanvas(point, bounds, CANVAS_GEOMETRY);
+  const { px, py } = scaleToCanvas(point, bounds, geometry);
   // Anchor near the cursor without escaping the canvas — flip to the
   // left of the point if we're in the right half.
-  const flipX = px > CANVAS_WIDTH / 2;
-  const flipY = py > CANVAS_HEIGHT - 80;
+  const flipX = px > geometry.width / 2;
+  const flipY = py > geometry.height - 80;
   const style: React.CSSProperties = {
     position: "absolute",
     left: flipX ? undefined : px + 10,
-    right: flipX ? CANVAS_WIDTH - px + 10 : undefined,
+    right: flipX ? geometry.width - px + 10 : undefined,
     top: flipY ? undefined : py + 10,
-    bottom: flipY ? CANVAS_HEIGHT - py + 10 : undefined,
+    bottom: flipY ? geometry.height - py + 10 : undefined,
     pointerEvents: "none",
     background: "var(--surface-3, #1a1f2c)",
     padding: "var(--space-2, 8px) var(--space-3, 12px)",
