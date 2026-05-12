@@ -932,3 +932,68 @@ pub async fn queue_depth(
         failed: counts.failed,
     }))
 }
+
+// --- /v1/diagnostics/recommend/sessions ----------------------------------
+
+const DEFAULT_SESSIONS_LIMIT: i64 = 50;
+const MAX_SESSIONS_LIMIT: i64 = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct SessionsQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionItem {
+    session_id: String,
+    anchor_track_id: String,
+    items_count: i64,
+    started_ms: i64,
+    /// `None` when the session is still active.
+    ended_ms: Option<i64>,
+    /// How many events (scrobble/skip/seek/…) landed under this session
+    /// id. 0 when nothing has been logged yet — useful indicator of
+    /// "user opened a queue but didn't actually listen."
+    event_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionsListResponse {
+    items: Vec<SessionItem>,
+}
+
+/// Recent recommend-session lifetimes, newest started_ms first. Each
+/// row joins in the count of events stamped with that session_id from
+/// the (separately stored) event log. Single SQL aggregate, not N+1.
+pub async fn recommend_sessions(
+    State(state): State<AppState>,
+    Query(q): Query<SessionsQuery>,
+) -> Result<Json<SessionsListResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_SESSIONS_LIMIT)
+        .clamp(1, MAX_SESSIONS_LIMIT);
+    let rows = state.sessions().recent(limit).await.map_err(db_error)?;
+    let session_ids: Vec<music_core::SessionId> =
+        rows.iter().map(|r| r.session_id.clone()).collect();
+    let counts = state
+        .event_store()
+        .count_events_per_session(&session_ids)
+        .await
+        .map_err(db_error)?;
+    let items = rows
+        .into_iter()
+        .map(|r| {
+            let event_count = counts.get(&r.session_id).copied().unwrap_or(0);
+            SessionItem {
+                session_id: r.session_id.as_str().to_string(),
+                anchor_track_id: r.anchor_track_id.as_str().to_string(),
+                items_count: r.items_count,
+                started_ms: r.started_ms,
+                ended_ms: r.ended_ms,
+                event_count,
+            }
+        })
+        .collect();
+    Ok(Json(SessionsListResponse { items }))
+}

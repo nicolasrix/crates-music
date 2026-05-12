@@ -529,6 +529,39 @@ UMAP 2D projection of every embedded track. Backs the
 `backfill_projection` binary; see
 [components/music-recommend.md](./components/music-recommend.md)).
 
+#### `GET /v1/diagnostics/recommend/sessions?limit=N`
+
+Recent recommend-session lifetimes, newest `started_ms` first. Each
+item joins the persisted `recommend_sessions` row with a count of
+events stamped with that `session_id` from the event log — the
+"how much signal did this session generate" indicator.
+
+```json
+{
+  "items": [
+    {
+      "session_id": "sess-abc",
+      "anchor_track_id": "t-1",
+      "items_count": 30,
+      "started_ms": 1739000000000,
+      "ended_ms": null,
+      "event_count": 5
+    }
+  ]
+}
+```
+
+- `ended_ms = null` means the session is still active. By the
+  single-active invariant there is at most one such row.
+- `event_count = 0` is common right after a `start_session` op — the
+  user opened a queue but hasn't hit `submission=true` on the first
+  scrobble yet.
+- `limit` defaults to 50, clamps to `[1, 500]`.
+
+To reconstruct what happened during a specific session, combine this
+with the events table (queryable via `EventStore::by_session`
+server-side; no client endpoint exposes per-session events yet).
+
 ### Intercepted Subsonic endpoints
 
 #### `ANY /rest/scrobble`
@@ -538,8 +571,11 @@ Intercepted *before* the catch-all proxy. The gateway:
 1. Parses `id`, `submission`, `time` query params.
 2. On submission (i.e. not a now-playing ping): writes
    `play_history.last_played_ms` (the MMR recency clock) and appends a
-   `Scrobble` event to the event log. Both writes are best-effort —
-   Navidrome remains the canonical play-count ledger.
+   `Scrobble` event to the event log, stamped with the currently-active
+   `session_id` (read from the in-memory `SessionAnchor`). Both writes
+   are best-effort — Navidrome remains the canonical play-count
+   ledger, and a write failure here does not block the upstream
+   forward.
 3. Forwards the unmodified request to the upstream proxy.
 
 `time` is the client-supplied unix-ms timestamp; offline scrobble

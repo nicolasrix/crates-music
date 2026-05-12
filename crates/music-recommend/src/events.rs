@@ -13,7 +13,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use music_core::TrackId;
+use music_core::{SessionId, TrackId};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -71,6 +71,11 @@ pub struct EventInput {
     /// Optional opaque JSON. Default: `null`.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Active recommend-session at write time. `None` means the event
+    /// fired outside any session (or the caller hasn't been wired to
+    /// stamp it yet); persisted as SQL NULL.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
 }
 
 /// A persisted event with the gateway-assigned id and `received_at`
@@ -83,6 +88,7 @@ pub struct StoredEvent {
     pub occurred_at: i64,
     pub received_at: i64,
     pub metadata: Option<serde_json::Value>,
+    pub session_id: Option<SessionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,14 +118,15 @@ impl EventStore {
                 .map(|v| serde_json::to_string(v).expect("Value serializes"));
             sqlx::query(
                 "INSERT INTO events
-                     (event_type, track_id, occurred_at, received_at, metadata)
-                 VALUES (?, ?, ?, ?, ?)",
+                     (event_type, track_id, occurred_at, received_at, metadata, session_id)
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(ev.event_type.as_str())
             .bind(ev.track_id.as_str())
             .bind(ev.occurred_at)
             .bind(received_at)
             .bind(metadata_json)
+            .bind(ev.session_id.as_ref().map(SessionId::as_str))
             .execute(&mut *tx)
             .await?;
             count += 1;
@@ -152,7 +159,7 @@ impl EventStore {
     ) -> Result<Vec<StoredEvent>> {
         let rows = if let Some(since) = since_ms {
             sqlx::query(
-                "SELECT id, event_type, track_id, occurred_at, received_at, metadata
+                "SELECT id, event_type, track_id, occurred_at, received_at, metadata, session_id
                      FROM events
                      WHERE event_type = 'scrobble' AND occurred_at >= ?
                      ORDER BY occurred_at DESC, id DESC
@@ -164,7 +171,7 @@ impl EventStore {
             .await?
         } else {
             sqlx::query(
-                "SELECT id, event_type, track_id, occurred_at, received_at, metadata
+                "SELECT id, event_type, track_id, occurred_at, received_at, metadata, session_id
                      FROM events
                      WHERE event_type = 'scrobble'
                      ORDER BY occurred_at DESC, id DESC
@@ -181,11 +188,75 @@ impl EventStore {
     /// Most recent `limit` events, newest first. Diagnostic / debug.
     pub async fn recent(&self, limit: u32) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT id, event_type, track_id, occurred_at, received_at, metadata
+            "SELECT id, event_type, track_id, occurred_at, received_at, metadata, session_id
                  FROM events
                  ORDER BY id DESC
                  LIMIT ?",
         )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_stored).collect()
+    }
+
+    /// Per-session event counts for the given session ids. Used by
+    /// `/v1/diagnostics/recommend/sessions` to show how much signal
+    /// each session generated. Missing keys (no events at all) are
+    /// not present in the returned map — callers default to 0.
+    /// Single SELECT with GROUP BY; N+1 query avoidance.
+    pub async fn count_events_per_session(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Result<std::collections::HashMap<SessionId, i64>> {
+        let mut out = std::collections::HashMap::new();
+        if session_ids.is_empty() {
+            return Ok(out);
+        }
+        // Build a parameterised "WHERE session_id IN (?, ?, …)". sqlx
+        // doesn't expand `Vec` natively for SQLite — inline the right
+        // number of placeholders by hand.
+        let placeholders = std::iter::repeat("?")
+            .take(session_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT session_id, COUNT(*) AS n
+                 FROM events
+                 WHERE session_id IN ({placeholders})
+                 GROUP BY session_id"
+        );
+        let mut query = sqlx::query(&sql);
+        for sid in session_ids {
+            query = query.bind(sid.as_str());
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        for row in rows {
+            let sid: String = row.get("session_id");
+            let n: i64 = row.get("n");
+            out.insert(SessionId::from(sid), n);
+        }
+        Ok(out)
+    }
+
+    /// All events stamped with the given `session_id`, oldest first by
+    /// `occurred_at`. This is the per-session reconstruction primitive —
+    /// the diagnostic story behind a session ("what did the user do
+    /// during s_abc?") is one call to this method. `id ASC` tiebreaks
+    /// same-millisecond events stably.
+    pub async fn by_session(
+        &self,
+        session_id: &SessionId,
+        limit: u32,
+    ) -> Result<Vec<StoredEvent>> {
+        let rows = sqlx::query(
+            "SELECT id, event_type, track_id, occurred_at, received_at, metadata, session_id
+                 FROM events
+                 WHERE session_id = ?
+                 ORDER BY occurred_at ASC, id ASC
+                 LIMIT ?",
+        )
+        .bind(session_id.as_str())
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;
@@ -200,6 +271,7 @@ fn row_to_stored(row: &sqlx::sqlite::SqliteRow) -> Result<StoredEvent> {
         .map(|s| serde_json::from_str(&s))
         .transpose()
         .map_err(|e| Error::InvalidStatus(format!("metadata json: {e}")))?;
+    let session_id: Option<String> = row.get("session_id");
     Ok(StoredEvent {
         id: row.get("id"),
         event_type: EventType::parse(row.get::<String, _>("event_type").as_str()),
@@ -207,6 +279,7 @@ fn row_to_stored(row: &sqlx::sqlite::SqliteRow) -> Result<StoredEvent> {
         occurred_at: row.get("occurred_at"),
         received_at: row.get("received_at"),
         metadata,
+        session_id: session_id.map(SessionId::from),
     })
 }
 
@@ -249,12 +322,14 @@ mod tests {
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
                 metadata: Some(serde_json::json!({"played_ms": 180_000})),
+                session_id: None,
             },
             EventInput {
                 event_type: EventType::Skip,
                 track_id: TrackId::from("t2"),
                 occurred_at: 1_500,
                 metadata: None,
+                session_id: None,
             },
         ];
         let n = store.append_batch(&events).await.unwrap();
@@ -282,6 +357,7 @@ mod tests {
                     track_id: TrackId::from(format!("t{i}")),
                     occurred_at: 1_000 + i64::from(i),
                     metadata: None,
+                    session_id: None,
                 }])
                 .await
                 .unwrap();
@@ -306,6 +382,7 @@ mod tests {
                 track_id: TrackId::from("t1"),
                 occurred_at: 5_000,
                 metadata: Some(payload.clone()),
+                session_id: None,
             }])
             .await
             .unwrap();
@@ -325,6 +402,7 @@ mod tests {
                 track_id: TrackId::from("t1"),
                 occurred_at: 5_000,
                 metadata: None,
+                session_id: None,
             }])
             .await
             .unwrap();
@@ -348,6 +426,7 @@ mod tests {
                 track_id: TrackId::from(format!("t{i}")),
                 occurred_at: i64::from(i),
                 metadata: None,
+                session_id: None,
             });
         }
         store.append_batch(&events).await.unwrap();
@@ -366,18 +445,21 @@ mod tests {
                     track_id: TrackId::from("t1"),
                     occurred_at: 1_000,
                     metadata: None,
+                    session_id: None,
                 },
                 EventInput {
                     event_type: EventType::Skip,
                     track_id: TrackId::from("t2"),
                     occurred_at: 1_500,
                     metadata: None,
+                    session_id: None,
                 },
                 EventInput {
                     event_type: EventType::Like,
                     track_id: TrackId::from("t3"),
                     occurred_at: 2_000,
                     metadata: None,
+                    session_id: None,
                 },
             ])
             .await
@@ -403,6 +485,7 @@ mod tests {
                     track_id: TrackId::from(format!("t-{occurred}")),
                     occurred_at: occurred,
                     metadata: None,
+                    session_id: None,
                 }])
                 .await
                 .unwrap();
@@ -425,6 +508,7 @@ mod tests {
                     track_id: TrackId::from(format!("t{i}")),
                     occurred_at: 1_000 + i64::from(i),
                     metadata: None,
+                    session_id: None,
                 }])
                 .await
                 .unwrap();
@@ -449,6 +533,7 @@ mod tests {
                     track_id: TrackId::from(format!("t-{occurred}")),
                     occurred_at: occurred,
                     metadata: None,
+                    session_id: None,
                 }])
                 .await
                 .unwrap();
@@ -471,6 +556,7 @@ mod tests {
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
                 metadata: None,
+                session_id: None,
             }])
             .await
             .unwrap();
@@ -491,12 +577,188 @@ mod tests {
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
                 metadata: Some(payload.clone()),
+                session_id: None,
             }])
             .await
             .unwrap();
 
         let recent = store.recently_played(1, None).await.unwrap();
         assert_eq!(recent[0].metadata.as_ref().unwrap(), &payload);
+    }
+
+    #[tokio::test]
+    async fn session_id_round_trips() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        store
+            .append_batch(&[EventInput {
+                event_type: EventType::Scrobble,
+                track_id: TrackId::from("t1"),
+                occurred_at: 1_000,
+                metadata: None,
+                session_id: Some(SessionId::from("s-abc")),
+            }])
+            .await
+            .unwrap();
+        let recent = store.recent(1).await.unwrap();
+        assert_eq!(recent[0].session_id.as_ref().unwrap().as_str(), "s-abc");
+    }
+
+    #[tokio::test]
+    async fn missing_session_id_stores_null_and_round_trips_to_none() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        store
+            .append_batch(&[EventInput {
+                event_type: EventType::Scrobble,
+                track_id: TrackId::from("t1"),
+                occurred_at: 1_000,
+                metadata: None,
+                session_id: None,
+            }])
+            .await
+            .unwrap();
+        let recent = store.recent(1).await.unwrap();
+        assert!(recent[0].session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn by_session_returns_only_matching_session_ordered_oldest_first() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        let s1 = SessionId::from("s1");
+        let s2 = SessionId::from("s2");
+        // Interleaved insert order shouldn't affect output order.
+        store
+            .append_batch(&[
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("a"),
+                    occurred_at: 3_000,
+                    metadata: None,
+                    session_id: Some(s1.clone()),
+                },
+                EventInput {
+                    event_type: EventType::Skip,
+                    track_id: TrackId::from("b"),
+                    occurred_at: 1_000,
+                    metadata: None,
+                    session_id: Some(s1.clone()),
+                },
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("c"),
+                    occurred_at: 2_000,
+                    metadata: None,
+                    session_id: Some(s2.clone()),
+                },
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("d"),
+                    occurred_at: 4_000,
+                    metadata: None,
+                    session_id: None,
+                },
+            ])
+            .await
+            .unwrap();
+        let s1_events = store.by_session(&s1, 100).await.unwrap();
+        let tracks: Vec<&str> = s1_events.iter().map(|e| e.track_id.as_str()).collect();
+        assert_eq!(tracks, vec!["b", "a"], "ordered by occurred_at ASC");
+        let s2_events = store.by_session(&s2, 100).await.unwrap();
+        assert_eq!(s2_events.len(), 1);
+        assert_eq!(s2_events[0].track_id.as_str(), "c");
+    }
+
+    #[tokio::test]
+    async fn count_events_per_session_aggregates_correctly() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        let s1 = SessionId::from("s1");
+        let s2 = SessionId::from("s2");
+        store
+            .append_batch(&[
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("a"),
+                    occurred_at: 1,
+                    metadata: None,
+                    session_id: Some(s1.clone()),
+                },
+                EventInput {
+                    event_type: EventType::Skip,
+                    track_id: TrackId::from("b"),
+                    occurred_at: 2,
+                    metadata: None,
+                    session_id: Some(s1.clone()),
+                },
+                EventInput {
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("c"),
+                    occurred_at: 3,
+                    metadata: None,
+                    session_id: Some(s2.clone()),
+                },
+                EventInput {
+                    // NULL session_id should not count against either bucket.
+                    event_type: EventType::Scrobble,
+                    track_id: TrackId::from("d"),
+                    occurred_at: 4,
+                    metadata: None,
+                    session_id: None,
+                },
+            ])
+            .await
+            .unwrap();
+        let counts = store
+            .count_events_per_session(&[s1.clone(), s2.clone()])
+            .await
+            .unwrap();
+        assert_eq!(counts.get(&s1).copied(), Some(2));
+        assert_eq!(counts.get(&s2).copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn count_events_per_session_empty_input_returns_empty_map() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        assert!(store.count_events_per_session(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn count_events_per_session_omits_sessions_with_zero_events() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        let counts = store
+            .count_events_per_session(&[SessionId::from("nobody")])
+            .await
+            .unwrap();
+        assert!(
+            !counts.contains_key(&SessionId::from("nobody")),
+            "zero-event sessions are absent from the map (callers default to 0)"
+        );
+    }
+
+    #[tokio::test]
+    async fn by_session_returns_empty_for_unknown_session() {
+        let pool = test_pool().await;
+        let store = EventStore::new(pool);
+        let rows = store
+            .by_session(&SessionId::from("never"), 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn event_input_deserializes_with_legacy_payload_missing_session_id() {
+        // Backwards compat: pre-0007 clients POST without session_id.
+        // serde default must kick in, not 422 the request.
+        let parsed: EventInput = serde_json::from_str(
+            r#"{"event_type":"scrobble","track_id":"t1","occurred_at":1000}"#,
+        )
+        .expect("parses without session_id");
+        assert!(parsed.session_id.is_none());
     }
 
     #[test]

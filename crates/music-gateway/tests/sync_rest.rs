@@ -407,3 +407,153 @@ async fn ops_are_linearized_across_concurrent_posts() {
         2
     );
 }
+
+// --- session lifecycle persistence (migration 0008) -----------------
+
+async fn post_op(
+    app: &axum::Router,
+    auth: &(&str, String),
+    body: serde_json::Value,
+) -> StatusCode {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sync/ops")
+                .header(auth.0, auth.1.clone())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+#[tokio::test]
+async fn start_session_persists_a_recommend_sessions_row() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state.clone());
+    let auth = auth_header();
+    let body = json!({
+        "type": "start_session",
+        "items": [
+            {"item_id": "qi-1", "track_id": "t-1"},
+            {"item_id": "qi-2", "track_id": "t-2"},
+            {"item_id": "qi-3", "track_id": "t-3"},
+        ],
+        "anchor_index": 1,
+        "session_id": "sess-persist-1",
+    });
+    assert_eq!(post_op(&app, &auth, body).await, StatusCode::OK);
+
+    let sid = music_core::SessionId::from("sess-persist-1".to_string());
+    let row = state.sessions().get(&sid).await.unwrap().expect("row persisted");
+    assert_eq!(row.anchor_track_id.as_str(), "t-2");
+    assert_eq!(row.items_count, 3);
+    assert!(row.ended_ms.is_none());
+}
+
+#[tokio::test]
+async fn stop_session_closes_persisted_row() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state.clone());
+    let auth = auth_header();
+    let start = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 0,
+        "session_id": "sess-stop-1",
+    });
+    assert_eq!(post_op(&app, &auth, start).await, StatusCode::OK);
+    let stop = json!({"type": "stop_session"});
+    assert_eq!(post_op(&app, &auth, stop).await, StatusCode::OK);
+
+    let sid = music_core::SessionId::from("sess-stop-1".to_string());
+    let row = state.sessions().get(&sid).await.unwrap().expect("row persisted");
+    assert!(
+        row.ended_ms.is_some(),
+        "stop_session must stamp ended_ms; got {row:?}"
+    );
+    // active() must reflect the close.
+    assert!(state.sessions().active().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn starting_new_session_closes_the_previous_persisted_row() {
+    // Mirrors the single-active invariant: the in-memory anchor flips,
+    // and the persisted row for the old session gets stamped with the
+    // new session's start time.
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state.clone());
+    let auth = auth_header();
+    let s1 = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 0,
+        "session_id": "sess-prev",
+    });
+    let s2 = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-2", "track_id": "t-2"}],
+        "anchor_index": 0,
+        "session_id": "sess-next",
+    });
+    assert_eq!(post_op(&app, &auth, s1).await, StatusCode::OK);
+    assert_eq!(post_op(&app, &auth, s2).await, StatusCode::OK);
+
+    let prev = state
+        .sessions()
+        .get(&music_core::SessionId::from("sess-prev".to_string()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(prev.ended_ms.is_some(), "previous session must be closed");
+
+    let active = state.sessions().active().await.unwrap().unwrap();
+    assert_eq!(active.session_id.as_str(), "sess-next");
+}
+
+#[tokio::test]
+async fn clear_op_implicitly_stops_the_active_persisted_session() {
+    // Clear nulls session_anchor in-memory; the persisted mirror must
+    // match — otherwise an orphan "active" row would linger forever
+    // after a queue clear.
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state.clone());
+    let auth = auth_header();
+    let start = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 0,
+        "session_id": "sess-clear",
+    });
+    assert_eq!(post_op(&app, &auth, start).await, StatusCode::OK);
+    let clear = json!({"type": "clear"});
+    assert_eq!(post_op(&app, &auth, clear).await, StatusCode::OK);
+
+    let row = state
+        .sessions()
+        .get(&music_core::SessionId::from("sess-clear".to_string()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.ended_ms.is_some(), "clear must close the active session");
+    assert!(state.sessions().active().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sync_active_session_id_reads_from_in_memory_anchor() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state.clone());
+    let auth = auth_header();
+    assert!(state.sync().active_session_id().await.is_none());
+    let start = json!({
+        "type": "start_session",
+        "items": [{"item_id": "qi-1", "track_id": "t-1"}],
+        "anchor_index": 0,
+        "session_id": "sess-active",
+    });
+    assert_eq!(post_op(&app, &auth, start).await, StatusCode::OK);
+    let active = state.sync().active_session_id().await.unwrap();
+    assert_eq!(active.as_str(), "sess-active");
+}

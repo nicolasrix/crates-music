@@ -86,6 +86,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/diagnostics/recommend/latent_space",
             get(diagnostics_handlers::recommend_latent_space),
         )
+        .route(
+            "/v1/diagnostics/recommend/sessions",
+            get(diagnostics_handlers::recommend_sessions),
+        )
         // /rest/scrobble is intercepted to write the recommender's
         // recency clock before delegating to the same proxy used by
         // every other /rest/* call. axum's matchit prefers the more

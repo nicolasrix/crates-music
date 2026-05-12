@@ -324,6 +324,7 @@ fn scrobble(track_id: &str, occurred_at: i64) -> EventInput {
         track_id: TrackId::from(track_id.to_string()),
         occurred_at,
         metadata: None,
+        session_id: None,
     }
 }
 
@@ -391,12 +392,14 @@ async fn recently_played_excludes_non_scrobble_events() {
                 track_id: TrackId::from("t-b".to_string()),
                 occurred_at: 2_000,
                 metadata: None,
+                session_id: None,
             },
             EventInput {
                 event_type: EventType::Like,
                 track_id: TrackId::from("t-c".to_string()),
                 occurred_at: 3_000,
                 metadata: None,
+                session_id: None,
             },
         ])
         .await
@@ -1146,4 +1149,132 @@ async fn latent_space_joins_metadata_when_available() {
     assert!(points[1]["artist"].is_null());
     assert!(points[1]["album"].is_null());
     assert!(points[1]["genre"].is_null());
+}
+
+// --- /v1/diagnostics/recommend/sessions ----------------------------------
+
+
+#[tokio::test]
+async fn recommend_sessions_returns_empty_when_no_sessions() {
+    let state = common::build_state(common::test_config()).await;
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/sessions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn recommend_sessions_returns_newest_first_with_event_counts() {
+    let state = common::build_state(common::test_config()).await;
+    // Three sessions, increasing started_ms. s1 and s2 closed; s3 active.
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-1".to_string()),
+                track_id: music_core::TrackId::from("t-1".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s1".to_string()),
+        })
+        .await
+        .unwrap();
+    // Stamp two events under s1 by going through the scrobble interceptor.
+    state
+        .event_store()
+        .append_batch(&[music_recommend::EventInput {
+            event_type: music_recommend::EventType::Scrobble,
+            track_id: music_core::TrackId::from("t-1"),
+            occurred_at: 100,
+            metadata: None,
+            session_id: Some(music_core::SessionId::from("s1")),
+        }])
+        .await
+        .unwrap();
+    state
+        .event_store()
+        .append_batch(&[music_recommend::EventInput {
+            event_type: music_recommend::EventType::Skip,
+            track_id: music_core::TrackId::from("t-1"),
+            occurred_at: 200,
+            metadata: None,
+            session_id: Some(music_core::SessionId::from("s1")),
+        }])
+        .await
+        .unwrap();
+    // Open s2 (auto-closes s1), then s3 (auto-closes s2).
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-2".to_string()),
+                track_id: music_core::TrackId::from("t-2".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s2".to_string()),
+        })
+        .await
+        .unwrap();
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-3".to_string()),
+                track_id: music_core::TrackId::from("t-3".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("s3".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    // Newest started_ms first: s3, s2, s1.
+    assert_eq!(items[0]["session_id"], "s3");
+    assert!(items[0]["ended_ms"].is_null(), "active session has null ended_ms");
+    assert_eq!(items[0]["event_count"], 0);
+    assert_eq!(items[1]["session_id"], "s2");
+    assert!(!items[1]["ended_ms"].is_null(), "s2 closed by s3 start");
+    assert_eq!(items[1]["event_count"], 0);
+    assert_eq!(items[2]["session_id"], "s1");
+    assert_eq!(items[2]["anchor_track_id"], "t-1");
+    assert_eq!(items[2]["items_count"], 1);
+    assert_eq!(items[2]["event_count"], 2);
+}
+
+#[tokio::test]
+async fn recommend_sessions_respects_limit_query() {
+    let state = common::build_state(common::test_config()).await;
+    for i in 0..5 {
+        state
+            .sync()
+            .apply(&music_sync::SyncOp::StartSession {
+                items: vec![music_core::QueueItem {
+                    item_id: music_core::QueueItemId::from(format!("qi-{i}")),
+                    track_id: music_core::TrackId::from(format!("t-{i}")),
+                }],
+                anchor_index: 0,
+                session_id: music_core::SessionId::from(format!("s{i}")),
+            })
+            .await
+            .unwrap();
+    }
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recommend/sessions?limit=2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    // Newest two: s4, s3.
+    assert_eq!(items[0]["session_id"], "s4");
+    assert_eq!(items[1]["session_id"], "s3");
 }
