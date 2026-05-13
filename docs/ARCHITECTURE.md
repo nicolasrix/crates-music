@@ -181,8 +181,10 @@ capture different things:
 
 - **Content embeddings** (CLAP) — computed once per track at ingest.
   Captures "these tracks sound similar." Bonus: text-aligned, so
-  natural-language queries ("rainy sunday afternoon") work via the
-  same index. **Live.**
+  natural-language queries ("sunny afternoon", "late night drive")
+  work via the same index. **Live;** text queries land via
+  `GET /v1/recommend/station?text=...&n=...` and the web app's
+  `/station` page.
 - **Behavioural embeddings** (track2vec on listening sessions) —
   retrained nightly. Captures "this user plays these together,"
   which can diverge from acoustic similarity. **Deferred (P6.8);**
@@ -335,6 +337,6 @@ parallel.
 | P5 | WebSocket sync. Queue CRDT. Cross-device state. | Done |
 | P6 | Recommender. CLAP ingest + content ANN + event log. | Minimum viable shipped |
 | P6.8 | Behavioural index + nightly track2vec retrain. | Deferred |
-| P6.9 | Text-query stations. | Deferred |
+| P6.9 | Text-query stations (CLAP text encoder → ANN). | Done |
 
 The full phase plan with rationale is in [`/CLAUDE.md`](../CLAUDE.md).

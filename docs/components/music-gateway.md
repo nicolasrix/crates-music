@@ -2,7 +2,7 @@
 
 **Path:** `crates/music-gateway/`
 **Type:** binary (with library crate for tests)
-**Test count:** 315 (largest in the workspace)
+**Test count:** ≈350 (largest in the workspace)
 
 The HTTP gateway. Loads config, wires the axum router, terminates
 TLS, runs OAuth, layers caches in front of Navidrome, hosts the
@@ -22,7 +22,7 @@ crates/music-gateway/
 │   ├── state.rs                 # AppState (Arc-backed, cloned per-request)
 │   ├── auth.rs                  # require_bearer middleware
 │   ├── proxy.rs                 # /rest/* → Navidrome; L2 + cover-art proxy
-│   ├── recommend.rs             # /v1/recommend/next, from-any, from-seeds, enqueue
+│   ├── recommend.rs             # /v1/recommend/{next, from-any, from-seeds, station, enqueue}
 │   ├── recommend_feedback.rs    # POST /v1/recommend/feedback (thumbs up/down)
 │   ├── scrobble.rs              # /rest/scrobble interceptor → play_history + event log
 │   ├── events.rs                # POST /v1/events

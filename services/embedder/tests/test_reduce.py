@@ -20,6 +20,7 @@ import pytest
 from embedder.reduce import (
     Embedding,
     Projection2D,
+    compute_pcs,
     decode_vector_blob,
     default_proj_version,
     read_embeddings_from_sqlite,
@@ -49,6 +50,11 @@ CREATE TABLE embedding_projection_2d (
     x               REAL    NOT NULL,
     y               REAL    NOT NULL,
     created_at_ms   INTEGER NOT NULL,
+    pc1             REAL,
+    pc2             REAL,
+    pc3             REAL,
+    pc4             REAL,
+    z               REAL,
     PRIMARY KEY (track_id, model_version, proj_version)
 ) WITHOUT ROWID;
 """
@@ -91,6 +97,85 @@ def test_default_proj_version_changes_with_any_param() -> None:
     assert base != default_proj_version(n_neighbors=30)
     assert base != default_proj_version(min_dist=0.25)
     assert base != default_proj_version(random_state=7)
+
+
+def test_default_proj_version_omits_dim_suffix_for_2d() -> None:
+    # Existing 2D names must stay stable so re-running the reducer with
+    # defaults idempotently overwrites the same proj_version rather than
+    # spawning a parallel `-d2` copy.
+    assert default_proj_version(n_components=2) == default_proj_version()
+
+
+def test_default_proj_version_appends_d3_for_3d_run() -> None:
+    pv = default_proj_version(
+        n_neighbors=15, min_dist=0.1, random_state=42, n_components=3
+    )
+    assert pv == "umap-v1-rs42-n15-m0p10-d3"
+
+
+def test_default_proj_version_rejects_unsupported_dim() -> None:
+    # n_components is the colour-channel knob, not a full reducer config.
+    # Anything other than 2 (canvas-only) or 3 (canvas + colour z) means
+    # the persistence schema can't represent it — surface that early.
+    with pytest.raises(ValueError, match="n_components"):
+        default_proj_version(n_components=4)
+
+
+# --- PCA -------------------------------------------------------------------
+#
+# PCA gives us "honest" extra dimensions of the latent space — axes
+# ordered by variance in the original 512-D CLAP vectors. UMAP picks
+# coordinates optimized for cluster legibility; PCA picks coordinates
+# optimized for variance preservation. Both views are kept under one
+# proj_version so they describe the same snapshot.
+
+
+def test_compute_pcs_returns_shape_n_by_requested_components() -> None:
+    # 30 points × 8 dims → 4 PCs, one per requested component, no padding.
+    rng = np.random.default_rng(0)
+    matrix = rng.standard_normal((30, 8)).astype(np.float32)
+    pcs = compute_pcs(matrix, n_components=4)
+    assert pcs.shape == (30, 4)
+    assert np.isfinite(pcs).all()
+
+
+def test_compute_pcs_clamps_components_to_n_when_few_points() -> None:
+    # sklearn's PCA can't produce more components than min(N-1, D).
+    # We clamp internally so a 3-point input doesn't crash — the
+    # reducer must keep working on tiny dev datasets.
+    rng = np.random.default_rng(0)
+    matrix = rng.standard_normal((3, 8)).astype(np.float32)
+    pcs = compute_pcs(matrix, n_components=4)
+    # Clamp keeps shape compatible: rows = N, cols ≤ requested. The
+    # caller pads to 4 with None when persisting.
+    assert pcs.shape[0] == 3
+    assert pcs.shape[1] <= 4
+    assert pcs.shape[1] >= 1
+
+
+def test_compute_pcs_clamps_components_to_dimensionality() -> None:
+    # Embeddings can't have more axes than their own dimensionality.
+    rng = np.random.default_rng(0)
+    matrix = rng.standard_normal((10, 2)).astype(np.float32)
+    pcs = compute_pcs(matrix, n_components=4)
+    assert pcs.shape == (10, 2)
+
+
+def test_compute_pcs_is_deterministic_with_seeded_input() -> None:
+    rng = np.random.default_rng(7)
+    matrix = rng.standard_normal((20, 8)).astype(np.float32)
+    a = compute_pcs(matrix, n_components=4)
+    b = compute_pcs(matrix, n_components=4)
+    # PCA is a closed-form solve; same inputs must yield identical
+    # outputs to within FP rounding. Up to sign — PCs are sign-
+    # arbitrary, so compare absolute values.
+    np.testing.assert_allclose(np.abs(a), np.abs(b), rtol=0, atol=1e-6)
+
+
+def test_compute_pcs_empty_input_returns_empty_array() -> None:
+    matrix = np.zeros((0, 8), dtype=np.float32)
+    pcs = compute_pcs(matrix, n_components=4)
+    assert pcs.shape == (0, 0)
 
 
 # --- SQLite I/O ------------------------------------------------------------
@@ -164,6 +249,61 @@ def test_write_projections_handles_empty_input(db: sqlite3.Connection) -> None:
     assert rows == (0,)
 
 
+def test_write_projections_persists_pc_columns(db: sqlite3.Connection) -> None:
+    # PCs are nullable: the writer accepts any subset, omits stay null.
+    write_projections_to_sqlite(
+        db,
+        "m1",
+        "pv1",
+        [Projection2D("t1", 0.0, 0.0, pc1=1.5, pc2=-2.5, pc3=0.25, pc4=None)],
+        now_ms=1000,
+    )
+    row = db.execute(
+        "SELECT pc1, pc2, pc3, pc4 FROM embedding_projection_2d "
+        "WHERE track_id = 't1'"
+    ).fetchone()
+    assert row == (1.5, -2.5, 0.25, None)
+
+
+def test_write_projections_persists_z_column(db: sqlite3.Connection) -> None:
+    # `z` is the third UMAP axis on a 3D run; nullable so 2D projections
+    # leave it None and the colour-by dropdown can ignore the channel.
+    write_projections_to_sqlite(
+        db,
+        "m1",
+        "pv1",
+        [Projection2D("t1", 0.0, 0.0, z=1.25)],
+        now_ms=1000,
+    )
+    (z,) = db.execute(
+        "SELECT z FROM embedding_projection_2d WHERE track_id = 't1'"
+    ).fetchone()
+    assert z == 1.25
+
+
+def test_write_projections_leaves_z_null_by_default(db: sqlite3.Connection) -> None:
+    write_projections_to_sqlite(
+        db, "m1", "pv1", [Projection2D("t1", 0.0, 0.0)], now_ms=1000,
+    )
+    (z,) = db.execute(
+        "SELECT z FROM embedding_projection_2d WHERE track_id = 't1'"
+    ).fetchone()
+    assert z is None
+
+
+def test_write_projections_handles_all_null_pcs(db: sqlite3.Connection) -> None:
+    # Default Projection2D leaves all PCs None — a backward-compat path
+    # for any caller that hasn't been updated to compute them yet.
+    write_projections_to_sqlite(
+        db, "m1", "pv1", [Projection2D("t1", 0.0, 0.0)], now_ms=1000,
+    )
+    row = db.execute(
+        "SELECT pc1, pc2, pc3, pc4 FROM embedding_projection_2d "
+        "WHERE track_id = 't1'"
+    ).fetchone()
+    assert row == (None, None, None, None)
+
+
 def test_write_projections_round_trips_two_proj_versions(
     db: sqlite3.Connection,
 ) -> None:
@@ -235,6 +375,48 @@ def test_run_projects_real_data_and_persists(
     for x, y in rows:
         assert np.isfinite(x)
         assert np.isfinite(y)
+
+
+def test_run_writes_z_for_3d_projection(
+    db: sqlite3.Connection,
+    tmp_path: Path,
+    umap_module,  # noqa: ARG001 — fixture is the gate
+) -> None:
+    # Smaller dataset than the 2D test — UMAP-3D produces a 30×3 layout,
+    # and we just need to verify the `z` column populates end-to-end.
+    rng = np.random.default_rng(0)
+    for i in range(30):
+        v = rng.standard_normal(8).astype(np.float32)
+        v /= np.linalg.norm(v)
+        db.execute(
+            "INSERT INTO track_embeddings VALUES (?,?,?,?,?,?,?,?)",
+            (f"t{i:02d}", "m1", 8, _pack_vector(v), "done", None, 0, 0),
+        )
+    db.commit()
+    db.close()
+
+    db_path = tmp_path / "rec.sqlite"
+    pv, written = run(
+        db_path=db_path,
+        model_version="m1",
+        n_neighbors=10,
+        min_dist=0.1,
+        random_state=42,
+        n_components=3,
+    )
+    assert pv == "umap-v1-rs42-n10-m0p10-d3"
+    assert written == 30
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT x, y, z FROM embedding_projection_2d WHERE proj_version = ?",
+        (pv,),
+    ).fetchall()
+    assert len(rows) == 30
+    for x, y, z in rows:
+        assert np.isfinite(x)
+        assert np.isfinite(y)
+        assert z is not None and np.isfinite(z)
 
 
 def test_run_returns_zero_when_no_embeddings(

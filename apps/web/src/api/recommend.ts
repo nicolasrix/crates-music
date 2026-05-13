@@ -106,6 +106,48 @@ export async function startStation(seed: string, n = 20): Promise<Track[]> {
   return hydrateTracks(rec.results.map((r) => r.track_id));
 }
 
+// --- Text-query station ---------------------------------------------
+//
+// "Playlist for sunny afternoon" — natural-language → CLAP text encoder
+// → content-ANN. Mirrors the /next shape but with `query` instead of
+// `seed` (the text is not a track id).
+
+export interface TextStationResponse {
+  query: string;
+  model_version: string | null;
+  results: RecommendItem[];
+}
+
+/** Thrown when the embedder sidecar is unavailable. The text-query path
+ *  has no degraded-mode fallback — there's no seed track to read tags
+ *  from — so callers need to surface this to the user explicitly. */
+export class EmbedderUnavailableError extends Error {
+  constructor() {
+    super("embedder not available");
+  }
+}
+
+export async function fetchTextStation(
+  text: string,
+  n = 20,
+): Promise<TextStationResponse> {
+  const res = await apiFetch(
+    `/v1/recommend/station?text=${encodeURIComponent(text)}&n=${n}`,
+  );
+  if (res.status === 503) throw new EmbedderUnavailableError();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as TextStationResponse;
+}
+
+/** End-to-end "playlist for X" helper: text → ANN → hydrated Tracks. */
+export async function startTextStation(
+  text: string,
+  n = 20,
+): Promise<Track[]> {
+  const rec = await fetchTextStation(text, n);
+  return hydrateTracks(rec.results.map((r) => r.track_id));
+}
+
 interface FromAnyResponse {
   seed_used: string;
   model_version: string | null;

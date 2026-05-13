@@ -273,6 +273,19 @@ export interface LatentSpacePoint {
    *  genre tag, or no metadata row in the gateway cache yet. The scatter
    *  uses this to colour clusters as a validation of the embedding. */
   genre: string | null;
+  /** First four PCA components on the original 512-D CLAP space,
+   *  computed by the reducer alongside (x, y). Null per-component on
+   *  projections that predate migration 0009 or for components past
+   *  the dataset's natural rank. Used by the "colour by → PCn" mode. */
+  pc1: number | null;
+  pc2: number | null;
+  pc3: number | null;
+  pc4: number | null;
+  /** Third UMAP axis from an `n_components=3` reducer run (migration
+   *  0010). Null on 2-D projections. Drives the vertical spatial axis
+   *  in the 3-D scene; not exposed as a colour channel since spatial
+   *  position already encodes it. */
+  z: number | null;
 }
 
 export interface LatentSpaceVersionEntry {
@@ -292,12 +305,97 @@ export interface LatentSpaceResponse {
 export function fetchRecommendLatentSpace(opts: {
   projVersion?: string;
   modelVersion?: string;
+  /** Layout preference, server-resolved to the newest matching
+   *  projection. Ignored when `projVersion` is explicitly set. */
+  prefer?: "2d" | "3d";
 }): Promise<LatentSpaceResponse> {
   const qs = new URLSearchParams();
   if (opts.projVersion) qs.set("proj_version", opts.projVersion);
   if (opts.modelVersion) qs.set("model_version", opts.modelVersion);
+  if (opts.prefer) qs.set("prefer", opts.prefer);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return getJson<LatentSpaceResponse>(
     `/v1/diagnostics/recommend/latent_space${suffix}`
+  );
+}
+
+// --- latent neighbours (hover overlay) -----------------------------------
+//
+// Returns the k nearest neighbours of a seed track in the original
+// CLAP embedding space — the ground-truth distances UMAP can't
+// preserve in 2D. The web client fetches this on hover (debounced)
+// and uses it to draw ring + connecting-line overlays on the scatter.
+
+export interface LatentNeighbourEntry {
+  track_id: string;
+  /** Cosine distance in CLAP space (`1 - cosine_similarity`). Range
+   *  `[0, 2]`; 0 = identical direction, 1 = orthogonal. */
+  cosine_distance: number;
+}
+
+export interface LatentNeighboursResponse {
+  /** Echoed back so a stale fetch can be detected by the caller. */
+  track_id: string;
+  /** Ascending by `cosine_distance`. Seed is filtered out server-side. */
+  neighbours: LatentNeighbourEntry[];
+}
+
+export function fetchRecommendLatentNeighbours(opts: {
+  trackId: string;
+  k?: number;
+}): Promise<LatentNeighboursResponse> {
+  const qs = new URLSearchParams();
+  qs.set("track_id", opts.trackId);
+  if (opts.k !== undefined) qs.set("k", String(opts.k));
+  return getJson<LatentNeighboursResponse>(
+    `/v1/diagnostics/recommend/latent_neighbours?${qs.toString()}`,
+  );
+}
+
+// --- recommend sessions --------------------------------------------------
+
+export interface SessionEvent {
+  track_id: string;
+  event_type: string;
+  occurred_at_ms: number;
+}
+
+export interface SessionSegment {
+  /** Cosine distance between this event's track and the next event's
+   *  track in the recommender's CLAP embedding space. `null` when one
+   *  of the tracks lacks a `done` embedding under the active model. */
+  cosine_distance: number | null;
+}
+
+export interface SessionItem {
+  session_id: string;
+  anchor_track_id: string;
+  items_count: number;
+  started_ms: number;
+  /** null while the session is still active. */
+  ended_ms: number | null;
+  event_count: number;
+  /** Present only when `includeEvents=true`. Oldest-first. */
+  events?: SessionEvent[];
+  /** Present only when `includeEvents=true`. Length = events.length - 1. */
+  segments?: SessionSegment[];
+}
+
+export interface SessionsListResponse {
+  items: SessionItem[];
+}
+
+export function fetchRecommendSessions(opts: {
+  limit?: number;
+  includeEvents?: boolean;
+  modelVersion?: string;
+}): Promise<SessionsListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.includeEvents) qs.set("include_events", "1");
+  if (opts.modelVersion) qs.set("model_version", opts.modelVersion);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return getJson<SessionsListResponse>(
+    `/v1/diagnostics/recommend/sessions${suffix}`
   );
 }

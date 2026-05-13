@@ -8,7 +8,7 @@
 // below the parent. Sub-items match the URL exactly; the parent stays
 // active for any sub-page (via `prefix`).
 
-import { Disc3, Home as HomeIcon, ListMusic, User, Activity, Search, Plus } from "lucide-react";
+import { Disc3, Home as HomeIcon, ListMusic, Radio, User, Activity, Search, Plus } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { createPlaylist, listPlaylists } from "../api/client";
@@ -61,10 +61,30 @@ const BROWSE: NavItem[] = [
     prefix: "/tracks",
     subs: SECTION_SUBS.map((s) => ({ to: `/tracks${s.to}`, label: s.label })),
   },
+  {
+    to: "/station",
+    label: "station",
+    icon: <Radio size={18} strokeWidth={1.5} />,
+  },
+];
+
+const DIAGNOSTICS_SUBS: readonly SubItem[] = [
+  { to: "/diagnostics/recommender", label: "recommender" },
+  { to: "/diagnostics/latent", label: "latent space" },
+  { to: "/diagnostics/ingest", label: "ingest" },
+  { to: "/diagnostics/tracing", label: "tracing" },
+  { to: "/diagnostics/rum", label: "client RUM" },
+  { to: "/diagnostics/listening", label: "listening" },
 ];
 
 const SYSTEM: NavItem[] = [
-  { to: "/diagnostics", label: "diagnostics", icon: <Activity size={18} strokeWidth={1.5} /> },
+  {
+    to: "/diagnostics",
+    label: "diagnostics",
+    icon: <Activity size={18} strokeWidth={1.5} />,
+    prefix: "/diagnostics",
+    subs: DIAGNOSTICS_SUBS,
+  },
 ];
 
 export function Sidebar() {
@@ -216,14 +236,28 @@ export function Sidebar() {
         system
       </div>
       {SYSTEM.map((item) => (
-        <Link
-          key={item.to}
-          to={item.to}
-          className={`nav-item ${isParentActive(item) ? "is-active" : ""}`}
-        >
-          {item.icon}
-          <span>{item.label}</span>
-        </Link>
+        <div key={item.to}>
+          <Link
+            to={item.to}
+            className={`nav-item ${isParentActive(item) ? "is-active" : ""}`}
+          >
+            {item.icon}
+            <span>{item.label}</span>
+          </Link>
+          {item.subs && (
+            <div className="nav-subs">
+              {item.subs.map((sub) => (
+                <Link
+                  key={sub.to}
+                  to={sub.to}
+                  className={`nav-item is-sub ${isSubActive(item, sub) ? "is-active" : ""}`}
+                >
+                  <span>{sub.label}</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
       ))}
     </aside>
   );
