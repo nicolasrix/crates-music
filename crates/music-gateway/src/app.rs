@@ -10,6 +10,7 @@ use axum::{
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
+use crate::admin;
 use crate::auth::require_bearer;
 use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
@@ -45,6 +46,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/events", post(events::submit))
+        .route(
+            "/v1/admin/cache/invalidate",
+            post(admin::invalidate_cache),
+        )
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))
         .route(
             "/v1/diagnostics/histogram",

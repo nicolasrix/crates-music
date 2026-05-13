@@ -135,6 +135,61 @@ async fn cache_survives_close_and_reopen() {
 }
 
 #[tokio::test]
+async fn clear_browse_removes_browse_keys_keeps_cover_art() {
+    let cache = Cache::open_in_memory().await.unwrap();
+    let ttl = Duration::from_mins(1);
+
+    for key in [
+        "getAlbumList2|size=20|type=newest",
+        "getAlbum|id=al-1",
+        "getArtists",
+        "search3|query=miller",
+    ] {
+        cache
+            .put(key, Bytes::from_static(b"body"), ttl)
+            .await
+            .unwrap();
+    }
+    cache
+        .put(
+            "getCoverArt|id=co-1|size=300",
+            Bytes::from_static(b"png"),
+            ttl,
+        )
+        .await
+        .unwrap();
+
+    let removed = cache.clear_browse().await.unwrap();
+    assert_eq!(removed, 4);
+
+    for key in [
+        "getAlbumList2|size=20|type=newest",
+        "getAlbum|id=al-1",
+        "getArtists",
+        "search3|query=miller",
+    ] {
+        assert!(
+            cache.get(key).await.unwrap().is_none(),
+            "browse key {key} should be gone"
+        );
+    }
+    assert!(
+        cache
+            .get("getCoverArt|id=co-1|size=300")
+            .await
+            .unwrap()
+            .is_some(),
+        "cover-art entry must survive"
+    );
+}
+
+#[tokio::test]
+async fn clear_browse_on_empty_cache_returns_zero() {
+    let cache = Cache::open_in_memory().await.unwrap();
+    assert_eq!(cache.clear_browse().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn fetched_at_uses_unix_epoch_seconds_resolution() {
     let cache = Cache::open_in_memory().await.unwrap();
     let entry = cache
