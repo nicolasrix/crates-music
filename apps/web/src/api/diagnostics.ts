@@ -42,6 +42,26 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJson<T>(path: string): Promise<T> {
+  const tokens = readTokens();
+  if (!tokens) throw new AuthError("not signed in");
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
+  return (await res.json()) as T;
+}
+
+export interface InvalidateCacheResponse {
+  removed: number;
+}
+
+/** Flush the gateway's L2 browse cache. Returns the row count removed. */
+export function invalidateBrowseCache(): Promise<InvalidateCacheResponse> {
+  return postJson<InvalidateCacheResponse>("/v1/admin/cache/invalidate");
+}
+
 export interface TraceEntry {
   trace_id: string;
   span_id: number;
