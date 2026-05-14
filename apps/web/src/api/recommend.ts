@@ -335,6 +335,75 @@ export async function suggestForPlaylist(
   return { tracks, allSeedsUnindexed: parsed.all_seeds_unindexed };
 }
 
+// --- similar albums + similar artists --------------------------------------
+//
+// Both endpoints aggregate the existing track-level CLAP ANN by a
+// metadata key (album_id / artist_id) and return ranked groups with a
+// `supporting_tracks` count for transparency. The frontend hydrates
+// the returned ids to full Album / Artist objects via the existing
+// Subsonic calls — gateway intentionally returns only ids + score so
+// the response stays small and cacheable.
+
+export interface SimilarAlbumItem {
+  album_id: string;
+  score: number;
+  supporting_tracks: number;
+}
+
+export interface SimilarAlbumsResponse {
+  model_version: string | null;
+  results: SimilarAlbumItem[];
+  all_seeds_unindexed: boolean;
+}
+
+export interface SimilarArtistItem {
+  artist_id: string;
+  score: number;
+  supporting_tracks: number;
+}
+
+export interface SimilarArtistsResponse {
+  model_version: string | null;
+  results: SimilarArtistItem[];
+  all_seeds_unindexed: boolean;
+}
+
+export async function fetchSimilarAlbums(opts: {
+  seedTrackIds: readonly string[];
+  excludeAlbumIds?: readonly string[];
+  n?: number;
+}): Promise<SimilarAlbumsResponse> {
+  const body: Record<string, unknown> = {
+    seed_track_ids: [...opts.seedTrackIds],
+  };
+  if (opts.excludeAlbumIds && opts.excludeAlbumIds.length > 0) {
+    body.exclude_album_ids = [...opts.excludeAlbumIds];
+  }
+  if (opts.n !== undefined) body.n = opts.n;
+
+  const res = await postJson("/v1/recommend/similar_albums", body);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as SimilarAlbumsResponse;
+}
+
+export async function fetchSimilarArtists(opts: {
+  seedTrackIds: readonly string[];
+  excludeArtistIds?: readonly string[];
+  n?: number;
+}): Promise<SimilarArtistsResponse> {
+  const body: Record<string, unknown> = {
+    seed_track_ids: [...opts.seedTrackIds],
+  };
+  if (opts.excludeArtistIds && opts.excludeArtistIds.length > 0) {
+    body.exclude_artist_ids = [...opts.excludeArtistIds];
+  }
+  if (opts.n !== undefined) body.n = opts.n;
+
+  const res = await postJson("/v1/recommend/similar_artists", body);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as SimilarArtistsResponse;
+}
+
 // --- recommendation feedback (thumb up / down) -----------------------------
 //
 // Distinct from Subsonic's `starred`: this is a vote on *the recommendation*
