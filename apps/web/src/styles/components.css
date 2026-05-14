@@ -271,16 +271,22 @@ body {
   gap: var(--space-5);
 }
 
-/* Album / artist tile. No card border, no shadow at rest. */
+/* Album / artist tile. No card border, no shadow at rest. The wrapper
+   is a <div> for AlbumCard (split click targets — cover/title go to
+   the album, artist sub-link goes to the artist) and an <a> for
+   ArtistCard (single target). Either way the lift effect on hover
+   below uses .tile:hover, which works regardless of element. */
 .tile {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  cursor: pointer;
   text-decoration: none;
   color: inherit;
   position: relative;
 }
+/* ArtistCard still uses the outer-anchor pattern, so keep pointer
+   cursor when .tile itself is the link. */
+a.tile { cursor: pointer; }
 .tile-cover {
   aspect-ratio: 1;
   background: var(--surface-2);
@@ -321,6 +327,28 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* When the title is itself an anchor (AlbumCard), match the
+   .search-hero-title affordance: strip default underline, restore
+   on hover. Rule is keyed on `a.tile-title` so ArtistCard's
+   <div className="tile-title"> is unaffected. */
+a.tile-title {
+  color: var(--fg);
+  text-decoration: none;
+}
+a.tile-title:hover {
+  text-decoration: underline;
+}
+/* Same pattern for the artist sub-link inside .tile-sub — inherit
+   the muted color at rest, brighten + underline on hover. Mirrors
+   .search-hero-sub a. */
+.tile-sub a {
+  color: inherit;
+  text-decoration: none;
+}
+.tile-sub a:hover {
+  color: var(--fg);
+  text-decoration: underline;
 }
 
 /* Slide-in play overlay on the cover. */
