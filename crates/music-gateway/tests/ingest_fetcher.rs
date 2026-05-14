@@ -26,12 +26,23 @@ fn upstream(url: &str) -> UpstreamConfig {
 
 /// Subsonic getSong response wrapper for a track of the given duration.
 fn get_song_body(track_id: &str, duration: Option<u32>) -> serde_json::Value {
+    get_song_body_with_suffix(track_id, duration, None)
+}
+
+fn get_song_body_with_suffix(
+    track_id: &str,
+    duration: Option<u32>,
+    suffix: Option<&str>,
+) -> serde_json::Value {
     let mut song = serde_json::json!({
         "id": track_id,
         "title": "Test Track",
     });
     if let Some(d) = duration {
         song["duration"] = serde_json::json!(d);
+    }
+    if let Some(s) = suffix {
+        song["suffix"] = serde_json::json!(s);
     }
     serde_json::json!({
         "subsonic-response": {
@@ -199,6 +210,70 @@ async fn fetch_clip_emits_subspans_for_get_song_request_and_body() {
         child_names.contains(&"fetch_clip.stream_body"),
         "expected child fetch_clip.stream_body; got {child_names:?}"
     );
+}
+
+#[tokio::test]
+async fn mp3_source_skips_transcode_and_keeps_offset() {
+    // When the source codec is already MP3, the fetcher must skip the
+    // ?format=mp3&maxBitRate=192 params — those force Navidrome to run
+    // ffmpeg at realtime rate, which dominates wall-clock per fetch.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/getSong"))
+        .and(query_param("id", "t-mp3"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(get_song_body_with_suffix("t-mp3", Some(1042), Some("mp3"))),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/stream"))
+        .and(query_param("id", "t-mp3"))
+        .and(query_param_is_missing("format"))
+        .and(query_param_is_missing("maxBitRate"))
+        .and(query_param("timeOffset", "515"))
+        .and(header_regex("range", r"^bytes=0-\d{6}$"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(b"mp3-bytes".to_vec()))
+        .mount(&server)
+        .await;
+
+    let fetcher = SubsonicAudioFetcher::new(&upstream(&server.uri())).unwrap();
+    let bytes = fetcher.fetch_clip(&TrackId::from("t-mp3")).await.unwrap();
+    assert_eq!(bytes.as_ref(), b"mp3-bytes");
+}
+
+#[tokio::test]
+async fn flac_source_keeps_transcode_params() {
+    // Conservatively, anything not MP3 still goes through the transcode
+    // path — FLAC truncated mid-frame causes decoder desync.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/getSong"))
+        .and(query_param("id", "t-flac"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(get_song_body_with_suffix("t-flac", Some(1042), Some("flac"))),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/stream"))
+        .and(query_param("id", "t-flac"))
+        .and(query_param("format", "mp3"))
+        .and(query_param("maxBitRate", "192"))
+        .and(query_param("timeOffset", "515"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(b"flac-bytes".to_vec()))
+        .mount(&server)
+        .await;
+
+    let fetcher = SubsonicAudioFetcher::new(&upstream(&server.uri())).unwrap();
+    let bytes = fetcher.fetch_clip(&TrackId::from("t-flac")).await.unwrap();
+    assert_eq!(bytes.as_ref(), b"flac-bytes");
 }
 
 #[tokio::test]
