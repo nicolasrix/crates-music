@@ -8,6 +8,7 @@
 pub mod admin;
 pub mod app;
 pub mod auth;
+pub mod auto_projection;
 pub mod config;
 pub mod diagnostics;
 pub mod embedder;

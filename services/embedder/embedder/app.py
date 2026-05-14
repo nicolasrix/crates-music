@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from pathlib import Path
 from typing import Annotated, Mapping
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from embedder import reduce as reduce_module
 from embedder.protocol import Embedder
 
 EMBEDDING_DIM: int = 512
@@ -73,6 +75,31 @@ class EmbedResponse(BaseModel):
     vector: list[float]
     dim: int
     model_version: str
+
+
+class ReduceRequest(BaseModel):
+    """Arguments mirror `embedder.reduce.run` exactly. The gateway is
+    the only intended caller; it owns the recommend SQLite file and
+    passes its filesystem path so the embedder can open the same DB
+    directly (single-host deployment)."""
+
+    db_path: str = Field(
+        ...,
+        description="Absolute path to the recommend SQLite file. The "
+        "embedder opens it read+write; the gateway is expected to be "
+        "running on the same host.",
+    )
+    model_version: str
+    proj_version: str | None = None
+    n_neighbors: int = reduce_module.DEFAULT_N_NEIGHBORS
+    min_dist: float = reduce_module.DEFAULT_MIN_DIST
+    random_state: int = reduce_module.DEFAULT_RANDOM_STATE
+    n_components: int = 2
+
+
+class ReduceResponse(BaseModel):
+    proj_version: str
+    written: int
 
 
 # --- backend selection ------------------------------------------------------
@@ -149,6 +176,37 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="model not loaded")
         result = await asyncio.to_thread(emb.embed_text, payload.text)
         return _build_embed_response(result, emb.model_version)
+
+    @app.post("/reduce", response_model=ReduceResponse)
+    async def reduce(payload: ReduceRequest) -> ReduceResponse:
+        # The reducer doesn't need the CLAP model — it reads stored
+        # embeddings from SQLite. Intentionally no `emb.loaded` guard.
+        db_path = Path(payload.db_path)
+        if not db_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"db_path does not exist: {db_path}",
+            )
+        try:
+            pv, written = await asyncio.to_thread(
+                reduce_module.run,
+                db_path=db_path,
+                model_version=payload.model_version,
+                n_neighbors=payload.n_neighbors,
+                min_dist=payload.min_dist,
+                random_state=payload.random_state,
+                proj_version=payload.proj_version,
+                n_components=payload.n_components,
+            )
+        except ImportError as e:
+            # The `reduce` extra (umap-learn + sklearn) is optional;
+            # surface its absence as 503 so the gateway can degrade
+            # cleanly rather than treating it as a generic 5xx.
+            raise HTTPException(
+                status_code=503,
+                detail=f"reduce extra not installed (umap/sklearn): {e}",
+            ) from e
+        return ReduceResponse(proj_version=pv, written=written)
 
     return app
 
