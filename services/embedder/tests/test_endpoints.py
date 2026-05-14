@@ -166,6 +166,173 @@ def test_embed_text_returns_503_when_not_loaded(app_with_unloaded_stub):
     assert r.status_code == 503
 
 
+# --- /reduce ---------------------------------------------------------------
+#
+# The reduce endpoint is the same-host counterpart to the `reduce.py`
+# CLI: the gateway calls it after enough new embeddings have landed,
+# the embedder opens the SQLite path directly, runs UMAP+PCA, and
+# writes projection rows. Body of the endpoint = arguments of
+# `reduce.run`. Response = (proj_version, written).
+
+
+def test_reduce_invokes_run_with_request_params(
+    app_with_loaded_stub, tmp_path, monkeypatch
+):
+    """Happy path that doesn't require umap-learn — monkeypatch
+    `embedder.reduce.run` so we can assert on the arguments without
+    pulling the full reducer stack into the test."""
+    captured: dict = {}
+
+    def fake_run(
+        *,
+        db_path,
+        model_version,
+        n_neighbors,
+        min_dist,
+        random_state,
+        proj_version,
+        n_components,
+    ):
+        captured["db_path"] = db_path
+        captured["model_version"] = model_version
+        captured["n_neighbors"] = n_neighbors
+        captured["min_dist"] = min_dist
+        captured["random_state"] = random_state
+        captured["proj_version"] = proj_version
+        captured["n_components"] = n_components
+        return ("umap-v1-rs42-n15-m0p10-auto-12345", 42)
+
+    monkeypatch.setattr("embedder.reduce.run", fake_run)
+
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()  # path-exists check inside the handler
+
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "db_path": str(db_file),
+            "model_version": "stub-v1",
+            "n_neighbors": 20,
+            "min_dist": 0.25,
+            "random_state": 7,
+            "proj_version": "umap-v1-rs42-n15-m0p10-auto-12345",
+            "n_components": 2,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {
+        "proj_version": "umap-v1-rs42-n15-m0p10-auto-12345",
+        "written": 42,
+    }
+    assert captured["db_path"] == db_file
+    assert captured["model_version"] == "stub-v1"
+    assert captured["n_neighbors"] == 20
+    assert captured["min_dist"] == 0.25
+    assert captured["random_state"] == 7
+    assert captured["proj_version"] == "umap-v1-rs42-n15-m0p10-auto-12345"
+    assert captured["n_components"] == 2
+
+
+def test_reduce_defaults_match_reduce_module(
+    app_with_loaded_stub, tmp_path, monkeypatch
+):
+    """When the body omits the param knobs, the handler must forward
+    the same defaults the CLI uses. The contract is "request body =
+    `reduce.run` keyword arguments," and silent divergence between
+    the HTTP path and the CLI path is exactly the kind of bug the
+    auto-trigger path will surface only weeks after the fact."""
+    from embedder.reduce import (
+        DEFAULT_MIN_DIST,
+        DEFAULT_N_NEIGHBORS,
+        DEFAULT_RANDOM_STATE,
+    )
+
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return ("pv", 0)
+
+    monkeypatch.setattr("embedder.reduce.run", fake_run)
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()
+
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={"db_path": str(db_file), "model_version": "stub-v1"},
+    )
+    assert r.status_code == 200, r.text
+    assert captured["n_neighbors"] == DEFAULT_N_NEIGHBORS
+    assert captured["min_dist"] == DEFAULT_MIN_DIST
+    assert captured["random_state"] == DEFAULT_RANDOM_STATE
+    assert captured["n_components"] == 2
+    assert captured["proj_version"] is None
+
+
+def test_reduce_returns_400_when_db_path_missing(app_with_loaded_stub, tmp_path):
+    # Path validation is local to the handler — surfacing a 400 here
+    # keeps the gateway's auto-trigger task from logging an opaque
+    # `OperationalError` from sqlite3.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "db_path": str(tmp_path / "missing.sqlite"),
+            "model_version": "stub-v1",
+        },
+    )
+    assert r.status_code == 400
+    assert "db_path" in r.json()["detail"].lower()
+
+
+def test_reduce_returns_503_when_umap_extra_missing(
+    app_with_loaded_stub, tmp_path, monkeypatch
+):
+    # The `reduce` extra (umap-learn + sklearn) is optional. Production
+    # deployments install it; dev installs often don't. Surface the
+    # missing dependency as 503 with a recognisable detail so the
+    # gateway can log "service degraded" instead of treating it as a
+    # generic 5xx.
+    def fake_run(**kwargs):
+        raise ImportError("No module named 'umap'")
+
+    monkeypatch.setattr("embedder.reduce.run", fake_run)
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()
+
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={"db_path": str(db_file), "model_version": "stub-v1"},
+    )
+    assert r.status_code == 503
+    assert "umap" in r.json()["detail"].lower() or "reduce" in r.json()["detail"].lower()
+
+
+def test_reduce_does_not_require_model_loaded(
+    app_with_unloaded_stub, tmp_path, monkeypatch
+):
+    # The reducer reads stored embeddings — it doesn't run inference,
+    # so `model_loaded=False` is not a reason to refuse the call.
+    # The sidecar can be mid-CLAP-warmup and still service /reduce.
+    def fake_run(**kwargs):
+        return ("pv", 0)
+
+    monkeypatch.setattr("embedder.reduce.run", fake_run)
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()
+
+    client = TestClient(app_with_unloaded_stub)
+    r = client.post(
+        "/reduce",
+        json={"db_path": str(db_file), "model_version": "stub-v1"},
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_vectors_are_l2_normalized(app_with_loaded_stub):
     # CLAP outputs are approximately L2-normalized. The stub follows
     # the same convention so callers can assume cosine ≈ dot product.

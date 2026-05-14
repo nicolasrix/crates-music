@@ -30,6 +30,7 @@ use music_recommend::types::ModelVersion;
 use music_subsonic::{Client as SubsonicClient, Credentials};
 use reqwest::header::RANGE;
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::config::UpstreamConfig;
 
@@ -195,7 +196,16 @@ impl AudioFetcher for SubsonicAudioFetcher {
         // track) we fall back to offset=0 — the worst case is that we
         // embed the first `WINDOW_SECONDS` of the track, which is what
         // we'd do for a short track anyway.
-        let duration_seconds = match self.client.get_song(track_id).await {
+        //
+        // Wrapped in a `fetch_clip.get_song` subspan so the
+        // diagnostics breakdown can show the metadata-fetch cost
+        // separately from the transcoded body read.
+        let duration_seconds = match self
+            .client
+            .get_song(track_id)
+            .instrument(tracing::info_span!("fetch_clip.get_song"))
+            .await
+        {
             Ok(track) => track.duration_seconds.unwrap_or(0),
             Err(e) => {
                 tracing::debug!(
@@ -229,12 +239,18 @@ impl AudioFetcher for SubsonicAudioFetcher {
         }
 
         let range = format!("bytes=0-{}", MAX_CLIP_BYTES - 1);
+        // Split the HTTP exchange into two subspans: "stream_request"
+        // is everything up to the response headers (negotiation,
+        // upstream queueing); "stream_body" is the body drain — that's
+        // where Navidrome's real-time transcoder paces bytes, so we
+        // expect this to dominate.
         let resp = self
             .client
             .http()
             .get(url)
             .header(RANGE, range)
             .send()
+            .instrument(tracing::info_span!("fetch_clip.stream_request"))
             .await
             .map_err(|e| FetchError::Transport(format!("send: {e}")))?;
 
@@ -246,6 +262,7 @@ impl AudioFetcher for SubsonicAudioFetcher {
             return Err(FetchError::Transport(format!("upstream {status}")));
         }
         resp.bytes()
+            .instrument(tracing::info_span!("fetch_clip.stream_body"))
             .await
             .map_err(|e| FetchError::Transport(format!("body: {e}")))
     }

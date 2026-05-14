@@ -281,6 +281,146 @@ impl TraceStore {
         Ok(out)
     }
 
+    /// Time-series of `(end_ms, duration_ms)` points for a single span
+    /// name. Drives the per-row plot on the `/diagnostics/tracing` page,
+    /// where the user expands a histogram bucket and wants to see how
+    /// duration trends over time. Ordering matches [`query`]: newest
+    /// (highest row id) first, so the caller can truncate to "the last
+    /// N samples" by passing `limit`.
+    pub async fn span_series(
+        &self,
+        name: &str,
+        since_ms: Option<i64>,
+        limit: usize,
+    ) -> sqlx::Result<Vec<SpanPoint>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = if let Some(s) = since_ms {
+            sqlx::query(
+                "SELECT end_ms, (end_ms - start_ms) AS dur_ms
+                 FROM spans
+                 WHERE name = ? AND end_ms >= ?
+                 ORDER BY id DESC
+                 LIMIT ?",
+            )
+            .bind(name)
+            .bind(s)
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT end_ms, (end_ms - start_ms) AS dur_ms
+                 FROM spans
+                 WHERE name = ?
+                 ORDER BY id DESC
+                 LIMIT ?",
+            )
+            .bind(name)
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(SpanPoint {
+                end_ms: row.try_get("end_ms")?,
+                duration_ms: row.try_get::<i64, _>("dur_ms")?.max(0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Per-direct-child aggregate for every span named `parent_name`.
+    /// Computes "where did the time go inside `parent_name`?" — for
+    /// each child name, count of occurrences and total wall time
+    /// summed across all qualifying parent instances.
+    ///
+    /// One level deep: a grandchild (child-of-a-child) is *not*
+    /// rolled up under the grandparent. The matching join is on both
+    /// `span_id` and `trace_id` to avoid cross-trace collisions when
+    /// `tracing` happens to reuse a span id across traces.
+    pub async fn child_breakdown(
+        &self,
+        parent_name: &str,
+        since_ms: Option<i64>,
+    ) -> sqlx::Result<ChildBreakdown> {
+        // 1. Parent stats.
+        let parent_row = if let Some(s) = since_ms {
+            sqlx::query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(end_ms - start_ms), 0) AS s
+                 FROM spans WHERE name = ? AND end_ms >= ?",
+            )
+            .bind(parent_name)
+            .bind(s)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(end_ms - start_ms), 0) AS s
+                 FROM spans WHERE name = ?",
+            )
+            .bind(parent_name)
+            .fetch_one(&self.pool)
+            .await?
+        };
+        let parent_count: i64 = parent_row.try_get("n")?;
+        let parent_sum_ms: i64 = parent_row.try_get("s")?;
+
+        // 2. Child aggregation: self-join on (span_id ↔ parent_span_id)
+        // scoped by trace_id so unrelated traces with colliding ids
+        // don't bleed into the count.
+        let child_rows = if let Some(s) = since_ms {
+            sqlx::query(
+                "SELECT c.name AS name,
+                        COUNT(*) AS n,
+                        COALESCE(SUM(c.end_ms - c.start_ms), 0) AS s
+                 FROM spans c
+                 JOIN spans p
+                     ON p.span_id = c.parent_span_id
+                    AND p.trace_id = c.trace_id
+                 WHERE p.name = ? AND p.end_ms >= ?
+                 GROUP BY c.name
+                 ORDER BY s DESC",
+            )
+            .bind(parent_name)
+            .bind(s)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT c.name AS name,
+                        COUNT(*) AS n,
+                        COALESCE(SUM(c.end_ms - c.start_ms), 0) AS s
+                 FROM spans c
+                 JOIN spans p
+                     ON p.span_id = c.parent_span_id
+                    AND p.trace_id = c.trace_id
+                 WHERE p.name = ?
+                 GROUP BY c.name
+                 ORDER BY s DESC",
+            )
+            .bind(parent_name)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut children = Vec::with_capacity(child_rows.len());
+        for row in child_rows {
+            children.push(ChildAgg {
+                name: row.try_get("name")?,
+                count: u64::try_from(row.try_get::<i64, _>("n")?).unwrap_or(0),
+                sum_ms: row.try_get::<i64, _>("s")?.max(0),
+            });
+        }
+
+        Ok(ChildBreakdown {
+            parent_name: parent_name.to_string(),
+            parent_count: u64::try_from(parent_count).unwrap_or(0),
+            parent_sum_ms: parent_sum_ms.max(0),
+            children,
+        })
+    }
+
     /// Evict oldest rows so at most `max_rows` remain. The drainer
     /// calls this after every flush. Cheap when already under
     /// capacity (single MAX(id) read + a no-op DELETE).
@@ -388,6 +528,42 @@ impl TraceStore {
 /// One row of the duration histogram returned by `TraceStore::histogram`.
 /// `p*_ms` are wall-clock milliseconds, computed via nearest-rank on
 /// the sorted duration slice.
+/// One child-name aggregate row in a [`ChildBreakdown`]. `count` is
+/// how many child spans of this name fell under any qualifying parent
+/// instance; `sum_ms` is the total wall time across them. Mean follows
+/// trivially from those two.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChildAgg {
+    pub name: String,
+    pub count: u64,
+    pub sum_ms: i64,
+}
+
+/// Per-parent-name breakdown: how every direct child contributed to
+/// the parent's total wall time. Drives the "where did the time go?"
+/// stacked-bar panel on the expanded histogram row.
+///
+/// `parent_sum_ms - sum(children.sum_ms)` is the unaccounted residual
+/// — work that happens inside the parent but isn't covered by any
+/// subspan. The UI surfaces it as a shaded "self" segment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChildBreakdown {
+    pub parent_name: String,
+    pub parent_count: u64,
+    pub parent_sum_ms: i64,
+    pub children: Vec<ChildAgg>,
+}
+
+/// One point on the per-span time-series plot. `end_ms` is the
+/// wall-clock close time, `duration_ms` is the wall-clock duration —
+/// the same numbers `query()` would surface, just stripped of
+/// everything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpanPoint {
+    pub end_ms: i64,
+    pub duration_ms: i64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistogramBucket {
     pub name: String,

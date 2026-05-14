@@ -26,7 +26,10 @@ use music_recommend::types::{EmbeddingKey, ModelVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::diagnostics::{ClientEventRecord, HistogramBucket, RecommendSummary, SpanRecord};
+use crate::diagnostics::{
+    ChildAgg, ChildBreakdown, ClientEventRecord, HistogramBucket, RecommendSummary, SpanPoint,
+    SpanRecord,
+};
 use crate::state::AppState;
 
 const DEFAULT_TRACE_LIMIT: usize = 100;
@@ -167,6 +170,129 @@ pub async fn histogram(
     Ok(Json(HistogramResponse {
         buckets: buckets.into_iter().map(HistogramBucketJson::from).collect(),
     }))
+}
+
+// --- /v1/diagnostics/span_series ------------------------------------------
+
+/// Hard ceiling on points per response. A span fired 10/s for an hour
+/// is 36k samples — already chunky for one fetch. Caller-supplied
+/// `limit` is clamped to this so a runaway `?limit=999999` can't OOM.
+const MAX_SPAN_SERIES_POINTS: usize = 10_000;
+const DEFAULT_SPAN_SERIES_POINTS: usize = 2_000;
+
+#[derive(Debug, Deserialize)]
+pub struct SpanSeriesQuery {
+    /// Required: the span name to plot. We deliberately don't default
+    /// to "all", since the response is a flat list of points without
+    /// per-name tagging — the histogram endpoint covers the all-names
+    /// case.
+    name: String,
+    since_ms: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanSeriesResponse {
+    name: String,
+    points: Vec<SpanSeriesPoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanSeriesPoint {
+    end_ms: i64,
+    duration_ms: i64,
+}
+
+impl From<SpanPoint> for SpanSeriesPoint {
+    fn from(p: SpanPoint) -> Self {
+        Self {
+            end_ms: p.end_ms,
+            duration_ms: p.duration_ms,
+        }
+    }
+}
+
+pub async fn span_series(
+    State(state): State<AppState>,
+    Query(q): Query<SpanSeriesQuery>,
+) -> Result<Json<SpanSeriesResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_SPAN_SERIES_POINTS)
+        .clamp(1, MAX_SPAN_SERIES_POINTS);
+    let pts = state
+        .trace_store()
+        .span_series(&q.name, q.since_ms, limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(SpanSeriesResponse {
+        name: q.name,
+        points: pts.into_iter().map(SpanSeriesPoint::from).collect(),
+    }))
+}
+
+// --- /v1/diagnostics/span_children ----------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SpanChildrenQuery {
+    name: String,
+    since_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanChildrenResponse {
+    parent_name: String,
+    parent_count: u64,
+    parent_sum_ms: i64,
+    children: Vec<ChildAggJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChildAggJson {
+    name: String,
+    count: u64,
+    sum_ms: i64,
+    mean_ms: f64,
+}
+
+impl From<ChildAgg> for ChildAggJson {
+    fn from(c: ChildAgg) -> Self {
+        #[allow(clippy::cast_precision_loss)] // u64 count fits in f64 at our cardinality
+        let mean_ms = if c.count == 0 {
+            0.0
+        } else {
+            c.sum_ms as f64 / c.count as f64
+        };
+        Self {
+            name: c.name,
+            count: c.count,
+            sum_ms: c.sum_ms,
+            mean_ms,
+        }
+    }
+}
+
+impl From<ChildBreakdown> for SpanChildrenResponse {
+    fn from(b: ChildBreakdown) -> Self {
+        Self {
+            parent_name: b.parent_name,
+            parent_count: b.parent_count,
+            parent_sum_ms: b.parent_sum_ms,
+            children: b.children.into_iter().map(ChildAggJson::from).collect(),
+        }
+    }
+}
+
+pub async fn span_children(
+    State(state): State<AppState>,
+    Query(q): Query<SpanChildrenQuery>,
+) -> Result<Json<SpanChildrenResponse>, (StatusCode, Json<Value>)> {
+    let breakdown = state
+        .trace_store()
+        .child_breakdown(&q.name, q.since_ms)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(SpanChildrenResponse::from(breakdown)))
 }
 
 // --- /v1/diagnostics/queue_depth ------------------------------------------

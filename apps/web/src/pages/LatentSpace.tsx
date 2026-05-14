@@ -155,10 +155,23 @@ export function LatentSpace() {
   const colorModePoints = data?.points ?? [];
   const canSwitchTo3d = (data3dQ.data?.points ?? []).some((p) => p.z !== null);
 
-  // Only fetch sessions+events once the user actually picks one (or
-  // "all"). Listing sessions without events is cheap; including events
-  // is per-segment embedding lookups, which we don't want to pay on
-  // every page load.
+  // Two-tier session loading. The picker needs the *list* of sessions
+  // to populate its <option>s on page load — otherwise the user has
+  // to pick "all" before any individual session appears, which is
+  // exactly the chicken-and-egg loop we want to avoid. Listing
+  // sessions without events is cheap, so fetch it eagerly. Events
+  // are per-segment embedding lookups (expensive) and only needed
+  // when actually drawing the path overlay, so gate them on the
+  // user having picked something.
+  const sessionsListQ = useQuery({
+    queryKey: ["diag", "sessions_list", SESSION_FETCH_LIMIT],
+    queryFn: () =>
+      fetchRecommendSessions({
+        limit: SESSION_FETCH_LIMIT,
+        includeEvents: false,
+      }),
+    refetchInterval: 30_000,
+  });
   const wantSessions = sessionPick !== SESSION_NONE;
   const sessionsQ = useQuery({
     queryKey: ["diag", "sessions_with_events", SESSION_FETCH_LIMIT],
@@ -192,8 +205,11 @@ export function LatentSpace() {
             <ModelHint modelVersion={data.model_version} />
             <SessionPicker
               value={sessionPick}
-              sessions={sessionsQ.data?.items ?? []}
-              loading={wantSessions && sessionsQ.isFetching}
+              sessions={sessionsListQ.data?.items ?? []}
+              loading={
+                sessionsListQ.isFetching ||
+                (wantSessions && sessionsQ.isFetching)
+              }
               onChange={setSessionPick}
             />
             <ViewToggle
@@ -469,6 +485,48 @@ function SessionPicker({
       hour: "2-digit",
       minute: "2-digit",
     });
+  // Custom dropdown rather than a native <select>: native selects'
+  // option-list height is OS-controlled, so a long list (50 sessions)
+  // can fill most of the screen on tall monitors. The popover here
+  // caps the list at max-height with overflow-y:auto, which is the
+  // bit a native select can't do reliably across browsers.
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const currentLabel = (() => {
+    if (value === SESSION_NONE) return "— none —";
+    if (value === SESSION_ALL) return `show all (${sessions.length})`;
+    const s = sessions.find((s) => s.session_id === value);
+    if (!s) return value.slice(0, 8);
+    return `${fmtTs(s.started_ms)} · ${s.items_count} items · ${s.event_count} evts`;
+  })();
+
+  function pick(v: string) {
+    onChange(v);
+    setOpen(false);
+  }
+
   return (
     <div
       style={{
@@ -479,24 +537,53 @@ function SessionPicker({
         flexWrap: "wrap",
       }}
     >
-      <label className="text-sm">
-        session&nbsp;
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="search-input"
-          style={{ fontFamily: "var(--font-mono)", width: "auto", paddingLeft: 12 }}
+      <span className="text-sm">session</span>
+      <div ref={wrapperRef} className="session-picker">
+        <button
+          type="button"
+          className="search-input session-picker-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
         >
-          <option value={SESSION_NONE}>— none —</option>
-          <option value={SESSION_ALL}>show all ({sessions.length})</option>
-          {sessions.map((s) => (
-            <option key={s.session_id} value={s.session_id}>
-              {fmtTs(s.started_ms)} · {s.items_count} items · {s.event_count}{" "}
-              evts
-            </option>
-          ))}
-        </select>
-      </label>
+          <span className="session-picker-label">{currentLabel}</span>
+          <span className="session-picker-caret" aria-hidden>
+            ▾
+          </span>
+        </button>
+        {open && (
+          <ul className="session-picker-menu" role="listbox">
+            <li
+              role="option"
+              aria-selected={value === SESSION_NONE}
+              className={value === SESSION_NONE ? "is-selected" : ""}
+              onClick={() => pick(SESSION_NONE)}
+            >
+              — none —
+            </li>
+            <li
+              role="option"
+              aria-selected={value === SESSION_ALL}
+              className={value === SESSION_ALL ? "is-selected" : ""}
+              onClick={() => pick(SESSION_ALL)}
+            >
+              show all ({sessions.length})
+            </li>
+            {sessions.map((s) => (
+              <li
+                key={s.session_id}
+                role="option"
+                aria-selected={value === s.session_id}
+                className={value === s.session_id ? "is-selected" : ""}
+                onClick={() => pick(s.session_id)}
+              >
+                {fmtTs(s.started_ms)} · {s.items_count} items ·{" "}
+                {s.event_count} evts
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
       {loading && (
         <span className="text-sm" style={{ color: "var(--muted)" }}>
           loading sessions…

@@ -42,6 +42,26 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJson<T>(path: string): Promise<T> {
+  const tokens = readTokens();
+  if (!tokens) throw new AuthError("not signed in");
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
+  return (await res.json()) as T;
+}
+
+export interface InvalidateCacheResponse {
+  removed: number;
+}
+
+/** Flush the gateway's L2 browse cache. Returns the row count removed. */
+export function invalidateBrowseCache(): Promise<InvalidateCacheResponse> {
+  return postJson<InvalidateCacheResponse>("/v1/admin/cache/invalidate");
+}
+
 export interface TraceEntry {
   trace_id: string;
   span_id: number;
@@ -101,6 +121,59 @@ export function fetchHistogram(opts: { sinceMs?: number }): Promise<HistogramRes
   if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return getJson<HistogramResponse>(`/v1/diagnostics/histogram${suffix}`);
+}
+
+// --- span_series ----------------------------------------------------------
+//
+// Time-series of `(end_ms, duration_ms)` for a single span name. Powers
+// the per-row plot when a histogram row is expanded on /diagnostics/tracing.
+
+export interface SpanSeriesPoint {
+  end_ms: number;
+  duration_ms: number;
+}
+
+export interface SpanSeriesResponse {
+  name: string;
+  points: SpanSeriesPoint[];
+}
+
+export function fetchSpanSeries(opts: {
+  name: string;
+  sinceMs?: number;
+  limit?: number;
+}): Promise<SpanSeriesResponse> {
+  const qs = new URLSearchParams();
+  qs.set("name", opts.name);
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  return getJson<SpanSeriesResponse>(`/v1/diagnostics/span_series?${qs.toString()}`);
+}
+
+// --- span_children: parent → direct-child wall-time breakdown ------------
+
+export interface SpanChildAgg {
+  name: string;
+  count: number;
+  sum_ms: number;
+  mean_ms: number;
+}
+
+export interface SpanChildrenResponse {
+  parent_name: string;
+  parent_count: number;
+  parent_sum_ms: number;
+  children: SpanChildAgg[];
+}
+
+export function fetchSpanChildren(opts: {
+  name: string;
+  sinceMs?: number;
+}): Promise<SpanChildrenResponse> {
+  const qs = new URLSearchParams();
+  qs.set("name", opts.name);
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  return getJson<SpanChildrenResponse>(`/v1/diagnostics/span_children?${qs.toString()}`);
 }
 
 export function fetchQueueDepth(opts: { modelVersion?: string }): Promise<QueueDepthResponse> {

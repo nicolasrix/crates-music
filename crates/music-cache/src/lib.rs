@@ -197,6 +197,22 @@ impl Cache {
         Ok(res.rows_affected())
     }
 
+    /// Remove every browse-cache entry (anything not under the
+    /// `getCoverArt|` prefix). Returns the number of rows removed.
+    ///
+    /// Used by `POST /v1/admin/cache/invalidate` to force a refetch of
+    /// `getAlbumList2`, `getAlbum`, `getArtists`, `getArtist`, and
+    /// `search3` responses without waiting for `browse_ttl_seconds`.
+    /// Cover art is excluded because its cache keys are themselves
+    /// content-addressed via Navidrome's `coverArt` ids — invalidation
+    /// is implicit when art changes.
+    pub async fn clear_browse(&self) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM cache_entries WHERE key NOT LIKE 'getCoverArt|%'")
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Remove every entry whose deadline (`fetched_at + ttl`) is at or before
     /// `cutoff`. Returns the number of rows removed.
     pub async fn expire_before(&self, cutoff: SystemTime) -> Result<u64> {

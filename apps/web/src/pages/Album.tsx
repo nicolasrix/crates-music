@@ -3,11 +3,20 @@
 // renders a hero + tracklist that read those vars. Chrome (sidebar, topbar,
 // player bar) stays neutral by intent.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Plus, MoreHorizontal, Play, Sparkles } from "lucide-react";
-import { useState } from "react";
-import { coverArtUrl, getAlbum } from "../api/client";
-import { SeedNotEmbeddedError, startStationFromAny } from "../api/recommend";
+import { useMemo, useState } from "react";
+import { coverArtUrl, getAlbum, listArtists } from "../api/client";
+import {
+  SeedNotEmbeddedError,
+  fetchSimilarAlbums,
+  fetchSimilarArtists,
+  startStationFromAny,
+} from "../api/recommend";
+import { AlbumHeroCard } from "../components/AlbumHeroCard";
+import { AlbumTable } from "../components/AlbumTable";
+import { ArtistHeroCard } from "../components/ArtistHeroCard";
+import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
@@ -15,7 +24,7 @@ import { TrackTable } from "../components/TrackTable";
 import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
 import { fmtDuration, fmtPlays, fmtRelativePast } from "../utils/format";
-import type { Track } from "../api/types";
+import type { Album as AlbumType, Artist, Track } from "../api/types";
 
 export function Album({ id }: { id: string }) {
   const q = useQuery({
@@ -170,6 +179,12 @@ export function Album({ id }: { id: string }) {
           onPlay={(i) => playSingle(tracks[i]!)}
         />
       </div>
+
+      <SimilarSection
+        seedTrackIds={tracks.map((t) => t.id)}
+        seedAlbumId={album.id}
+        seedArtistId={album.artistId ?? null}
+      />
     </Layout>
   );
 }
@@ -204,5 +219,170 @@ function StationStatus({
     <p className={`text-xs mt-2 ${tone}`} style={{ minHeight: "1.2em" }}>
       {label}
     </p>
+  );
+}
+
+// "you might like" — runs CLAP-similarity on the album's tracks and
+// aggregates by album_id / artist_id server-side. Renders nothing while
+// loading, and nothing when both buckets come back empty (e.g. the
+// recommender hasn't ingested this album yet). Side-by-side via the
+// shared .search-grid CSS used on /search.
+const SIMILAR_N = 8;
+const TOP_HERO = 3;
+
+function SimilarSection({
+  seedTrackIds,
+  seedAlbumId,
+  seedArtistId,
+}: {
+  seedTrackIds: readonly string[];
+  seedAlbumId: string;
+  seedArtistId: string | null;
+}) {
+  const hasSeeds = seedTrackIds.length > 0;
+
+  const albumsQ = useQuery({
+    queryKey: ["similar-albums", seedAlbumId],
+    queryFn: () =>
+      fetchSimilarAlbums({
+        seedTrackIds,
+        excludeAlbumIds: [seedAlbumId],
+        n: SIMILAR_N,
+      }),
+    enabled: hasSeeds,
+    staleTime: 5 * 60_000,
+  });
+
+  const artistsQ = useQuery({
+    queryKey: ["similar-artists", seedAlbumId],
+    queryFn: () =>
+      fetchSimilarArtists({
+        seedTrackIds,
+        // Exclude the current artist when known; otherwise let the
+        // recommender's own artist-cap pull in close artists.
+        ...(seedArtistId ? { excludeArtistIds: [seedArtistId] } : {}),
+        n: SIMILAR_N,
+      }),
+    enabled: hasSeeds,
+    staleTime: 5 * 60_000,
+  });
+
+  // Hydrate album ids → full Album shapes. One getAlbum call per
+  // recommendation, parallel via useQueries. Cache key is shared with
+  // the /albums/:id page so navigating into a recommendation is a hit
+  // on the L2 cache.
+  const albumIds = albumsQ.data?.results.map((r) => r.album_id) ?? [];
+  const albumDetailQs = useQueries({
+    queries: albumIds.map((id) => ({
+      queryKey: ["album", id],
+      queryFn: () => getAlbum(id),
+      staleTime: 5 * 60_000,
+    })),
+  });
+  const hydratedAlbums = useMemo<AlbumType[]>(
+    () =>
+      albumDetailQs
+        .map((q) => q.data?.album)
+        .filter((a): a is AlbumType => a !== undefined),
+    [albumDetailQs],
+  );
+
+  // Hydrate artists by mapping ids against the cached registry. listArtists
+  // is shared with /home and /search, so this is a no-op fetch most of the
+  // time.
+  const knownArtistsQ = useQuery({
+    queryKey: ["artists"],
+    queryFn: listArtists,
+    enabled: hasSeeds,
+    staleTime: 5 * 60_000,
+  });
+  const artistById = useMemo(() => {
+    const map = new Map<string, Artist>();
+    for (const a of knownArtistsQ.data ?? []) map.set(a.id, a);
+    return map;
+  }, [knownArtistsQ.data]);
+  const hydratedArtists = useMemo<Artist[]>(
+    () =>
+      (artistsQ.data?.results ?? [])
+        .map((r) => artistById.get(r.artist_id))
+        .filter((a): a is Artist => a !== undefined),
+    [artistsQ.data, artistById],
+  );
+
+  // While both queries are still loading we render nothing — flashing an
+  // empty stub before data arrives would just push the player bar around.
+  const stillLoading = albumsQ.isLoading || artistsQ.isLoading;
+  if (stillLoading) return null;
+
+  const albumsSection =
+    hydratedAlbums.length > 0 ? (
+      <SimilarBucket
+        heading="similar albums"
+        hero={hydratedAlbums
+          .slice(0, TOP_HERO)
+          .map((a) => <AlbumHeroCard key={a.id} album={a} />)}
+        rest={
+          hydratedAlbums.length > TOP_HERO ? (
+            <AlbumTable albums={hydratedAlbums.slice(TOP_HERO)} />
+          ) : null
+        }
+      />
+    ) : null;
+
+  const artistsSection =
+    hydratedArtists.length > 0 ? (
+      <SimilarBucket
+        heading="similar artists"
+        hero={hydratedArtists
+          .slice(0, TOP_HERO)
+          .map((a) => <ArtistHeroCard key={a.id} artist={a} />)}
+        rest={
+          hydratedArtists.length > TOP_HERO ? (
+            <ArtistTable artists={hydratedArtists.slice(TOP_HERO)} />
+          ) : null
+        }
+      />
+    ) : null;
+
+  // Hide the whole section when both buckets are empty — keeps the page
+  // from ending in a dead "you might like (nothing)" block.
+  if (!albumsSection && !artistsSection) return null;
+
+  // Two-column wrap only when both buckets have content. Otherwise a
+  // single bucket flows full-width like a normal section so the page
+  // doesn't end up with a half-empty grid row.
+  if (albumsSection && artistsSection) {
+    return (
+      <div className="search-grid">
+        {artistsSection}
+        {albumsSection}
+      </div>
+    );
+  }
+  return (
+    <>
+      {artistsSection}
+      {albumsSection}
+    </>
+  );
+}
+
+function SimilarBucket({
+  heading,
+  hero,
+  rest,
+}: {
+  heading: string;
+  hero: readonly React.ReactNode[];
+  rest: React.ReactNode;
+}) {
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>{heading}</h2>
+      </div>
+      <div className="hero-strip">{hero}</div>
+      {rest}
+    </div>
   );
 }

@@ -242,6 +242,170 @@ async fn histogram_groups_by_name_and_reports_p50_p95_p99() {
     assert_eq!(b["p99_ms"], 99);
 }
 
+// --- /v1/diagnostics/span_series ------------------------------------------
+
+#[tokio::test]
+async fn span_series_requires_auth() {
+    let state = common::build_state(common::test_config()).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/span_series?name=x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn span_series_returns_points_newest_first() {
+    let state = common::build_state(common::test_config()).await;
+    state
+        .trace_store()
+        .insert_batch(vec![
+            span("ingest.fetch_clip", "t-1", 1, 100),
+            span("ingest.fetch_clip", "t-2", 2, 250),
+            span("other.span", "t-3", 3, 5),
+        ])
+        .await
+        .unwrap();
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/span_series?name=ingest.fetch_clip",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["name"], "ingest.fetch_clip");
+    let pts = json["points"].as_array().unwrap();
+    assert_eq!(pts.len(), 2);
+    // Newest first.
+    assert_eq!(pts[0]["duration_ms"], 250);
+    assert_eq!(pts[1]["duration_ms"], 100);
+    assert!(pts[0]["end_ms"].as_i64().unwrap() >= pts[1]["end_ms"].as_i64().unwrap());
+}
+
+#[tokio::test]
+async fn span_series_filters_by_since_ms() {
+    let state = common::build_state(common::test_config()).await;
+    // Span 1 ends at 1.7e12; build two so we can filter past the first.
+    let s1 = span("x", "t-1", 1, 5); // end_ms = base + 5
+    let mut s2 = span("x", "t-2", 2, 5);
+    s2.end_ms = s1.end_ms + 1_000; // 1 s newer
+    let cutoff = s1.end_ms + 100;
+    state
+        .trace_store()
+        .insert_batch(vec![s1, s2])
+        .await
+        .unwrap();
+
+    let (status, json) = fetch_json(
+        build_router(state),
+        &format!("/v1/diagnostics/span_series?name=x&since_ms={cutoff}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pts = json["points"].as_array().unwrap();
+    assert_eq!(pts.len(), 1);
+}
+
+#[tokio::test]
+async fn span_series_missing_name_param_400s() {
+    let state = common::build_state(common::test_config()).await;
+    let resp = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/span_series")
+                .header("authorization", AUTH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- /v1/diagnostics/span_children ---------------------------------------
+
+fn span_with_parent(
+    name: &str,
+    trace_id: &str,
+    span_id: i64,
+    parent_span_id: Option<i64>,
+    dur_ms: i64,
+) -> SpanRecord {
+    let mut s = span(name, trace_id, span_id, dur_ms);
+    s.parent_span_id = parent_span_id;
+    s
+}
+
+#[tokio::test]
+async fn span_children_requires_auth() {
+    let state = common::build_state(common::test_config()).await;
+    let resp = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/span_children?name=x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn span_children_aggregates_under_parent() {
+    let state = common::build_state(common::test_config()).await;
+    state
+        .trace_store()
+        .insert_batch(vec![
+            span_with_parent("ingest.fetch_clip", "t1", 1, None, 1000),
+            span_with_parent("fetch_clip.get_song", "t1", 2, Some(1), 10),
+            span_with_parent("fetch_clip.stream_body", "t1", 3, Some(1), 970),
+        ])
+        .await
+        .unwrap();
+    let (status, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/span_children?name=ingest.fetch_clip",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["parent_name"], "ingest.fetch_clip");
+    assert_eq!(json["parent_count"], 1);
+    assert_eq!(json["parent_sum_ms"], 1000);
+    let children = json["children"].as_array().unwrap();
+    let names: Vec<&str> = children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"fetch_clip.get_song"));
+    assert!(names.contains(&"fetch_clip.stream_body"));
+    // Newest-to-largest order; stream_body should come first (970 > 10).
+    assert_eq!(children[0]["name"], "fetch_clip.stream_body");
+    assert_eq!(children[0]["sum_ms"], 970);
+}
+
+#[tokio::test]
+async fn span_children_missing_name_param_400s() {
+    let state = common::build_state(common::test_config()).await;
+    let resp = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/diagnostics/span_children")
+                .header("authorization", AUTH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // --- /v1/diagnostics/queue_depth ------------------------------------------
 
 #[tokio::test]
