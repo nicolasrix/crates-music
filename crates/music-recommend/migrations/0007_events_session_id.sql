@@ -1,0 +1,21 @@
+-- Stamp events with the active recommend-session at write time so the
+-- event log is queryable per session. Lets us reconstruct what played
+-- (scrobble), how the user reacted (skip, seek), and which artifacts
+-- the recommender produced for that listening session.
+--
+-- NULL session_id is intentional and load-bearing:
+--   1. Backfill: pre-0007 rows have no session.
+--   2. Out-of-session: an event fires without an active SessionAnchor
+--      (e.g. user paused then resumed after StopSession, or the
+--      anchor was lost across a gateway restart pre-0008).
+--   3. Client omits session_id on /v1/events.
+--
+-- Not a foreign key into recommend_sessions: events are append-only
+-- signal and may outlive a session row's retention horizon. Joining
+-- on session_id at query time is fine; cascade semantics are not what
+-- we want — losing a session row must not silently drop its events.
+--
+-- Partial index keeps the index small. Queries that filter by
+-- session_id ignore NULLs by definition.
+ALTER TABLE events ADD COLUMN session_id TEXT;
+CREATE INDEX events_session_id_idx ON events (session_id) WHERE session_id IS NOT NULL;

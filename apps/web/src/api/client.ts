@@ -200,11 +200,33 @@ export async function deletePlaylist(playlistId: string): Promise<void> {
   await getSubsonic<unknown>(path, "");
 }
 
-// "Recent tracks" — Subsonic doesn't have a direct "all songs" endpoint, so
-// we use search3 with a wildcard query. Library scale is single-user, so a
-// 200-row sample is enough for the all-tracks view.
+// "Recent tracks" — derived from the newest-albums endpoint, NOT from
+// search3 directly. search3's empty-query result has no guaranteed order
+// (and even when it looks sorted, the order won't match what /albums
+// shows under "recently added"). Going through getAlbumList2?type=newest
+// guarantees the two views agree.
+//
+// We over-estimate the album count (avg ~10 tracks/album) and trim the
+// flattened list to `size`. Per-album track fetches run in parallel —
+// the gateway caches each `getAlbum` aggressively, so warm-cache cost
+// is effectively one round-trip.
 export async function listRecentTracks(size = 200): Promise<Track[]> {
-  return listTracksPage({ size });
+  const albumCount = Math.max(10, Math.ceil(size / 8));
+  const albums = await listAlbums({ type: "newest", size: albumCount });
+  // Promise.all preserves index order, so the flattened tracks come
+  // out album-by-album in newest-first order without an extra sort.
+  const details = await Promise.all(
+    albums.map((a) => getAlbum(a.id).catch(() => null)),
+  );
+  const tracks: Track[] = [];
+  for (const detail of details) {
+    if (!detail) continue;
+    for (const t of detail.tracks) {
+      tracks.push(t);
+      if (tracks.length >= size) return tracks;
+    }
+  }
+  return tracks;
 }
 
 // Paginated track listing via Subsonic search3 with songOffset. Subsonic

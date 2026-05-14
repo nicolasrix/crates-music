@@ -2,7 +2,7 @@
 
 **Path:** `crates/music-recommend/`
 **Type:** library, server-only
-**Test count:** 206
+**Test count:** ≈227
 
 The recommender's state layer. The original "embeddings + queue + ANN"
 core has grown into several focused modules; all share the same
@@ -12,7 +12,7 @@ tables.
 | Module | Owns | Migration |
 |---|---|---|
 | `store` | `track_embeddings` table + ingest queue (status column) | `0001_embeddings.sql` |
-| `events` | `events` append-only log | `0002_events.sql` |
+| `events` | `events` append-only log (with `session_id` stamp) | `0002_events.sql` + `0007_events_session_id.sql` |
 | `metadata` | `track_metadata` cache (artist/title/album/year/genre/duration) | `0003_track_metadata.sql` |
 | `play_history` | `play_history` (track_id PK, last_played_ms) — recency clock (populated by scrobble interceptor; reserved for the planned MMR recency term, see [Algorithm reference](#algorithm-reference)) | `0004_play_history.sql` |
 | `feedback` | `recommend_feedback` (track_id, session_id, vote, occurred_ms) | `0005_recommend_feedback.sql` |
@@ -23,6 +23,7 @@ tables.
 | `aggregate` | Σ-similarity multi-seed fan-out helpers | n/a |
 | `mmr` | Maximal Marginal Relevance reranker | n/a |
 | `queue_filter` | Queue-aware diversity filter (per-artist cap, dedup, MMR) | n/a |
+| `sessions` | `recommend_sessions` (session_id PK, anchor_track, started/ended_ms) — durable lifecycle mirror of `SyncOp::StartSession`/`StopSession` | `0008_recommend_sessions.sql` |
 
 This crate is **server-only**. It pulls in `usearch` (ships C++),
 `sqlx`, `reqwest`. Mobile clients won't link this.
@@ -405,11 +406,14 @@ store.append_batch(&[
         track_id: TrackId::from("t1"),
         occurred_at: 1_712_345_678_901,
         metadata: Some(json!({"played_ms": 180_000})),
+        session_id: Some(SessionId::from("s-abc")),  // optional; NULL if absent
     },
 ]).await?;
 
 let count = store.count().await?;
 let recent = store.recent(50).await?;
+let by_sess = store.by_session(&SessionId::from("s-abc"), 100).await?;
+let counts = store.count_events_per_session(&[sid1, sid2]).await?;
 ```
 
 `EventType` has standard variants (`Scrobble`, `Skip`, `Like`,
@@ -417,6 +421,36 @@ let recent = store.recent(50).await?;
 serde. Unknown event types from clients deserialize into `Other`,
 store as their literal string, round-trip back. Forward-compat for
 new event kinds without a server release.
+
+`session_id` is optional and round-trips as SQL NULL when absent.
+Populated by the gateway's `/rest/scrobble` interceptor with the
+active recommend-session at write time; lets per-session
+reconstruction (`by_session`) find scrobbles, skips and seeks that
+fired while the user was listening to a given queue.
+
+### `SessionStore`
+
+Durable mirror of `SyncOp::StartSession` / `SyncOp::StopSession`.
+The in-memory `SessionAnchor` in `music_sync::SyncState` is a view of
+whichever row is currently open (`ended_ms IS NULL`); this store is
+the persisted source of truth that survives gateway restarts.
+
+```rust
+let store = SessionStore::new(embedding_pool.clone());
+store.start(&sid, &anchor_track, items_count, started_ms).await?;
+// later:
+store.stop(&sid, ended_ms).await?;
+
+let active = store.active().await?;       // Option<SessionRow>; ≤ 1 by invariant
+let row    = store.get(&sid).await?;
+let recent = store.recent(50).await?;     // newest started_ms first
+```
+
+`start` closes any currently-active row at the new `started_ms`
+before inserting the new one — sync state allows one active session
+at a time, and this store mirrors that. `SyncStore::with_sessions`
+wires the dispatch in production; `SyncStore::new()` keeps tests of
+the broadcast path zero-dependency.
 
 ## Migrations
 
@@ -428,6 +462,8 @@ new event kinds without a server release.
 | `0004_play_history.sql` | `play_history` (track_id PK, last_played_ms). MMR recency clock. |
 | `0005_recommend_feedback.sql` | `recommend_feedback` (track_id, session_id, vote, occurred_ms). |
 | `0006_embedding_projection_2d.sql` | `embedding_projection_2d` (track_id, model_version, x, y). |
+| `0007_events_session_id.sql` | `ALTER TABLE events ADD COLUMN session_id TEXT` + partial index. NULL allowed (pre-0007 rows, out-of-session events, missing client payload). |
+| `0008_recommend_sessions.sql` | `recommend_sessions` (session_id PK, anchor_track_id, items_count, started_ms, ended_ms). Partial index on `ended_ms IS NULL` for O(1) active-session lookup. |
 
 The store owns its own SQLite file
 (`gateway-state.recommend.sqlite`), separate from the OAuth state DB.
@@ -437,10 +473,10 @@ keeps each migration timeline self-contained.
 
 ## Tests
 
-206 tests as of last update, mostly inline unit tests on the new
+≈227 tests as of last update, mostly inline unit tests on the
 post-retrieval modules (queue_filter, mmr, aggregate, metadata,
-play_history, feedback, projection). Coverage at the integration
-level:
+play_history, feedback, projection, sessions). Coverage at the
+integration level:
 
 - `EmbeddingStore`: enqueue, claim, mark done, mark failed, reset
   paths, idempotent insert behaviour, status counts.
@@ -460,9 +496,12 @@ level:
   multi-worker. Probably needs a dedicated test.
 - **No behavioural index.** Track2vec on session windows is the
   natural next step, with the event log as input. Deferred.
-- **No CLAP text path wired into recommend endpoints.** The
-  embedder client supports `embed_text`; the gateway doesn't expose
-  a text-query endpoint yet. Deferred.
+- **Text-station handler is filter-bypass.** `GET /v1/recommend/station`
+  embeds the prompt and runs the ANN top-N — that's it. No queue
+  context, no MMR rerank, no per-session downvote exclusion. The
+  same `EmbedderClient::embed_text` + `AnnIndex::query` primitives
+  used here are wired through; layering the queue filter onto the
+  text path is a small follow-up.
 - **No re-embedding on track edit.** If track audio is replaced
   upstream, we'd serve stale embeddings. Detection requires polling
   Navidrome for ETag changes per track — feasible, not done.

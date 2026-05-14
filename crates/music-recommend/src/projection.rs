@@ -31,6 +31,18 @@ pub struct Projection2D {
     pub track_id: String,
     pub x: f64,
     pub y: f64,
+    /// PCA components on the original embedding space, computed by the
+    /// reducer alongside `(x, y)` and tied to the same `proj_version`.
+    /// `None` for projections that predate migration 0009 or for
+    /// components past the dataset's natural rank (N < 4 or D < 4).
+    pub pc1: Option<f64>,
+    pub pc2: Option<f64>,
+    pub pc3: Option<f64>,
+    pub pc4: Option<f64>,
+    /// Third UMAP axis from an `n_components=3` reducer run (migration
+    /// 0010). `None` for 2D projections — populated only when the
+    /// `proj_version` string carries the `-d3` suffix.
+    pub z: Option<f64>,
 }
 
 /// One entry in the projection-version catalogue: which `proj_version`
@@ -58,7 +70,7 @@ impl ProjectionStore {
         model_version: &ModelVersion,
     ) -> Result<Vec<Projection2D>> {
         let rows = sqlx::query(
-            "SELECT track_id, x, y
+            "SELECT track_id, x, y, pc1, pc2, pc3, pc4, z
                FROM embedding_projection_2d
               WHERE proj_version = ? AND model_version = ?
               ORDER BY track_id",
@@ -74,8 +86,74 @@ impl ProjectionStore {
                 track_id: r.get::<String, _>("track_id"),
                 x: r.get::<f64, _>("x"),
                 y: r.get::<f64, _>("y"),
+                pc1: r.get::<Option<f64>, _>("pc1"),
+                pc2: r.get::<Option<f64>, _>("pc2"),
+                pc3: r.get::<Option<f64>, _>("pc3"),
+                pc4: r.get::<Option<f64>, _>("pc4"),
+                z: r.get::<Option<f64>, _>("z"),
             })
             .collect())
+    }
+
+    /// Delete every projection whose `proj_version` matches the given
+    /// SQL `LIKE` pattern *except* the `keep` newest (by latest
+    /// `created_at_ms`) for that `model_version`. Returns the count of
+    /// `proj_version`s pruned, not rows.
+    ///
+    /// Used by the auto-recompute task to bound how many "auto-…" runs
+    /// accumulate in the diagnostics dropdown — each recompute writes
+    /// a fresh proj_version; without retention the table grows by
+    /// one whole projection per trigger.
+    ///
+    /// `pattern` is matched against `proj_version` with SQLite's `LIKE`,
+    /// so use `%` for wildcards. The pattern is supplied by the caller
+    /// (not user input) so we don't escape it.
+    pub async fn prune_proj_versions(
+        &self,
+        model_version: &ModelVersion,
+        pattern: &str,
+        keep: usize,
+    ) -> Result<usize> {
+        // Step 1: enumerate matching proj_versions, newest-first.
+        let rows = sqlx::query(
+            "SELECT proj_version
+               FROM embedding_projection_2d
+              WHERE model_version = ? AND proj_version LIKE ?
+              GROUP BY proj_version
+              ORDER BY MAX(created_at_ms) DESC",
+        )
+        .bind(model_version.as_str())
+        .bind(pattern)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut victims: Vec<String> = rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("proj_version"))
+            .collect();
+        if victims.len() <= keep {
+            return Ok(0);
+        }
+        // Drop the newest `keep` from the head; the rest are victims.
+        let to_delete = victims.split_off(keep);
+
+        // Step 2: delete the victim rows in one DELETE per proj_version.
+        // Building a single `IN (...)` clause would also work; the per-
+        // version loop keeps the binding shape simple and at our scale
+        // (≤ a handful of victims per call) the cost is the same.
+        let mut tx = self.pool.begin().await?;
+        for pv in &to_delete {
+            sqlx::query(
+                "DELETE FROM embedding_projection_2d
+                   WHERE model_version = ? AND proj_version = ?",
+            )
+            .bind(model_version.as_str())
+            .bind(pv)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(to_delete.len())
     }
 
     /// Distinct `proj_version` values known for the given
@@ -174,8 +252,75 @@ mod tests {
                 track_id: "t1".into(),
                 x: 1.0,
                 y: 2.0,
+                pc1: None,
+                pc2: None,
+                pc3: None,
+                pc4: None,
+                z: None,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_reads_pca_columns_when_present() {
+        let (s, pool) = store().await;
+        sqlx::query(
+            "INSERT INTO embedding_projection_2d
+                 (track_id, model_version, proj_version, x, y, created_at_ms,
+                  pc1, pc2, pc3, pc4)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("t1")
+        .bind("m1")
+        .bind("pv1")
+        .bind(0.0)
+        .bind(0.0)
+        .bind(100)
+        .bind(0.5_f64)
+        .bind(-0.5_f64)
+        .bind(0.25_f64)
+        // pc4 is left null on purpose — a small-N dataset would land here.
+        .bind::<Option<f64>>(None)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pc1, Some(0.5));
+        assert_eq!(got[0].pc2, Some(-0.5));
+        assert_eq!(got[0].pc3, Some(0.25));
+        assert_eq!(got[0].pc4, None);
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_reads_z_when_present() {
+        let (s, pool) = store().await;
+        sqlx::query(
+            "INSERT INTO embedding_projection_2d
+                 (track_id, model_version, proj_version, x, y, created_at_ms, z)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("t1")
+        .bind("m1")
+        .bind("pv1")
+        .bind(0.0)
+        .bind(0.0)
+        .bind(100)
+        .bind(1.25_f64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].z, Some(1.25));
+    }
+
+    #[tokio::test]
+    async fn list_by_proj_version_z_is_none_for_2d_projection() {
+        let (s, pool) = store().await;
+        insert_point(&pool, "t1", "m1", "pv1", 1.0, 2.0, 100).await;
+        let got = s.list_by_proj_version("pv1", &mv("m1")).await.unwrap();
+        assert_eq!(got[0].z, None);
     }
 
     #[tokio::test]
@@ -195,6 +340,67 @@ mod tests {
         let (s, _) = store().await;
         let got = s.proj_versions_for_model(&mv("m1")).await.unwrap();
         assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_newest_n_and_drops_the_rest() {
+        let (s, pool) = store().await;
+        // Five auto-runs at distinct created_at_ms; we want to keep 3.
+        for (i, ts) in [(1, 100), (2, 200), (3, 300), (4, 400), (5, 500)] {
+            insert_point(&pool, "t1", "m1", &format!("auto-{i}"), 0.0, 0.0, ts).await;
+        }
+        let pruned = s.prune_proj_versions(&mv("m1"), "auto-%", 3).await.unwrap();
+        assert_eq!(pruned, 2);
+        let remaining = s.proj_versions_for_model(&mv("m1")).await.unwrap();
+        let names: Vec<_> = remaining.iter().map(|p| p.proj_version.clone()).collect();
+        // Sorted by MAX(created_at_ms) DESC — newest three are 5, 4, 3.
+        assert_eq!(names, vec!["auto-5", "auto-4", "auto-3"]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_noop_when_count_below_keep_threshold() {
+        let (s, pool) = store().await;
+        insert_point(&pool, "t1", "m1", "auto-1", 0.0, 0.0, 100).await;
+        insert_point(&pool, "t1", "m1", "auto-2", 0.0, 0.0, 200).await;
+        let pruned = s.prune_proj_versions(&mv("m1"), "auto-%", 5).await.unwrap();
+        assert_eq!(pruned, 0);
+        let remaining = s.proj_versions_for_model(&mv("m1")).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_only_targets_matching_pattern() {
+        // Manual projections (no `-auto-` suffix) must be left alone
+        // even when the auto-run history overflows the retention cap.
+        let (s, pool) = store().await;
+        insert_point(&pool, "t1", "m1", "manual-baseline", 0.0, 0.0, 50).await;
+        for (i, ts) in [(1, 100), (2, 200), (3, 300)] {
+            insert_point(&pool, "t1", "m1", &format!("auto-{i}"), 0.0, 0.0, ts).await;
+        }
+        let pruned = s.prune_proj_versions(&mv("m1"), "auto-%", 1).await.unwrap();
+        assert_eq!(pruned, 2);
+        let remaining = s.proj_versions_for_model(&mv("m1")).await.unwrap();
+        let names: Vec<_> = remaining.iter().map(|p| p.proj_version.clone()).collect();
+        // newest auto + the untouched manual baseline.
+        assert!(names.contains(&"auto-3".to_string()));
+        assert!(names.contains(&"manual-baseline".to_string()));
+        assert!(!names.contains(&"auto-1".to_string()));
+        assert!(!names.contains(&"auto-2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prune_scopes_to_model_version() {
+        // Two models with overlapping proj_version names: pruning one
+        // model must not touch the other's rows.
+        let (s, pool) = store().await;
+        for (i, ts) in [(1, 100), (2, 200), (3, 300)] {
+            insert_point(&pool, "t1", "m1", &format!("auto-{i}"), 0.0, 0.0, ts).await;
+            insert_point(&pool, "t1", "m2", &format!("auto-{i}"), 0.0, 0.0, ts).await;
+        }
+        s.prune_proj_versions(&mv("m1"), "auto-%", 1).await.unwrap();
+        // m1 trimmed to 1, m2 untouched at 3.
+        assert_eq!(s.proj_versions_for_model(&mv("m1")).await.unwrap().len(), 1);
+        assert_eq!(s.proj_versions_for_model(&mv("m2")).await.unwrap().len(), 3);
     }
 
     #[tokio::test]

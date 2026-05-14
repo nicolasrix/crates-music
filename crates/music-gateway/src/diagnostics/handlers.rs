@@ -22,11 +22,14 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
 };
-use music_recommend::types::ModelVersion;
+use music_recommend::types::{EmbeddingKey, ModelVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::diagnostics::{ClientEventRecord, HistogramBucket, RecommendSummary, SpanRecord};
+use crate::diagnostics::{
+    ChildAgg, ChildBreakdown, ClientEventRecord, HistogramBucket, RecommendSummary, SpanPoint,
+    SpanRecord,
+};
 use crate::state::AppState;
 
 const DEFAULT_TRACE_LIMIT: usize = 100;
@@ -167,6 +170,129 @@ pub async fn histogram(
     Ok(Json(HistogramResponse {
         buckets: buckets.into_iter().map(HistogramBucketJson::from).collect(),
     }))
+}
+
+// --- /v1/diagnostics/span_series ------------------------------------------
+
+/// Hard ceiling on points per response. A span fired 10/s for an hour
+/// is 36k samples — already chunky for one fetch. Caller-supplied
+/// `limit` is clamped to this so a runaway `?limit=999999` can't OOM.
+const MAX_SPAN_SERIES_POINTS: usize = 10_000;
+const DEFAULT_SPAN_SERIES_POINTS: usize = 2_000;
+
+#[derive(Debug, Deserialize)]
+pub struct SpanSeriesQuery {
+    /// Required: the span name to plot. We deliberately don't default
+    /// to "all", since the response is a flat list of points without
+    /// per-name tagging — the histogram endpoint covers the all-names
+    /// case.
+    name: String,
+    since_ms: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanSeriesResponse {
+    name: String,
+    points: Vec<SpanSeriesPoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanSeriesPoint {
+    end_ms: i64,
+    duration_ms: i64,
+}
+
+impl From<SpanPoint> for SpanSeriesPoint {
+    fn from(p: SpanPoint) -> Self {
+        Self {
+            end_ms: p.end_ms,
+            duration_ms: p.duration_ms,
+        }
+    }
+}
+
+pub async fn span_series(
+    State(state): State<AppState>,
+    Query(q): Query<SpanSeriesQuery>,
+) -> Result<Json<SpanSeriesResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_SPAN_SERIES_POINTS)
+        .clamp(1, MAX_SPAN_SERIES_POINTS);
+    let pts = state
+        .trace_store()
+        .span_series(&q.name, q.since_ms, limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(SpanSeriesResponse {
+        name: q.name,
+        points: pts.into_iter().map(SpanSeriesPoint::from).collect(),
+    }))
+}
+
+// --- /v1/diagnostics/span_children ----------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SpanChildrenQuery {
+    name: String,
+    since_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpanChildrenResponse {
+    parent_name: String,
+    parent_count: u64,
+    parent_sum_ms: i64,
+    children: Vec<ChildAggJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChildAggJson {
+    name: String,
+    count: u64,
+    sum_ms: i64,
+    mean_ms: f64,
+}
+
+impl From<ChildAgg> for ChildAggJson {
+    fn from(c: ChildAgg) -> Self {
+        #[allow(clippy::cast_precision_loss)] // u64 count fits in f64 at our cardinality
+        let mean_ms = if c.count == 0 {
+            0.0
+        } else {
+            c.sum_ms as f64 / c.count as f64
+        };
+        Self {
+            name: c.name,
+            count: c.count,
+            sum_ms: c.sum_ms,
+            mean_ms,
+        }
+    }
+}
+
+impl From<ChildBreakdown> for SpanChildrenResponse {
+    fn from(b: ChildBreakdown) -> Self {
+        Self {
+            parent_name: b.parent_name,
+            parent_count: b.parent_count,
+            parent_sum_ms: b.parent_sum_ms,
+            children: b.children.into_iter().map(ChildAggJson::from).collect(),
+        }
+    }
+}
+
+pub async fn span_children(
+    State(state): State<AppState>,
+    Query(q): Query<SpanChildrenQuery>,
+) -> Result<Json<SpanChildrenResponse>, (StatusCode, Json<Value>)> {
+    let breakdown = state
+        .trace_store()
+        .child_breakdown(&q.name, q.since_ms)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(SpanChildrenResponse::from(breakdown)))
 }
 
 // --- /v1/diagnostics/queue_depth ------------------------------------------
@@ -784,6 +910,10 @@ pub async fn recommend_feedback(
 
 // --- /v1/diagnostics/recommend/latent_space -------------------------------
 
+/// Suffix marking a 3-D UMAP projection. Matches the Python reducer's
+/// convention in `default_proj_version(n_components=3)`.
+const D3_PROJ_SUFFIX: &str = "-d3";
+
 #[derive(Debug, Deserialize)]
 pub struct LatentSpaceQuery {
     /// Explicit projection version to render. When omitted, the handler
@@ -795,6 +925,12 @@ pub struct LatentSpaceQuery {
     /// gateway's active `recommend_model_version` (matches what the
     /// rest of the recommender pipeline writes).
     model_version: Option<String>,
+    /// Layout preference: `"2d"` snaps to the newest non-`-d3`
+    /// projection, `"3d"` to the newest `-d3` projection. Ignored when
+    /// `proj_version` is explicitly set (debug pathway). The web UI
+    /// uses this to drive the canvas off the colour-by selector
+    /// without needing a separate `proj_version` dropdown.
+    prefer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -810,6 +946,20 @@ pub struct LatentSpacePoint {
     /// rough validation of "does the audio embedding recover the
     /// human-labelled grouping?"
     genre: Option<String>,
+    /// First four PCA components on the original embedding space,
+    /// computed by the reducer alongside `(x, y)` (migration 0009).
+    /// `null` per-component on projections that predate the migration
+    /// or for components past the dataset's natural rank. Powers the
+    /// web "colour by → PCn" mode.
+    pc1: Option<f64>,
+    pc2: Option<f64>,
+    pc3: Option<f64>,
+    pc4: Option<f64>,
+    /// Third UMAP axis from an `n_components=3` reducer run (migration
+    /// 0010). `null` for 2D projections. Powers the web "colour by →
+    /// UMAP z" mode — the only continuous channel whose interpretation
+    /// is "another UMAP-discovered axis" rather than a PCA component.
+    z: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -838,9 +988,15 @@ pub struct LatentSpaceResponse {
 ///
 /// Two-step resolution:
 ///   1. Figure out which `proj_version` to render — explicit param wins,
-///      otherwise pick the newest from `proj_versions_for_model`.
+///      otherwise pick the newest from `proj_versions_for_model`. The
+///      2-D and 3-D UMAP runs are independent layouts; the dropdown
+///      surfaces both and the user picks one.
 ///   2. Fetch the points, then bulk-join the metadata cache so the UI
 ///      can show titles + artists without a per-row round-trip.
+///
+/// Each row is self-contained: `(x, y)` plus PCs and (for `-d3` runs)
+/// `z` all come from the same UMAP run, so a 2-D-vs-3-D toggle is just
+/// a `proj_version` switch — no cross-projection joining.
 pub async fn recommend_latent_space(
     State(state): State<AppState>,
     Query(q): Query<LatentSpaceQuery>,
@@ -855,11 +1011,25 @@ pub async fn recommend_latent_space(
         .await
         .map_err(db_error)?;
 
-    // Resolve the active proj_version. Explicit param wins even if no
-    // row matches — that's the user asking "show me pv-X"; we return
-    // an empty point list rather than silently swapping in a different
-    // projection.
-    let proj_version = q.proj_version.or_else(|| versions.first().map(|v| v.proj_version.clone()));
+    // Resolve the active proj_version. Precedence:
+    //   1. Explicit `proj_version` query param (debug pathway) — even
+    //      if no row matches, return its empty result rather than
+    //      silently swapping in a different projection.
+    //   2. `prefer=2d|3d` — newest projection matching the suffix
+    //      convention. `None` (and an empty point list) when no
+    //      matching projection exists.
+    //   3. Newest overall (legacy callers without either param).
+    let proj_version = q.proj_version.or_else(|| match q.prefer.as_deref() {
+        Some("2d") => versions
+            .iter()
+            .find(|v| !v.proj_version.ends_with(D3_PROJ_SUFFIX))
+            .map(|v| v.proj_version.clone()),
+        Some("3d") => versions
+            .iter()
+            .find(|v| v.proj_version.ends_with(D3_PROJ_SUFFIX))
+            .map(|v| v.proj_version.clone()),
+        _ => versions.first().map(|v| v.proj_version.clone()),
+    });
 
     let points = if let Some(pv) = &proj_version {
         let raw = state
@@ -888,6 +1058,11 @@ pub async fn recommend_latent_space(
                     artist: md.map(|m| m.artist.clone()),
                     album: md.and_then(|m| m.album.clone()),
                     genre: md.and_then(|m| m.genre.clone()),
+                    pc1: p.pc1,
+                    pc2: p.pc2,
+                    pc3: p.pc3,
+                    pc4: p.pc4,
+                    z: p.z,
                 }
             })
             .collect()
@@ -912,6 +1087,84 @@ pub async fn recommend_latent_space(
     }))
 }
 
+// --- /v1/diagnostics/recommend/latent_neighbours --------------------------
+//
+// Hover overlay for the latent-space scatter. Returns the k nearest
+// neighbours of a seed track in the **original** CLAP space — the
+// distances UMAP doesn't preserve. Cheap (HNSW query is sub-ms at our
+// scale) and fetched on demand from the web client, so the
+// /latent_space payload stays small.
+
+const DEFAULT_LATENT_NEIGHBOURS_K: usize = 10;
+const MAX_LATENT_NEIGHBOURS_K: usize = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct LatentNeighboursQuery {
+    track_id: String,
+    /// Number of neighbours to return. Defaults to
+    /// `DEFAULT_LATENT_NEIGHBOURS_K`. Clamped to
+    /// `MAX_LATENT_NEIGHBOURS_K` to keep the response bounded.
+    k: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentNeighbourEntry {
+    track_id: String,
+    /// Cosine distance in CLAP space: `1 - cosine_similarity`. Range
+    /// `[0, 2]`, with `0` = identical direction and `1` = orthogonal.
+    /// Reported (instead of similarity) because the visual encoding
+    /// reads as distance: short line = close, long line = far.
+    cosine_distance: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatentNeighboursResponse {
+    /// Echoed back so the client can correlate the response to its
+    /// (possibly stale) hover state.
+    track_id: String,
+    /// Ordered by ascending `cosine_distance`. Seed itself is filtered
+    /// out, so the list contains at most `k` entries.
+    neighbours: Vec<LatentNeighbourEntry>,
+}
+
+/// k nearest neighbours of `track_id` in the full embedding space.
+/// Returns 404 if the seed has no vector in the ANN — the caller is
+/// hovering a point that exists in the projection (otherwise they
+/// couldn't hover it) but the embedding can in principle be missing
+/// after a model-version flip; the UI degrades to "no overlay" for
+/// that point.
+pub async fn recommend_latent_neighbours(
+    State(state): State<AppState>,
+    Query(q): Query<LatentNeighboursQuery>,
+) -> Result<Json<LatentNeighboursResponse>, (StatusCode, &'static str)> {
+    let k_raw = q.k.unwrap_or(DEFAULT_LATENT_NEIGHBOURS_K);
+    if k_raw == 0 {
+        return Err((StatusCode::BAD_REQUEST, "k must be >= 1"));
+    }
+    let k = k_raw.min(MAX_LATENT_NEIGHBOURS_K);
+    let seed_id = music_core::TrackId::from(q.track_id.as_str());
+    let ann = state.ann();
+    let vector = match ann.get_vector(&seed_id) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "seed not embedded")),
+        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "ann query failed")),
+    };
+    let results = ann
+        .query_excluding(&vector, k, std::slice::from_ref(&seed_id))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+    let neighbours = results
+        .into_iter()
+        .map(|r| LatentNeighbourEntry {
+            track_id: r.track_id.into_inner(),
+            cosine_distance: (1.0 - r.similarity as f64).max(0.0),
+        })
+        .collect();
+    Ok(Json(LatentNeighboursResponse {
+        track_id: q.track_id,
+        neighbours,
+    }))
+}
+
 pub async fn queue_depth(
     State(state): State<AppState>,
     Query(q): Query<QueueDepthQuery>,
@@ -931,4 +1184,197 @@ pub async fn queue_depth(
         done: counts.done,
         failed: counts.failed,
     }))
+}
+
+// --- /v1/diagnostics/recommend/sessions ----------------------------------
+
+const DEFAULT_SESSIONS_LIMIT: i64 = 50;
+const MAX_SESSIONS_LIMIT: i64 = 500;
+/// Cap on events fetched per session when `include_events=1`. Sessions
+/// don't realistically grow this large (they auto-close on the next
+/// StartSession), but a hard cap protects the endpoint from a
+/// pathological queue.
+const MAX_EVENTS_PER_SESSION: u32 = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct SessionsQuery {
+    limit: Option<i64>,
+    /// `1` to attach `events` + `segments` to each item. Defaults to off
+    /// because the join is O(events × embedding-fetches) per session
+    /// and the unaugmented response is what list views actually need.
+    include_events: Option<u8>,
+    /// Model version used when looking up embeddings for the per-
+    /// segment cosine distances. Defaults to the gateway's active
+    /// `recommend_model_version`. Ignored when `include_events != 1`.
+    model_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionEventItem {
+    track_id: String,
+    /// Lowercase enum string: "scrobble" | "skip" | "seek" | …
+    /// Matches the wire format the event log already exposes elsewhere.
+    event_type: String,
+    occurred_at_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSegment {
+    /// Cosine distance in `[0, 2]` between event[i].track and
+    /// event[i+1].track under the active model_version. `None` when
+    /// either track has no `done` embedding row (a session can hop
+    /// through not-yet-ingested tracks).
+    cosine_distance: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionItem {
+    session_id: String,
+    anchor_track_id: String,
+    items_count: i64,
+    started_ms: i64,
+    /// `None` when the session is still active.
+    ended_ms: Option<i64>,
+    /// How many events (scrobble/skip/seek/…) landed under this session
+    /// id. 0 when nothing has been logged yet — useful indicator of
+    /// "user opened a queue but didn't actually listen."
+    event_count: i64,
+    /// Present only when `include_events=1`. Oldest-first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events: Option<Vec<SessionEventItem>>,
+    /// Present only when `include_events=1`. Length = events.len() - 1;
+    /// `segments[i]` is the gap between `events[i]` and `events[i+1]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segments: Option<Vec<SessionSegment>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionsListResponse {
+    items: Vec<SessionItem>,
+}
+
+/// Cosine distance between two equal-length vectors, in `[0, 2]`.
+/// Returns `None` for length mismatch / empty input / zero-norm — all
+/// "no meaningful distance" cases that should surface as JSON `null`,
+/// not 500.
+fn cosine_distance(a: &[f32], b: &[f32]) -> Option<f64> {
+    if a.is_empty() || a.len() != b.len() {
+        return None;
+    }
+    let mut dot = 0.0_f64;
+    let mut norm_a = 0.0_f64;
+    let mut norm_b = 0.0_f64;
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        let x = f64::from(*ai);
+        let y = f64::from(*bi);
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return None;
+    }
+    let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+    Some(1.0 - sim)
+}
+
+/// Recent recommend-session lifetimes, newest started_ms first. Each
+/// row joins in the count of events stamped with that session_id from
+/// the (separately stored) event log. Single SQL aggregate, not N+1.
+pub async fn recommend_sessions(
+    State(state): State<AppState>,
+    Query(q): Query<SessionsQuery>,
+) -> Result<Json<SessionsListResponse>, (StatusCode, Json<Value>)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_SESSIONS_LIMIT)
+        .clamp(1, MAX_SESSIONS_LIMIT);
+    let include_events = q.include_events.unwrap_or(0) == 1;
+    let rows = state.sessions().recent(limit).await.map_err(db_error)?;
+    let session_ids: Vec<music_core::SessionId> =
+        rows.iter().map(|r| r.session_id.clone()).collect();
+    let counts = state
+        .event_store()
+        .count_events_per_session(&session_ids)
+        .await
+        .map_err(db_error)?;
+
+    let model_version = if include_events {
+        Some(
+            q.model_version
+                .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from),
+        )
+    } else {
+        None
+    };
+
+    let mut items = Vec::with_capacity(rows.len());
+    for r in rows {
+        let event_count = counts.get(&r.session_id).copied().unwrap_or(0);
+        let (events, segments) = if let Some(model) = model_version.as_ref() {
+            let session_events = state
+                .event_store()
+                .by_session(&r.session_id, MAX_EVENTS_PER_SESSION)
+                .await
+                .map_err(db_error)?;
+            let segs = compute_session_segments(&state, model, &session_events)
+                .await
+                .map_err(db_error)?;
+            let evs: Vec<SessionEventItem> = session_events
+                .into_iter()
+                .map(|e| SessionEventItem {
+                    track_id: e.track_id.as_str().to_string(),
+                    event_type: e.event_type.as_str().to_string(),
+                    occurred_at_ms: e.occurred_at,
+                })
+                .collect();
+            (Some(evs), Some(segs))
+        } else {
+            (None, None)
+        };
+        items.push(SessionItem {
+            session_id: r.session_id.as_str().to_string(),
+            anchor_track_id: r.anchor_track_id.as_str().to_string(),
+            items_count: r.items_count,
+            started_ms: r.started_ms,
+            ended_ms: r.ended_ms,
+            event_count,
+            events,
+            segments,
+        });
+    }
+    Ok(Json(SessionsListResponse { items }))
+}
+
+/// Compute per-segment cosine distances for an ordered event list. We
+/// dedupe by track_id before fetching embeddings so a session that
+/// loops the same track only does one lookup per unique id.
+async fn compute_session_segments(
+    state: &AppState,
+    model_version: &ModelVersion,
+    events: &[music_recommend::StoredEvent],
+) -> Result<Vec<SessionSegment>, music_recommend::Error> {
+    use std::collections::HashMap;
+    if events.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let mut vectors: HashMap<music_core::TrackId, Option<Vec<f32>>> = HashMap::new();
+    for e in events {
+        if !vectors.contains_key(&e.track_id) {
+            let key = EmbeddingKey::new(e.track_id.clone(), model_version.clone());
+            let vec = state.embedding_store().get(&key).await?.map(|emb| emb.vector);
+            vectors.insert(e.track_id.clone(), vec);
+        }
+    }
+    let mut out = Vec::with_capacity(events.len() - 1);
+    for win in events.windows(2) {
+        let a = vectors.get(&win[0].track_id).and_then(|v| v.as_deref());
+        let b = vectors.get(&win[1].track_id).and_then(|v| v.as_deref());
+        let cosine_distance = match (a, b) {
+            (Some(a), Some(b)) => cosine_distance(a, b),
+            _ => None,
+        };
+        out.push(SessionSegment { cosine_distance });
+    }
+    Ok(out)
 }

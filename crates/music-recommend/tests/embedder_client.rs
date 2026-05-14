@@ -442,3 +442,123 @@ async fn embed_audio_succeeds_when_server_timing_header_is_present() {
     assert_eq!(out.vector.len(), 3);
     assert_eq!(out.dim, 3);
 }
+
+// --- /reduce -----------------------------------------------------------------
+
+use music_recommend::embedder::{ReduceParams, ReduceResult};
+
+fn default_reduce_params() -> ReduceParams {
+    ReduceParams {
+        db_path: "/tmp/rec.sqlite".into(),
+        model_version: "stub-v1".into(),
+        proj_version: None,
+        n_neighbors: 15,
+        min_dist: 0.1,
+        random_state: 42,
+        n_components: 2,
+    }
+}
+
+#[tokio::test]
+async fn reduce_serializes_full_body_and_parses_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reduce"))
+        .and(body_json(json!({
+            "db_path": "/tmp/rec.sqlite",
+            "model_version": "stub-v1",
+            "proj_version": "auto-1",
+            "n_neighbors": 15,
+            "min_dist": 0.1,
+            "random_state": 42,
+            "n_components": 2,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "proj_version": "auto-1",
+            "written": 42,
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let mut params = default_reduce_params();
+    params.proj_version = Some("auto-1".into());
+    let out: ReduceResult = client.reduce(&params).await.expect("reduce");
+    assert_eq!(out.proj_version, "auto-1");
+    assert_eq!(out.written, 42);
+}
+
+#[tokio::test]
+async fn reduce_omits_proj_version_when_none() {
+    // When proj_version is None, the field must serialise as JSON null
+    // (or be absent). The embedder's pydantic model accepts either —
+    // null is the simpler wire shape and avoids "default missing" foot-
+    // guns when both sides change at once.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reduce"))
+        .and(body_json(json!({
+            "db_path": "/tmp/rec.sqlite",
+            "model_version": "stub-v1",
+            "proj_version": null,
+            "n_neighbors": 15,
+            "min_dist": 0.1,
+            "random_state": 42,
+            "n_components": 2,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "proj_version": "derived-from-defaults",
+            "written": 0,
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = client.reduce(&default_reduce_params()).await.expect("reduce");
+    assert_eq!(out.proj_version, "derived-from-defaults");
+    assert_eq!(out.written, 0);
+}
+
+#[tokio::test]
+async fn reduce_400_maps_to_server_error() {
+    // The embedder returns 400 when the SQLite path doesn't exist;
+    // surface that as a Server error so the gateway can log a clear
+    // diagnostic and pause auto-trigger retries.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reduce"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "detail": "db_path does not exist: /tmp/nope.sqlite",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = client.reduce(&default_reduce_params()).await.unwrap_err();
+    match err {
+        EmbedderError::Server { status, body } => {
+            assert_eq!(status, 400);
+            assert!(body.contains("db_path"));
+        }
+        other => panic!("expected Server, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reduce_503_maps_to_model_not_loaded() {
+    // `reduce` returns 503 when umap-learn isn't installed — same
+    // shape as embed_audio's 503, so the existing degraded-mode error
+    // variant reuses cleanly.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reduce"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "detail": "reduce extra not installed",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = client.reduce(&default_reduce_params()).await.unwrap_err();
+    assert!(matches!(err, EmbedderError::ModelNotLoaded), "got {err:?}");
+}

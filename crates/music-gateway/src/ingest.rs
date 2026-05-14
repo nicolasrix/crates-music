@@ -30,6 +30,7 @@ use music_recommend::types::ModelVersion;
 use music_subsonic::{Client as SubsonicClient, Credentials};
 use reqwest::header::RANGE;
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::config::UpstreamConfig;
 
@@ -106,6 +107,39 @@ impl SubsonicAudioFetcher {
         let client = SubsonicClient::new(&upstream.navidrome_url, creds)
             .context("constructing Subsonic client for ingest")?;
         Ok(Self { client })
+    }
+}
+
+/// Append the right query params to a `/rest/stream` URL for an ingest
+/// clip fetch.
+///
+/// MP3 sources are served raw — Navidrome honours byte ranges on the
+/// underlying file, and the decoder resyncs to the next frame header
+/// after any truncation. This is the fast path: no ffmpeg transcode, no
+/// realtime-rate-limited stream. The trace data shows that the
+/// transcode step dominates wall-clock fetch time, so a homelab
+/// library that's mostly MP3 wins ~10× on ingest throughput.
+///
+/// Everything else (FLAC, OGG, OPUS, M4A, unknown) is conservatively
+/// transcoded to MP3 at `TRANSCODE_MAX_BITRATE`. FLAC in particular
+/// fails decoding when truncated mid-frame; the cost of being wrong
+/// about the rest is high enough that we don't try to whitelist them
+/// individually.
+fn apply_clip_query_params(url: &mut url::Url, suffix: Option<&str>, offset: u32) {
+    let is_mp3 = suffix
+        .map(|s| s.eq_ignore_ascii_case("mp3"))
+        .unwrap_or(false);
+    let mut q = url.query_pairs_mut();
+    if !is_mp3 {
+        q.append_pair("format", "mp3")
+            .append_pair("maxBitRate", &TRANSCODE_MAX_BITRATE.to_string());
+    }
+    // Only attach timeOffset when non-zero. Some Subsonic
+    // implementations interpret the parameter strictly and may
+    // re-prime the transcoder on its presence; sending 0 gratuitously
+    // is just wasteful.
+    if offset > 0 {
+        q.append_pair("timeOffset", &offset.to_string());
     }
 }
 
@@ -195,15 +229,24 @@ impl AudioFetcher for SubsonicAudioFetcher {
         // track) we fall back to offset=0 — the worst case is that we
         // embed the first `WINDOW_SECONDS` of the track, which is what
         // we'd do for a short track anyway.
-        let duration_seconds = match self.client.get_song(track_id).await {
-            Ok(track) => track.duration_seconds.unwrap_or(0),
+        //
+        // Wrapped in a `fetch_clip.get_song` subspan so the
+        // diagnostics breakdown can show the metadata-fetch cost
+        // separately from the transcoded body read.
+        let (duration_seconds, suffix) = match self
+            .client
+            .get_song(track_id)
+            .instrument(tracing::info_span!("fetch_clip.get_song"))
+            .await
+        {
+            Ok(track) => (track.duration_seconds.unwrap_or(0), track.suffix),
             Err(e) => {
                 tracing::debug!(
                     track = %track_id,
                     error = %e,
-                    "ingest: getSong failed; using offset=0"
+                    "ingest: getSong failed; using offset=0 and forcing transcode"
                 );
-                0
+                (0, None)
             }
         };
         let offset = pick_offset_seconds(duration_seconds, WINDOW_SECONDS);
@@ -212,29 +255,21 @@ impl AudioFetcher for SubsonicAudioFetcher {
             .client
             .stream_url(track_id)
             .map_err(|e| FetchError::Transport(format!("stream_url: {e}")))?;
-        // Force transcode to MP3 so the byte-range cap below produces a
-        // decodable prefix. FLAC sources truncated mid-file fail with
-        // "decoder lost sync" inside soundfile.
-        {
-            let mut q = url.query_pairs_mut();
-            q.append_pair("format", "mp3")
-                .append_pair("maxBitRate", &TRANSCODE_MAX_BITRATE.to_string());
-            // Only attach timeOffset when non-zero. Some Subsonic
-            // implementations interpret the parameter strictly and may
-            // re-prime the transcoder on its presence; sending 0
-            // gratuitously is just wasteful.
-            if offset > 0 {
-                q.append_pair("timeOffset", &offset.to_string());
-            }
-        }
+        apply_clip_query_params(&mut url, suffix.as_deref(), offset);
 
         let range = format!("bytes=0-{}", MAX_CLIP_BYTES - 1);
+        // Split the HTTP exchange into two subspans: "stream_request"
+        // is everything up to the response headers (negotiation,
+        // upstream queueing); "stream_body" is the body drain — that's
+        // where Navidrome's real-time transcoder paces bytes, so we
+        // expect this to dominate.
         let resp = self
             .client
             .http()
             .get(url)
             .header(RANGE, range)
             .send()
+            .instrument(tracing::info_span!("fetch_clip.stream_request"))
             .await
             .map_err(|e| FetchError::Transport(format!("send: {e}")))?;
 
@@ -246,6 +281,7 @@ impl AudioFetcher for SubsonicAudioFetcher {
             return Err(FetchError::Transport(format!("upstream {status}")));
         }
         resp.bytes()
+            .instrument(tracing::info_span!("fetch_clip.stream_body"))
             .await
             .map_err(|e| FetchError::Transport(format!("body: {e}")))
     }
@@ -422,5 +458,62 @@ mod tests {
         // materially — pin it here so the change is visible in diff.
         const _: () = assert!(MAX_CLIP_BYTES >= 256 * 1024);
         const _: () = assert!(MAX_CLIP_BYTES <= 512 * 1024);
+    }
+
+    fn build(suffix: Option<&str>, offset: u32) -> url::Url {
+        let mut url = url::Url::parse("http://nav.test/rest/stream?id=abc").unwrap();
+        apply_clip_query_params(&mut url, suffix, offset);
+        url
+    }
+
+    fn params(url: &url::Url) -> std::collections::BTreeMap<String, String> {
+        url.query_pairs().into_owned().collect()
+    }
+
+    #[test]
+    fn mp3_source_skips_transcode() {
+        // Source is already a frame-resyncable codec — Navidrome can
+        // serve raw byte ranges and our decoder can resync at the next
+        // MP3 frame boundary. No transcode required.
+        let p = params(&build(Some("mp3"), 84));
+        assert!(!p.contains_key("format"), "must not force a transcode");
+        assert!(!p.contains_key("maxBitRate"), "must not pin a bitrate");
+        assert_eq!(p.get("timeOffset").map(String::as_str), Some("84"));
+    }
+
+    #[test]
+    fn mp3_source_omits_time_offset_when_zero() {
+        let p = params(&build(Some("mp3"), 0));
+        assert!(!p.contains_key("format"));
+        assert!(!p.contains_key("timeOffset"), "zero offset is the default");
+    }
+
+    #[test]
+    fn mp3_suffix_is_case_insensitive() {
+        // Subsonic implementations vary on casing; "MP3" must hit the
+        // same fast path as "mp3".
+        let p = params(&build(Some("MP3"), 0));
+        assert!(!p.contains_key("format"));
+    }
+
+    #[test]
+    fn flac_source_forces_mp3_transcode() {
+        // FLAC sources truncated mid-stream cause decoder desync; we
+        // must transcode to MP3 so the byte-range cap is safe.
+        let p = params(&build(Some("flac"), 84));
+        assert_eq!(p.get("format").map(String::as_str), Some("mp3"));
+        assert_eq!(p.get("maxBitRate").map(String::as_str), Some("192"));
+        assert_eq!(p.get("timeOffset").map(String::as_str), Some("84"));
+    }
+
+    #[test]
+    fn unknown_suffix_falls_back_to_transcode() {
+        // Conservative default for any codec we haven't explicitly
+        // cleared as resyncable — Navidrome libraries include AAC, OGG,
+        // OPUS, M4A, etc. and not all of them tolerate mid-byte cuts.
+        let p = params(&build(Some("opus"), 0));
+        assert_eq!(p.get("format").map(String::as_str), Some("mp3"));
+        let p = params(&build(None, 0));
+        assert_eq!(p.get("format").map(String::as_str), Some("mp3"));
     }
 }

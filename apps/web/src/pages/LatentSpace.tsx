@@ -20,26 +20,70 @@
 // no projection work itself.
 
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { getSong } from "../api/client";
-import { fetchRecommendLatentSpace, LatentSpacePoint } from "../api/diagnostics";
+import {
+  fetchRecommendLatentNeighbours,
+  fetchRecommendLatentSpace,
+  fetchRecommendSessions,
+  LatentNeighbourEntry,
+  LatentSpacePoint,
+  SessionItem,
+} from "../api/diagnostics";
 import { Layout } from "../components/Layout";
 import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
+
+// 3-D scene + three.js are heavy (~250 KB gzipped). The rest of the app
+// shouldn't pay that cost; lazy() defers the load until the user flips
+// the view toggle to 3-D. Suspense boundary below absorbs the load flash.
+const LatentSpace3D = React.lazy(() =>
+  import("./LatentSpace3D").then((m) => ({ default: m.LatentSpace3D })),
+);
+import { Cover } from "../components/Cover";
+import { Legend, PcGradientLegend } from "./LatentSpaceLegend";
 import {
   bucketByGenre,
+  buildSessionTrackRows,
+  colorChannelValue,
   computeBounds,
+  cosineDistanceToWidth,
+  normalizeInto01,
   pickNearestPoint,
+  pickPointsByIds,
+  rangeOfFiniteValues,
   scaleToCanvas,
+  sessionHue,
+  viridis,
+  type ContinuousColorMode,
   type DataBounds,
   type CanvasGeometry,
-  type GenreBucket,
   type ScatterPoint,
+  type SessionTrackRow,
+  type TrackMetadata,
 } from "./latentSpace";
 
-const CANVAS_WIDTH = 720;
-const CANVAS_HEIGHT = 540;
+/// Color-by selector states. "genre" keeps the legacy bucketed palette;
+/// the rest are continuous channels driven through the viridis
+/// gradient — see `ContinuousColorMode` in `./latentSpace`.
+type ColorMode = "genre" | ContinuousColorMode;
+
+const COLOR_MODES: ReadonlyArray<{ value: ColorMode; label: string }> = [
+  { value: "genre", label: "genre" },
+  { value: "pc1", label: "PC1" },
+  { value: "pc2", label: "PC2" },
+  { value: "pc3", label: "PC3" },
+  { value: "pc4", label: "PC4" },
+];
+
+function continuousValue(
+  point: LatentSpacePoint,
+  mode: ColorMode,
+): number | null {
+  return mode === "genre" ? null : colorChannelValue(point, mode);
+}
+
 const CANVAS_PADDING = 24;
 const POINT_RADIUS = 2.5;
 // Slightly larger than POINT_RADIUS so the hover target is forgiving
@@ -49,25 +93,94 @@ const HOVER_RADIUS = 8;
 // routinely have 50+ rare tags; we keep the top 10 (matches the
 // palette size) and roll the rest into 'Other'.
 const TOP_GENRE_BUCKETS = 10;
+// Lower bound so the chart stays usable on narrow viewports; without
+// this, a phone-width window would collapse the scatter to a strip.
+const MIN_CANVAS_WIDTH = 320;
+// Cap height to a fraction of the viewport so the chart never pushes
+// the legend / topbar off-screen on tall windows.
+const MAX_HEIGHT_VH = 0.78;
+// How many recent sessions to make pickable. 50 is the gateway default;
+// keep it explicit so changes to the default don't silently grow the
+// dropdown.
+const SESSION_FETCH_LIMIT = 50;
+/// Sentinel for "render every session at once".
+const SESSION_ALL = "__all__";
+/// Sentinel for "render no path overlay".
+const SESSION_NONE = "__none__";
 
-const CANVAS_GEOMETRY: CanvasGeometry = {
-  width: CANVAS_WIDTH,
-  height: CANVAS_HEIGHT,
-  padding: CANVAS_PADDING,
-};
+// Stroke-width range for session paths. The recommender's own metric
+// is cosine distance, in `[0, 2]`; in practice CLAP cosines cluster in
+// `[0, 1]`, so cap there. Closer in latent space → thicker stroke.
+const PATH_WIDTH_RANGE = { minWidth: 0.6, maxWidth: 4, cap: 1 } as const;
+
+type ViewMode = "2d" | "3d";
 
 export function LatentSpace() {
-  const [selectedProj, setSelectedProj] = useState<string | undefined>();
+  // Dropdown state for the session overlay. Defaults to "none" — the
+  // scatter is useful without a path, and fetching event-bundled
+  // sessions has a real cost on the gateway side.
+  const [sessionPick, setSessionPick] = useState<string>(SESSION_NONE);
+  // Independent toggles: `view` picks the layout (2-D UMAP vs 3-D UMAP
+  // run); `colorMode` picks the channel encoded as dot colour. PCs and
+  // genre apply to either layout — the third UMAP axis lives in the
+  // 3-D scene's vertical position, so we don't surface it as a colour
+  // channel (would be redundant with the spatial axis it already is).
+  const [view, setView] = useState<ViewMode>("2d");
+  const [colorMode, setColorMode] = useState<ColorMode>("genre");
 
-  const { data, error, isLoading } = useQuery({
-    queryKey: ["diag", "latent_space", selectedProj ?? null],
+  // Two parallel queries — one per layout. Both fetched eagerly so the
+  // view toggle is instantaneous after the initial load. TanStack Query
+  // caches each independently by its queryKey.
+  const data2dQ = useQuery({
+    queryKey: ["diag", "latent_space", "prefer:2d"],
+    queryFn: () => fetchRecommendLatentSpace({ prefer: "2d" }),
+    refetchInterval: 30_000,
+  });
+  const data3dQ = useQuery({
+    queryKey: ["diag", "latent_space", "prefer:3d"],
+    queryFn: () => fetchRecommendLatentSpace({ prefer: "3d" }),
+    refetchInterval: 30_000,
+  });
+
+  // Active dataset follows the view toggle. The 3-D run drives the
+  // 3-D scene; the 2-D run drives the canvas scatter. PCs are present
+  // in both (PCA on the same 512-D embedding space) so the colour
+  // picker can offer them on either layout.
+  const data = view === "3d" ? data3dQ.data : data2dQ.data;
+  const isLoading = view === "3d" ? data3dQ.isLoading : data2dQ.isLoading;
+  const error = view === "3d" ? data3dQ.error : data2dQ.error;
+
+  // The colour picker disables a PC option that the active dataset
+  // doesn't populate, so it needs the active points.
+  const colorModePoints = data?.points ?? [];
+  const canSwitchTo3d = (data3dQ.data?.points ?? []).some((p) => p.z !== null);
+
+  // Two-tier session loading. The picker needs the *list* of sessions
+  // to populate its <option>s on page load — otherwise the user has
+  // to pick "all" before any individual session appears, which is
+  // exactly the chicken-and-egg loop we want to avoid. Listing
+  // sessions without events is cheap, so fetch it eagerly. Events
+  // are per-segment embedding lookups (expensive) and only needed
+  // when actually drawing the path overlay, so gate them on the
+  // user having picked something.
+  const sessionsListQ = useQuery({
+    queryKey: ["diag", "sessions_list", SESSION_FETCH_LIMIT],
     queryFn: () =>
-      fetchRecommendLatentSpace(
-        selectedProj ? { projVersion: selectedProj } : {}
-      ),
-    // The reducer is a batch job — projection rarely changes during a
-    // session. 30s keeps it fresh enough for "I just re-ran the reducer
-    // in another terminal" without churn.
+      fetchRecommendSessions({
+        limit: SESSION_FETCH_LIMIT,
+        includeEvents: false,
+      }),
+    refetchInterval: 30_000,
+  });
+  const wantSessions = sessionPick !== SESSION_NONE;
+  const sessionsQ = useQuery({
+    queryKey: ["diag", "sessions_with_events", SESSION_FETCH_LIMIT],
+    queryFn: () =>
+      fetchRecommendSessions({
+        limit: SESSION_FETCH_LIMIT,
+        includeEvents: true,
+      }),
+    enabled: wantSessions,
     refetchInterval: 30_000,
   });
 
@@ -89,19 +202,80 @@ export function LatentSpace() {
 
         {data && (
           <>
-            <ProjectionPicker
-              versions={data.versions}
-              modelVersion={data.model_version}
-              selectedProj={data.proj_version}
-              onSelect={(pv) => setSelectedProj(pv)}
+            <ModelHint modelVersion={data.model_version} />
+            <SessionPicker
+              value={sessionPick}
+              sessions={sessionsListQ.data?.items ?? []}
+              loading={
+                sessionsListQ.isFetching ||
+                (wantSessions && sessionsQ.isFetching)
+              }
+              onChange={setSessionPick}
+            />
+            <ViewToggle
+              view={view}
+              canSwitchTo3d={canSwitchTo3d}
+              onChange={setView}
+            />
+            <ColorModePicker
+              value={colorMode}
+              points={colorModePoints}
+              onChange={setColorMode}
             />
             {data.points.length === 0 ? (
               <EmptyHint
                 hasProjection={data.proj_version !== null}
                 modelVersion={data.model_version}
+                is3dView={view === "3d"}
               />
             ) : (
-              <ScatterCanvas points={data.points} />
+              // Outer row hosts the scatter / 3-D scene on the left and
+              // the session-tracks panel on the right. Both children flex
+              // so the canvas reclaims the column when no sessions are
+              // selected. `flexWrap` lets the panel drop below the scene
+              // on narrow viewports instead of squeezing the scatter.
+              <div
+                style={{
+                  display: "flex",
+                  gap: "var(--space-4)",
+                  alignItems: "flex-start",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                  {view === "3d" ? (
+                    // The 3-D run drives the camera and layout; colour
+                    // follows the picker independently. Suspense covers
+                    // the on-demand load of three.js + the scene module.
+                    <Suspense fallback={<p className="text-sm">loading 3-D view…</p>}>
+                      <LatentSpace3D
+                        points={data.points}
+                        colorMode={colorMode}
+                        sessions={selectSessionsForOverlay(
+                          sessionPick,
+                          sessionsQ.data?.items ?? []
+                        )}
+                      />
+                    </Suspense>
+                  ) : (
+                    <ScatterCanvas
+                      points={data.points}
+                      colorMode={colorMode}
+                      sessions={selectSessionsForOverlay(
+                        sessionPick,
+                        sessionsQ.data?.items ?? []
+                      )}
+                    />
+                  )}
+                </div>
+                <SessionTracksPanel
+                  sessions={selectSessionsForOverlay(
+                    sessionPick,
+                    sessionsQ.data?.items ?? []
+                  )}
+                  points={data.points}
+                />
+              </div>
             )}
           </>
         )}
@@ -112,16 +286,29 @@ export function LatentSpace() {
   );
 }
 
-function ProjectionPicker({
-  versions,
-  modelVersion,
-  selectedProj,
-  onSelect,
+/// Decide which sessions to draw for the current dropdown selection.
+/// Kept pure (no hooks) so the picker logic stays separable from
+/// rendering.
+function selectSessionsForOverlay(
+  pick: string,
+  sessions: readonly SessionItem[]
+): SessionItem[] {
+  if (pick === SESSION_NONE) return [];
+  if (pick === SESSION_ALL) return [...sessions];
+  return sessions.filter((s) => s.session_id === pick);
+}
+
+/// Independent 2-D / 3-D layout toggle. Disabled into the 3-D position
+/// until the 3-D reducer run lands in the cache — otherwise picking
+/// "3-D" would just show the empty-state hint and look broken.
+function ViewToggle({
+  view,
+  canSwitchTo3d,
+  onChange,
 }: {
-  versions: { proj_version: string; point_count: number; created_at_ms: number }[];
-  modelVersion: string;
-  selectedProj: string | null;
-  onSelect: (proj: string) => void;
+  view: ViewMode;
+  canSwitchTo3d: boolean;
+  onChange: (v: ViewMode) => void;
 }) {
   return (
     <div
@@ -133,22 +320,302 @@ function ProjectionPicker({
         flexWrap: "wrap",
       }}
     >
-      <label className="text-sm">
-        proj_version&nbsp;
-        <select
-          value={selectedProj ?? ""}
-          disabled={versions.length === 0}
-          onChange={(e) => onSelect(e.target.value)}
-          style={{ fontFamily: "var(--font-mono)" }}
+      <fieldset
+        style={{
+          display: "inline-flex",
+          gap: "var(--space-2)",
+          alignItems: "center",
+          border: 0,
+          padding: 0,
+          margin: 0,
+        }}
+      >
+        <legend
+          className="text-sm"
+          style={{ float: "left", marginRight: "var(--space-2)" }}
         >
-          {versions.length === 0 && <option value="">— none —</option>}
-          {versions.map((v) => (
-            <option key={v.proj_version} value={v.proj_version}>
-              {v.proj_version} ({v.point_count} pts)
-            </option>
-          ))}
+          view
+        </legend>
+        <label
+          className="text-sm"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          <input
+            type="radio"
+            name="latent-view"
+            value="2d"
+            checked={view === "2d"}
+            onChange={() => onChange("2d")}
+          />
+          2-D
+        </label>
+        <label
+          className="text-sm"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            color: canSwitchTo3d ? undefined : "var(--muted)",
+          }}
+          title={
+            canSwitchTo3d
+              ? "Drag to rotate, scroll to zoom"
+              : "No 3-D projection has been written yet. Run the reducer with --n-components 3."
+          }
+        >
+          <input
+            type="radio"
+            name="latent-view"
+            value="3d"
+            checked={view === "3d"}
+            // Allow flipping back to 2-D even if 3-D's disabled; only
+            // gate the "enter 3-D" direction.
+            disabled={!canSwitchTo3d && view !== "3d"}
+            onChange={() => onChange("3d")}
+          />
+          3-D
+        </label>
+      </fieldset>
+    </div>
+  );
+}
+
+function ColorModePicker({
+  value,
+  points,
+  onChange,
+}: {
+  value: ColorMode;
+  points: readonly LatentSpacePoint[];
+  onChange: (v: ColorMode) => void;
+}) {
+  // A PC mode without any rows that have that PC is misleading — the
+  // dropdown would silently render every dot grey. Disable each PC
+  // entry the projection didn't populate so the user knows whether
+  // to re-run the reducer.
+  const pcHasData: Record<Exclude<ColorMode, "genre">, boolean> = {
+    pc1: points.some((p) => p.pc1 !== null),
+    pc2: points.some((p) => p.pc2 !== null),
+    pc3: points.some((p) => p.pc3 !== null),
+    pc4: points.some((p) => p.pc4 !== null),
+  };
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-3)",
+        alignItems: "center",
+        marginBottom: "var(--space-3)",
+        flexWrap: "wrap",
+      }}
+    >
+      <label className="text-sm" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        colour by
+        <InfoTooltip>
+          <strong>Different reductions of the same 512-D CLAP space.</strong>
+          <ul style={{ margin: "6px 0 0 0", paddingLeft: 18 }}>
+            <li>
+              <strong>genre</strong> — Subsonic-reported genre tag,
+              bucketed into the top {TOP_GENRE_BUCKETS} + "Other" +
+              "Unknown". Useful for a sanity check: do dots that
+              <em>sound</em> similar share a tag?
+            </li>
+            <li>
+              <strong>PCn</strong> — the n-th PCA component on the
+              original 512-D embedding. Linear, ordered by variance,
+              orthogonal to PC1…PC(n-1). Available on both layouts.
+            </li>
+          </ul>
+          <div style={{ marginTop: 6 }}>
+            Layout (2-D vs 3-D) is picked separately by the{" "}
+            <strong>view</strong> toggle. The two runs are independent
+            UMAP fits, so dot positions <em>will</em> move when you
+            switch layouts; PCs and genre stay the same per track.
+          </div>
+          <div style={{ marginTop: 6 }}>
+            The colour axis is <em>not</em> geometrically aligned with
+            x/y — moving up the gradient does not correspond to a
+            direction on the canvas. PC1 carries the most variance;
+            higher PCs reveal independent extra axes the UMAP layout
+            can't preserve linearly.
+          </div>
+        </InfoTooltip>
+        &nbsp;
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value as ColorMode)}
+          className="search-input"
+          style={{ fontFamily: "var(--font-mono)", width: "auto", paddingLeft: 12 }}
+        >
+          {COLOR_MODES.map((m) => {
+            const disabled = m.value !== "genre" && !pcHasData[m.value];
+            return (
+              <option key={m.value} value={m.value} disabled={disabled}>
+                {m.label}
+                {disabled ? " — not in this projection" : ""}
+              </option>
+            );
+          })}
         </select>
       </label>
+      {value !== "genre" && (
+        <span className="text-sm" style={{ color: "var(--muted)" }}>
+          viridis · low → high · grey = no value
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SessionPicker({
+  value,
+  sessions,
+  loading,
+  onChange,
+}: {
+  value: string;
+  sessions: readonly SessionItem[];
+  loading: boolean;
+  onChange: (v: string) => void;
+}) {
+  const fmtTs = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  // Custom dropdown rather than a native <select>: native selects'
+  // option-list height is OS-controlled, so a long list (50 sessions)
+  // can fill most of the screen on tall monitors. The popover here
+  // caps the list at max-height with overflow-y:auto, which is the
+  // bit a native select can't do reliably across browsers.
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const currentLabel = (() => {
+    if (value === SESSION_NONE) return "— none —";
+    if (value === SESSION_ALL) return `show all (${sessions.length})`;
+    const s = sessions.find((s) => s.session_id === value);
+    if (!s) return value.slice(0, 8);
+    return `${fmtTs(s.started_ms)} · ${s.items_count} items · ${s.event_count} evts`;
+  })();
+
+  function pick(v: string) {
+    onChange(v);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-3)",
+        alignItems: "center",
+        marginBottom: "var(--space-3)",
+        flexWrap: "wrap",
+      }}
+    >
+      <span className="text-sm">session</span>
+      <div ref={wrapperRef} className="session-picker">
+        <button
+          type="button"
+          className="search-input session-picker-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="session-picker-label">{currentLabel}</span>
+          <span className="session-picker-caret" aria-hidden>
+            ▾
+          </span>
+        </button>
+        {open && (
+          <ul className="session-picker-menu" role="listbox">
+            <li
+              role="option"
+              aria-selected={value === SESSION_NONE}
+              className={value === SESSION_NONE ? "is-selected" : ""}
+              onClick={() => pick(SESSION_NONE)}
+            >
+              — none —
+            </li>
+            <li
+              role="option"
+              aria-selected={value === SESSION_ALL}
+              className={value === SESSION_ALL ? "is-selected" : ""}
+              onClick={() => pick(SESSION_ALL)}
+            >
+              show all ({sessions.length})
+            </li>
+            {sessions.map((s) => (
+              <li
+                key={s.session_id}
+                role="option"
+                aria-selected={value === s.session_id}
+                className={value === s.session_id ? "is-selected" : ""}
+                onClick={() => pick(s.session_id)}
+              >
+                {fmtTs(s.started_ms)} · {s.items_count} items ·{" "}
+                {s.event_count} evts
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {loading && (
+        <span className="text-sm" style={{ color: "var(--muted)" }}>
+          loading sessions…
+        </span>
+      )}
+      {value !== SESSION_NONE && (
+        <span className="text-sm" style={{ color: "var(--muted)" }}>
+          line thickness ∝ closeness in CLAP space · dashed = track not in this
+          projection
+        </span>
+      )}
+    </div>
+  );
+}
+
+/// Read-only badge replacing the old proj_version dropdown. The active
+/// projection now follows the view toggle (2-D run for 2-D view, 3-D
+/// run for 3-D view) — exposing a manual proj_version dropdown
+/// alongside that logic invited a "why are the dots in the same place?"
+/// confusion. We still echo the embedding model since it's useful
+/// context for the page.
+function ModelHint({ modelVersion }: { modelVersion: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-3)",
+        alignItems: "center",
+        marginBottom: "var(--space-3)",
+        flexWrap: "wrap",
+      }}
+    >
       <span
         className="text-sm"
         style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}
@@ -162,26 +629,29 @@ function ProjectionPicker({
 function EmptyHint({
   hasProjection,
   modelVersion,
+  is3dView,
 }: {
   hasProjection: boolean;
   modelVersion: string;
+  /** True when the user has flipped to the 3-D view — an empty points
+   *  list then means the 3-D reducer hasn't run, not the 2-D one. */
+  is3dView: boolean;
 }) {
   if (!hasProjection) {
+    const components = is3dView ? " --n-components 3" : "";
     return (
       <p className="text-sm" style={{ color: "var(--muted)" }}>
-        no projection has been written yet for{" "}
+        no {is3dView ? "3-D" : "2-D"} projection has been written yet for{" "}
         <code>{modelVersion}</code>. Run{" "}
         <code>
           uv run --extra reduce python -m embedder.reduce --db &lt;path&gt; --model-version{" "}
           {modelVersion}
+          {components}
         </code>{" "}
         in <code>services/embedder/</code> to populate it.
       </p>
     );
   }
-  // Projection exists for this model but the queried proj_version has
-  // zero points — usually because the user picked a stale version that
-  // was rebuilt under a new name.
   return (
     <p className="text-sm" style={{ color: "var(--muted)" }}>
       this projection is empty.
@@ -189,9 +659,41 @@ function EmptyHint({
   );
 }
 
-function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
+function ScatterCanvas({
+  points,
+  sessions,
+  colorMode,
+}: {
+  points: LatentSpacePoint[];
+  sessions: readonly SessionItem[];
+  colorMode: ColorMode;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<LatentSpacePoint | null>(null);
+  // Debounced version of `hover?.track_id` — dragging across the
+  // canvas would otherwise spam the gateway with one neighbour-fetch
+  // per pointer-move event. 150 ms is a comfortable "settled hover"
+  // window; TanStack Query then caches per-track, so repeat hovers
+  // are free.
+  const [debouncedHoverId, setDebouncedHoverId] = useState<string | null>(null);
+  useEffect(() => {
+    const id = hover?.track_id ?? null;
+    if (id === debouncedHoverId) return;
+    const handle = window.setTimeout(() => setDebouncedHoverId(id), 150);
+    return () => window.clearTimeout(handle);
+  }, [hover, debouncedHoverId]);
+  const neighboursQ = useQuery({
+    queryKey: ["latent-neighbours", debouncedHoverId],
+    queryFn: () =>
+      fetchRecommendLatentNeighbours({ trackId: debouncedHoverId!, k: 10 }),
+    enabled: !!debouncedHoverId,
+    // Embeddings don't change for an existing track, so the answer is
+    // cacheable for the whole page lifetime. Keep gcTime modest so
+    // the cache doesn't grow unbounded if the user hovers many
+    // points; 5 min is the TanStack default.
+    staleTime: 60 * 60 * 1000,
+  });
   const playback = usePlayback();
   // Resolving track_id → Track via Subsonic getSong is a separate
   // network round-trip; we surface a transient "loading" state so a
@@ -200,8 +702,47 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
   // Legend filter — click a bucket to toggle its visibility. Stored as
   // a Set so the canvas + picker can both consult it cheaply.
   const [hiddenBuckets, setHiddenBuckets] = useState<Set<string>>(new Set());
+  // Live canvas size, driven by a ResizeObserver on the wrapper. Width
+  // tracks the available column; height matches the data's natural
+  // aspect ratio (computed from bounds, with fallback 4:3 before the
+  // first measurement). Capped at MAX_HEIGHT_VH so the chart never
+  // pushes the legend below the fold on tall viewports.
+  const [size, setSize] = useState({ width: MIN_CANVAS_WIDTH, height: Math.round(MIN_CANVAS_WIDTH * 0.75) });
 
   const bounds: DataBounds | null = useMemo(() => computeBounds(points), [points]);
+
+  // Recompute size whenever the wrapper changes width or the data
+  // aspect ratio changes. ResizeObserver fires on layout shifts (window
+  // resize, sidebar toggle, font reflow) — no manual `resize` listener
+  // needed. The wrapper's width is the source of truth; we derive a
+  // height to preserve the data's aspect ratio.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const aspect =
+      bounds && bounds.maxX > bounds.minX && bounds.maxY > bounds.minY
+        ? (bounds.maxX - bounds.minX) / (bounds.maxY - bounds.minY)
+        : 4 / 3;
+    const apply = (width: number) => {
+      const w = Math.max(MIN_CANVAS_WIDTH, Math.floor(width));
+      const maxH = Math.floor(window.innerHeight * MAX_HEIGHT_VH);
+      const h = Math.min(maxH, Math.max(240, Math.round(w / aspect)));
+      setSize((prev) =>
+        prev.width === w && prev.height === h ? prev : { width: w, height: h }
+      );
+    };
+    apply(wrap.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) apply(e.contentRect.width);
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [bounds]);
+
+  const geometry: CanvasGeometry = useMemo(
+    () => ({ width: size.width, height: size.height, padding: CANVAS_PADDING }),
+    [size.width, size.height]
+  );
   // Bucket points by genre once; the canvas effect + picker both read
   // from this memo.
   const bucketing = useMemo(
@@ -213,8 +754,12 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
     [points],
   );
   // Visible-points view used by the hover picker. A hidden bucket
-  // shouldn't be hoverable — that would be confusing.
+  // shouldn't be hoverable — that would be confusing. In PC mode the
+  // legend is hidden so every point stays hoverable.
   const visiblePoints: ScatterPoint[] = useMemo(() => {
+    if (colorMode !== "genre") {
+      return points.map((p) => ({ track_id: p.track_id, x: p.x, y: p.y }));
+    }
     const out: ScatterPoint[] = [];
     for (const b of bucketing.buckets) {
       if (hiddenBuckets.has(b.label)) continue;
@@ -222,7 +767,41 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       if (slice) out.push(...slice);
     }
     return out;
-  }, [bucketing, hiddenBuckets]);
+  }, [bucketing, hiddenBuckets, colorMode, points]);
+
+  // Min/max of the active PC across the dataset. Recomputed when the
+  // user switches PC or the dataset changes — never inside the paint
+  // loop. `null` when no point in this projection has a value for the
+  // chosen PC (caller paints all dots in the neutral colour).
+  const pcRange = useMemo(() => {
+    if (colorMode === "genre") return null;
+    return rangeOfFiniteValues(points.map((p) => continuousValue(p, colorMode)));
+  }, [points, colorMode]);
+
+  // Latent-space neighbours of the currently-hovered point, projected
+  // onto our scatter coordinates. `null` when no hover, when the fetch
+  // is in flight, or when the response is for a stale hover target
+  // (the user moved on before the network resolved). Order is
+  // preserved from the backend: ascending cosine distance.
+  const neighbourOverlay = useMemo<
+    { point: LatentSpacePoint; entry: LatentNeighbourEntry }[] | null
+  >(() => {
+    if (!hover) return null;
+    const data = neighboursQ.data;
+    if (!data || data.track_id !== hover.track_id) return null;
+    const ids = data.neighbours.map((n) => n.track_id);
+    const projected = pickPointsByIds(ids, points);
+    // Re-pair: we may have dropped neighbours that aren't in this
+    // projection. Walk the projected list and pull the matching entry
+    // by id rather than relying on positional alignment.
+    const byId = new Map(data.neighbours.map((n) => [n.track_id, n]));
+    return projected
+      .map((p) => {
+        const entry = byId.get(p.track_id);
+        return entry ? { point: p, entry } : null;
+      })
+      .filter((x): x is { point: LatentSpacePoint; entry: LatentNeighbourEntry } => x !== null);
+  }, [hover, neighboursQ.data, points]);
 
   // Paint the canvas whenever points, bounds, or visibility change.
   useEffect(() => {
@@ -232,49 +811,178 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
     if (!ctx) return;
 
     // High-DPI scale so dots stay crisp on retina screens. The CSS size
-    // stays at CANVAS_WIDTH × CANVAS_HEIGHT — only the backing store is
-    // upscaled.
+    // stays at geometry.width × geometry.height — only the backing store
+    // is upscaled. Always reset the transform on size change; otherwise
+    // a previously-applied DPR scale would compound after a resize.
     const dpr = window.devicePixelRatio || 1;
-    if (canvas.width !== CANVAS_WIDTH * dpr) {
-      canvas.width = CANVAS_WIDTH * dpr;
-      canvas.height = CANVAS_HEIGHT * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const targetW = geometry.width * dpr;
+    const targetH = geometry.height * dpr;
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctx.clearRect(0, 0, geometry.width, geometry.height);
     // Subtle backdrop border so the chart's extent is visible even on
     // sparse projections.
     ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.strokeRect(0.5, 0.5, CANVAS_WIDTH - 1, CANVAS_HEIGHT - 1);
+    ctx.strokeRect(0.5, 0.5, geometry.width - 1, geometry.height - 1);
 
-    // One Path2D per bucket → one fill() per colour. Order matters: we
-    // draw Unknown first so named buckets paint on top — the eye
-    // follows colour, not grey.
-    const drawOrder = [...bucketing.buckets].reverse();
-    for (const bucket of drawOrder) {
-      if (hiddenBuckets.has(bucket.label)) continue;
-      const slice = bucketing.pointsByLabel.get(bucket.label);
-      if (!slice || slice.length === 0) continue;
-      // Slight alpha so overlapping clusters reveal density.
-      ctx.fillStyle = withAlpha(bucket.color, 0.65);
-      const path = new Path2D();
-      for (const p of slice) {
-        const { px, py } = scaleToCanvas(p, bounds, CANVAS_GEOMETRY);
-        path.moveTo(px + POINT_RADIUS, py);
-        path.arc(px, py, POINT_RADIUS, 0, Math.PI * 2);
+    if (colorMode === "genre") {
+      // One Path2D per bucket → one fill() per colour. Order matters:
+      // we draw Unknown first so named buckets paint on top — the eye
+      // follows colour, not grey.
+      const drawOrder = [...bucketing.buckets].reverse();
+      for (const bucket of drawOrder) {
+        if (hiddenBuckets.has(bucket.label)) continue;
+        const slice = bucketing.pointsByLabel.get(bucket.label);
+        if (!slice || slice.length === 0) continue;
+        // Slight alpha so overlapping clusters reveal density.
+        ctx.fillStyle = withAlpha(bucket.color, 0.65);
+        const path = new Path2D();
+        for (const p of slice) {
+          const { px, py } = scaleToCanvas(p, bounds, geometry);
+          path.moveTo(px + POINT_RADIUS, py);
+          path.arc(px, py, POINT_RADIUS, 0, Math.PI * 2);
+        }
+        ctx.fill(path);
       }
-      ctx.fill(path);
+    } else {
+      // Continuous-value mode: each point gets its own viridis colour
+      // based on its PC value. We sacrifice the bucketed Path2D
+      // optimisation here (one fill() per dot) because every dot has
+      // a unique fillStyle; the trade is acceptable at our N. Points
+      // missing the chosen PC render in a neutral grey to make the
+      // absence visually distinct from the gradient endpoints.
+      for (const p of points) {
+        const v = continuousValue(p, colorMode);
+        const fill =
+          v === null || pcRange === null
+            ? withAlpha("#888888", 0.45)
+            : withAlpha(viridis(normalizeInto01(v, pcRange)), 0.75);
+        ctx.fillStyle = fill;
+        const { px, py } = scaleToCanvas(p, bounds, geometry);
+        ctx.beginPath();
+        ctx.arc(px, py, POINT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Session paths overlay. Each session draws as a polyline through
+    // its events' projected positions, with per-segment stroke width
+    // encoding cosine distance in the original CLAP space (UMAP is
+    // locally faithful but globally lossy, so the line length carries
+    // no real meaning — the width does). Segments through tracks not
+    // in this projection are dashed to make the gap visible.
+    if (sessions.length > 0) {
+      // O(N) lookup table: track_id → projection point. Built once per
+      // (points, sessions) change.
+      const byTrack = new Map<string, LatentSpacePoint>();
+      for (const p of points) byTrack.set(p.track_id, p);
+      for (const s of sessions) {
+        const hue = sessionHue(s.session_id);
+        const stroke = `hsl(${hue}deg 80% 65%)`;
+        const events = s.events ?? [];
+        const segments = s.segments ?? [];
+        // Draw each segment individually so stroke width can vary by
+        // segment. A single Path2D with one stroke() would force a
+        // uniform width.
+        for (let i = 0; i + 1 < events.length; i++) {
+          const a = byTrack.get(events[i]!.track_id);
+          const b = byTrack.get(events[i + 1]!.track_id);
+          if (!a || !b) continue;
+          const seg = segments[i];
+          const dist = seg ? seg.cosine_distance : null;
+          ctx.lineWidth = cosineDistanceToWidth(dist, PATH_WIDTH_RANGE);
+          ctx.strokeStyle = stroke;
+          ctx.setLineDash(dist === null ? [4, 3] : []);
+          const pa = scaleToCanvas(a, bounds, geometry);
+          const pb = scaleToCanvas(b, bounds, geometry);
+          ctx.beginPath();
+          ctx.moveTo(pa.px, pa.py);
+          ctx.lineTo(pb.px, pb.py);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        // Anchor as a hollow ring on top of its dot — gives the user a
+        // visual "this is where the session started".
+        const anchor = byTrack.get(s.anchor_track_id);
+        if (anchor) {
+          const { px, py } = scaleToCanvas(anchor, bounds, geometry);
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(px, py, POINT_RADIUS + 4, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        // Terminal marker — small filled dot on the last event so the
+        // direction of travel reads at a glance.
+        const last = events[events.length - 1];
+        const lastPt = last ? byTrack.get(last.track_id) : undefined;
+        if (lastPt) {
+          const { px, py } = scaleToCanvas(lastPt, bounds, geometry);
+          ctx.fillStyle = stroke;
+          ctx.beginPath();
+          ctx.arc(px, py, POINT_RADIUS + 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // Latent-space neighbours of the hovered point. The whole purpose
+    // of this overlay is to *contradict* the 2D layout: a neighbour
+    // halfway across the canvas means UMAP couldn't preserve that
+    // relationship. Lines from hover → each neighbour make the
+    // disparity visible at a glance; longer line == bigger lie.
+    if (hover && neighbourOverlay && neighbourOverlay.length > 0) {
+      const hoverPx = scaleToCanvas(hover, bounds, geometry);
+      const accent = "rgba(245, 158, 11, 0.85)"; // amber, matches hover marker
+      // Connecting lines first, so the rings draw on top of them.
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      for (const { point } of neighbourOverlay) {
+        const target = scaleToCanvas(point, bounds, geometry);
+        ctx.moveTo(hoverPx.px, hoverPx.py);
+        ctx.lineTo(target.px, target.py);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Rings around each neighbour dot. Solid amber outline; the
+      // underlying dot keeps its own (genre or PC) colour so the
+      // user can still see which cluster it belongs to.
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      for (const { point } of neighbourOverlay) {
+        const { px, py } = scaleToCanvas(point, bounds, geometry);
+        ctx.beginPath();
+        ctx.arc(px, py, POINT_RADIUS + 2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
 
     // Highlight the hovered point on top of the bulk pass.
     if (hover) {
-      const { px, py } = scaleToCanvas(hover, bounds, CANVAS_GEOMETRY);
+      const { px, py } = scaleToCanvas(hover, bounds, geometry);
       ctx.fillStyle = "rgba(245, 158, 11, 1)";
       ctx.beginPath();
       ctx.arc(px, py, POINT_RADIUS + 2, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [bucketing, bounds, hover, hiddenBuckets]);
+  }, [
+    bucketing,
+    bounds,
+    hover,
+    hiddenBuckets,
+    geometry,
+    points,
+    sessions,
+    colorMode,
+    pcRange,
+    neighbourOverlay,
+  ]);
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!bounds) return;
@@ -284,7 +992,7 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
       cursor,
       visiblePoints,
       bounds,
-      CANVAS_GEOMETRY,
+      geometry,
       HOVER_RADIUS
     );
     if (picked?.track_id !== hover?.track_id) {
@@ -331,15 +1039,21 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
           flexWrap: "wrap",
         }}
       >
-        <div style={{ position: "relative", width: CANVAS_WIDTH, maxWidth: "100%" }}>
+        {/* flex: 1 lets the canvas column claim every pixel the legend
+             doesn't need; minWidth: 0 stops a long-genre legend label
+             from preventing the canvas from shrinking on narrow viewports. */}
+        <div
+          ref={wrapRef}
+          style={{ position: "relative", flex: "1 1 0", minWidth: 0 }}
+        >
           <canvas
             ref={canvasRef}
-            // CSS size is the logical size; canvas.width/.height (set in
-            // the effect) is the backing-store size for DPR.
+            // CSS size matches the measured wrapper width and the
+            // bounds-derived height; canvas.width/.height (set in the
+            // effect) is the backing-store size for DPR.
             style={{
-              width: CANVAS_WIDTH,
-              height: CANVAS_HEIGHT,
-              maxWidth: "100%",
+              width: size.width,
+              height: size.height,
               display: "block",
               cursor: hover ? "pointer" : "crosshair",
               background: "var(--surface-2, #0e1116)",
@@ -350,14 +1064,29 @@ function ScatterCanvas({ points }: { points: LatentSpacePoint[] }) {
             onClick={handleClick}
           />
           {hover && bounds && (
-            <HoverTooltip point={hover} bounds={bounds} loading={playingTrackId === hover.track_id} />
+            <HoverTooltip
+              point={hover}
+              bounds={bounds}
+              geometry={geometry}
+              loading={playingTrackId === hover.track_id}
+              neighbours={
+                neighbourOverlay && neighbourOverlay.length > 0
+                  ? neighbourOverlay
+                  : null
+              }
+              neighboursLoading={neighboursQ.isFetching && !neighbourOverlay}
+            />
           )}
         </div>
-        <Legend
-          buckets={bucketing.buckets}
-          hidden={hiddenBuckets}
-          onToggle={toggleBucket}
-        />
+        {colorMode === "genre" ? (
+          <Legend
+            buckets={bucketing.buckets}
+            hidden={hiddenBuckets}
+            onToggle={toggleBucket}
+          />
+        ) : (
+          <PcGradientLegend mode={colorMode} range={pcRange} />
+        )}
       </div>
     </div>
   );
@@ -373,111 +1102,36 @@ function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function Legend({
-  buckets,
-  hidden,
-  onToggle,
-}: {
-  buckets: GenreBucket[];
-  hidden: Set<string>;
-  onToggle: (label: string) => void;
-}) {
-  if (buckets.length === 0) return null;
-  return (
-    <ul
-      style={{
-        listStyle: "none",
-        padding: 0,
-        margin: 0,
-        minWidth: 160,
-        fontSize: "0.85em",
-      }}
-    >
-      {buckets.map((b) => {
-        const isHidden = hidden.has(b.label);
-        return (
-          <li
-            key={b.label}
-            // Buttons-in-a-list would be more semantic; the visual is a
-            // colour swatch + label row so a plain <li> with role=button
-            // gives keyboard users the right affordance without breaking
-            // the layout.
-            role="button"
-            tabIndex={0}
-            onClick={() => onToggle(b.label)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onToggle(b.label);
-              }
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "var(--space-2, 8px)",
-              padding: "2px 4px",
-              borderRadius: "var(--radius-1, 2px)",
-              cursor: "pointer",
-              opacity: isHidden ? 0.4 : 1,
-              userSelect: "none",
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                background: b.color,
-                flexShrink: 0,
-                // Strike-through when hidden gives a visual cue beyond opacity.
-                outline: isHidden ? "1px solid var(--muted)" : "none",
-              }}
-            />
-            <span
-              style={{
-                textDecoration: isHidden ? "line-through" : "none",
-                color: isHidden ? "var(--muted)" : "inherit",
-                flex: 1,
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title={b.label}
-            >
-              {b.label}
-            </span>
-            <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
-              {b.count}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 function HoverTooltip({
   point,
   bounds,
+  geometry,
   loading,
+  neighbours,
+  neighboursLoading,
 }: {
   point: LatentSpacePoint;
   bounds: DataBounds;
+  geometry: CanvasGeometry;
   loading: boolean;
+  /** Latent-space neighbours of `point`, already paired with their
+   *  projected scatter point. Null when the fetch is in flight or
+   *  there are no neighbours to draw. */
+  neighbours: { point: LatentSpacePoint; entry: LatentNeighbourEntry }[] | null;
+  /** True while the neighbour fetch is in flight for this point. */
+  neighboursLoading: boolean;
 }) {
-  const { px, py } = scaleToCanvas(point, bounds, CANVAS_GEOMETRY);
+  const { px, py } = scaleToCanvas(point, bounds, geometry);
   // Anchor near the cursor without escaping the canvas — flip to the
   // left of the point if we're in the right half.
-  const flipX = px > CANVAS_WIDTH / 2;
-  const flipY = py > CANVAS_HEIGHT - 80;
+  const flipX = px > geometry.width / 2;
+  const flipY = py > geometry.height - 80;
   const style: React.CSSProperties = {
     position: "absolute",
     left: flipX ? undefined : px + 10,
-    right: flipX ? CANVAS_WIDTH - px + 10 : undefined,
+    right: flipX ? geometry.width - px + 10 : undefined,
     top: flipY ? undefined : py + 10,
-    bottom: flipY ? CANVAS_HEIGHT - py + 10 : undefined,
+    bottom: flipY ? geometry.height - py + 10 : undefined,
     pointerEvents: "none",
     background: "var(--surface-3, #1a1f2c)",
     padding: "var(--space-2, 8px) var(--space-3, 12px)",
@@ -499,6 +1153,345 @@ function HoverTooltip({
           loading…
         </div>
       )}
+      {neighboursLoading && (
+        <div style={{ color: "var(--muted)", fontStyle: "italic", marginTop: 4 }}>
+          fetching neighbours…
+        </div>
+      )}
+      {neighbours && neighbours.length > 0 && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid var(--border, #2a2f3a)" }}>
+          <div style={{ color: "var(--muted)", fontSize: "0.85em" }}>
+            {neighbours.length} nearest in latent space
+          </div>
+          {neighbours.slice(0, 5).map(({ point: np, entry }) => (
+            <div
+              key={np.track_id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 12,
+                fontSize: "0.85em",
+              }}
+            >
+              <span
+                style={{
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {np.title ?? np.track_id}
+              </span>
+              <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                {entry.cosine_distance.toFixed(3)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+// Small hover popover for inline explanations next to controls. Pure
+// React state — no portal — so the popover is clipped by ancestor
+// `overflow: hidden`; that's fine here because the toolbar row sits at
+// the top of the page with room to expand downwards. Keyboard users
+// get the same content via the underlying button's `aria-label` and
+// the popover's `role="tooltip"` association.
+function InfoTooltip({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span
+      style={{ position: "relative", display: "inline-flex" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        aria-label="What does colour-by encode?"
+        aria-expanded={open}
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: "50%",
+          border: "1px solid var(--border, #2a2f3a)",
+          background: "transparent",
+          color: "var(--muted)",
+          fontSize: 11,
+          lineHeight: "14px",
+          padding: 0,
+          cursor: "help",
+          fontFamily: "var(--font-serif, serif)",
+          fontStyle: "italic",
+        }}
+      >
+        i
+      </button>
+      {open && (
+        <div
+          role="tooltip"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            zIndex: 3,
+            background: "var(--surface-3, #1a1f2c)",
+            padding: "var(--space-3, 12px)",
+            borderRadius: "var(--radius-2, 4px)",
+            border: "1px solid var(--border, #2a2f3a)",
+            fontSize: "0.85em",
+            lineHeight: 1.45,
+            width: 340,
+            color: "var(--text, #d8dbe2)",
+            whiteSpace: "normal",
+            pointerEvents: "none",
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/// Narrow right-side panel listing the tracks of each selected session.
+///
+/// Cover thumbnails reuse the `Cover` component, which already handles
+/// missing-art fallbacks. We pass `track_id` as the Subsonic cover-art
+/// id — Navidrome accepts a track id directly; if it doesn't have art
+/// for that id, the gateway falls through to a placeholder anyway.
+///
+/// Clicking a row plays the track. Failures are logged and the row
+/// returns to its idle state.
+function SessionTracksPanel({
+  sessions,
+  points,
+}: {
+  sessions: readonly SessionItem[];
+  points: readonly LatentSpacePoint[];
+}) {
+  // Build the (track_id → metadata) lookup once. Sessions can reference
+  // tracks not present in this projection — rows for those render with
+  // just the id, no cover/title.
+  const byTrack = useMemo<Map<string, TrackMetadata>>(() => {
+    const m = new Map<string, TrackMetadata>();
+    for (const p of points) {
+      m.set(p.track_id, { title: p.title, artist: p.artist, album: p.album });
+    }
+    return m;
+  }, [points]);
+
+  const totalTracks = useMemo(
+    () => sessions.reduce((acc, s) => acc + (s.events?.length ?? 0), 0),
+    [sessions]
+  );
+
+  if (sessions.length === 0) return null;
+
+  return (
+    <aside
+      style={{
+        // Narrow column — wide enough for cover + two stacked lines +
+        // distance pill, narrow enough to leave the scatter most of the
+        // width. flex: 0 0 auto keeps it from competing with the canvas
+        // for stretch space.
+        flex: "0 0 320px",
+        maxWidth: 320,
+        // Match the canvas backdrop so the panel reads as part of the
+        // same surface, not a floating card.
+        background: "var(--surface-2, #0e1116)",
+        borderRadius: "var(--radius-2, 4px)",
+        border: "1px solid var(--border, #2a2f3a)",
+        padding: "var(--space-3, 12px)",
+        // Cap height to the viewport so long sessions scroll inside the
+        // panel rather than pushing the page down indefinitely.
+        maxHeight: "calc(100vh - 220px)",
+        overflowY: "auto",
+        fontSize: "0.85em",
+      }}
+    >
+      <div
+        style={{
+          color: "var(--muted)",
+          marginBottom: "var(--space-3, 12px)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {sessions.length} session{sessions.length === 1 ? "" : "s"} ·{" "}
+        {totalTracks} track{totalTracks === 1 ? "" : "s"}
+      </div>
+      {sessions.map((s) => (
+        <SessionGroup
+          key={s.session_id}
+          session={s}
+          rows={buildSessionTrackRows(s.events ?? [], s.segments, byTrack)}
+        />
+      ))}
+    </aside>
+  );
+}
+
+/// One session block in the panel: coloured header (matching the
+/// scatter path hue) plus the ordered track list.
+function SessionGroup({
+  session,
+  rows,
+}: {
+  session: SessionItem;
+  rows: readonly SessionTrackRow[];
+}) {
+  const hue = sessionHue(session.session_id);
+  const accent = `hsl(${hue}deg 80% 65%)`;
+  const fmtTs = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  return (
+    <div style={{ marginBottom: "var(--space-3, 12px)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-2, 8px)",
+          marginBottom: 6,
+          paddingBottom: 4,
+          borderBottom: `1px solid ${accent}`,
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: "50%",
+            background: accent,
+            flexShrink: 0,
+          }}
+        />
+        <span style={{ color: "var(--muted)", flex: 1, minWidth: 0 }}>
+          {fmtTs(session.started_ms)}
+        </span>
+        <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+          {rows.length}
+        </span>
+      </div>
+      <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+        {rows.map((row, i) => (
+          <SessionTrackRowView key={`${session.session_id}-${i}-${row.track_id}`} row={row} />
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/// A single track row: cover, title/artist stack, and a right-aligned
+/// "distance to previous" label. Click → play.
+function SessionTrackRowView({ row }: { row: SessionTrackRow }) {
+  const playback = usePlayback();
+  const [busy, setBusy] = useState(false);
+  const onPlay = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const track = await getSong(row.track_id);
+      playback.playSingle(track);
+    } catch (err) {
+      console.error("session_panel: getSong failed", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  // "—" for the first row (no predecessor) and for rows where the
+  // segment's cosine_distance is null (embedding missing). Both are
+  // ambiguous in the UI by design; the dashed line in the scatter is
+  // the user-visible signal for "embedding missing".
+  const distLabel =
+    row.prev_distance === null ? "—" : row.prev_distance.toFixed(3);
+  const seed = row.title ?? row.artist ?? row.track_id;
+  return (
+    <li
+      role="button"
+      tabIndex={0}
+      onClick={onPlay}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onPlay();
+        }
+      }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-2, 8px)",
+        padding: "4px 2px",
+        cursor: busy ? "wait" : "pointer",
+        opacity: busy ? 0.6 : 1,
+        userSelect: "none",
+      }}
+    >
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          flexShrink: 0,
+          borderRadius: "var(--radius-1, 2px)",
+          overflow: "hidden",
+        }}
+      >
+        <Cover
+          coverArt={row.track_id}
+          seed={seed}
+          size={72}
+          alt={row.title ?? row.track_id}
+        />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          title={row.title ?? row.track_id}
+          style={{
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {row.title ?? <code>{row.track_id}</code>}
+        </div>
+        {row.artist && (
+          <div
+            title={row.artist}
+            style={{
+              color: "var(--muted)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              fontSize: "0.92em",
+            }}
+          >
+            {row.artist}
+          </div>
+        )}
+      </div>
+      <span
+        title={
+          row.prev_distance === null
+            ? "no preceding track (or embedding missing)"
+            : "cosine distance to previous track"
+        }
+        style={{
+          color: "var(--muted)",
+          fontVariantNumeric: "tabular-nums",
+          fontSize: "0.85em",
+          flexShrink: 0,
+        }}
+      >
+        {distLabel}
+      </span>
+    </li>
   );
 }

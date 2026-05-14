@@ -14,11 +14,12 @@
 //! `ModelNotLoaded` error variant so callers can decide:
 //! "retry later, sidecar is alive" (503) vs "this is broken" (5xx).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::field;
 use url::Url;
 
@@ -106,6 +107,26 @@ pub struct EmbedResult {
     pub model_version: ModelVersion,
 }
 
+/// Arguments for the POST /reduce sidecar endpoint. Mirror
+/// `embedder.reduce.run()` 1:1 — adding a knob means: add a field
+/// here, on the pydantic `ReduceRequest`, and on `reduce.run`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReduceParams {
+    pub db_path: PathBuf,
+    pub model_version: String,
+    pub proj_version: Option<String>,
+    pub n_neighbors: u32,
+    pub min_dist: f64,
+    pub random_state: u64,
+    pub n_components: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ReduceResult {
+    pub proj_version: String,
+    pub written: u64,
+}
+
 impl EmbedderClient {
     pub fn new(config: EmbedderConfig) -> Result<Self, EmbedderError> {
         let http = Client::builder().timeout(config.timeout).build()?;
@@ -160,6 +181,33 @@ impl EmbedderClient {
             .send()
             .await?;
         Self::parse_embed_response(resp).await
+    }
+
+    /// POST /reduce — trigger UMAP+PCA on the embedder side. The sidecar
+    /// opens `params.db_path` directly and writes projection rows under
+    /// `proj_version`. Same 503 = "extra missing, retry later" / 5xx =
+    /// "broken" convention as the embed endpoints, so callers can reuse
+    /// the existing error-routing logic.
+    #[tracing::instrument(
+        name = "embedder.reduce",
+        skip(self, params),
+        fields(
+            model_version = %params.model_version,
+            proj_version = params.proj_version.as_deref().unwrap_or("(auto)"),
+        )
+    )]
+    pub async fn reduce(&self, params: &ReduceParams) -> Result<ReduceResult, EmbedderError> {
+        let url = join(&self.base, "/reduce");
+        let resp = self.http.post(url).json(params).send().await?;
+        let status = resp.status();
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            return Err(EmbedderError::ModelNotLoaded);
+        }
+        if !status.is_success() {
+            return Err(server_error(resp).await);
+        }
+        let body: ReduceResult = parse_json(resp).await?;
+        Ok(body)
     }
 
     async fn parse_embed_response(resp: reqwest::Response) -> Result<EmbedResult, EmbedderError> {

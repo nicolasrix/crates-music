@@ -86,11 +86,15 @@ pub async fn scrobble(
         }
 
         // Durable signal for diagnostics + future behavioural index.
+        // Stamp with the active recommend-session so per-session
+        // reconstruction queries can find this scrobble.
+        let session_id = state.sync().active_session_id().await;
         let event = EventInput {
             event_type: EventType::Scrobble,
             track_id,
             occurred_at,
             metadata: None,
+            session_id,
         };
         if let Err(err) = state.event_store().append_batch(&[event]).await {
             tracing::warn!(error = %err, "event log append failed; continuing with forward");

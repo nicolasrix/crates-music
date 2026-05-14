@@ -59,8 +59,9 @@ Vectors are L2-normalized so cosine similarity = dot product.
 Body: `{"text": "rainy sunday afternoon"}`.
 
 Response: same shape as `/embed/audio`. The same model encodes both
-modalities into the same space — that's CLAP's whole point.
-Text-query stations (planned) will use this endpoint.
+modalities into the same space — that's CLAP's whole point. The
+gateway's `GET /v1/recommend/station` endpoint calls this to turn a
+natural-language prompt into a query vector for the content ANN.
 
 ## Two backends
 

@@ -11,14 +11,13 @@
 // non-scrolling and <main> the actual scroll container. Window
 // virtualization would silently watch a frozen viewport and render
 // everything.
+//
+// Row rendering is shared with TrackTable via <TrackRow>.
 
-import { Play } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Link } from "../router";
-import { fmtDuration } from "../utils/format";
 import { usePlayer } from "../player/PlayerContext";
-import { TrackRowMenu } from "./TrackRowMenu";
+import { TrackRow } from "./TrackRow";
 import type { Track } from "../api/types";
 
 // Row-height estimate. Real heights are measured (via measureElement
@@ -32,12 +31,19 @@ const OVERSCAN = 12;
 interface Props {
   tracks: Track[];
   showAlbum?: boolean;
+  showCover?: boolean;
   onPlay: (index: number) => void;
 }
 
-export function VirtualTrackTable({ tracks, showAlbum = false, onPlay }: Props) {
+export function VirtualTrackTable({
+  tracks,
+  showAlbum = false,
+  showCover,
+  onPlay,
+}: Props) {
   const { nowPlaying } = usePlayer();
   const playingId = nowPlaying?.id ?? null;
+  const renderCover = showCover ?? showAlbum;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [scroller, setScroller] = useState<HTMLElement | null>(null);
@@ -91,7 +97,9 @@ export function VirtualTrackTable({ tracks, showAlbum = false, onPlay }: Props) 
 
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
-  const colCount = showAlbum ? 6 : 5;
+  // Base columns: num + title + artist + time + menu = 5.
+  // Optional: +1 if showAlbum, +1 if renderCover.
+  const colCount = 5 + (showAlbum ? 1 : 0) + (renderCover ? 1 : 0);
 
   // Convert absolute-from-document positions into list-relative paddings.
   // (vi.start includes scrollMargin; subtracting gives the position
@@ -107,6 +115,7 @@ export function VirtualTrackTable({ tracks, showAlbum = false, onPlay }: Props) 
         <thead>
           <tr>
             <th className="col-num">#</th>
+            {renderCover && <th className="col-cover" aria-hidden />}
             <th className="col-title">title</th>
             <th className="col-artist">artist</th>
             {showAlbum && <th className="col-album">album</th>}
@@ -122,67 +131,18 @@ export function VirtualTrackTable({ tracks, showAlbum = false, onPlay }: Props) 
           )}
           {virtualItems.map((vi) => {
             const t = tracks[vi.index]!;
-            const isPlaying = t.id === playingId;
             return (
-              <tr
+              <TrackRow
                 key={t.id}
                 ref={virtualizer.measureElement}
                 data-index={vi.index}
-                className={isPlaying ? "is-playing" : ""}
-                onDoubleClick={() => onPlay(vi.index)}
-              >
-                <td
-                  className="col-num is-clickable"
-                  onClick={() => onPlay(vi.index)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onPlay(vi.index);
-                    }
-                  }}
-                  aria-label={`play ${t.title}`}
-                >
-                  <span className="num-text tabular">
-                    {t.track ?? vi.index + 1}
-                  </span>
-                  <span className="num-play">
-                    <Play size={14} fill="currentColor" strokeWidth={0} />
-                  </span>
-                  <span className="num-eq" aria-hidden>
-                    <span />
-                    <span />
-                    <span />
-                  </span>
-                </td>
-                <td
-                  className="col-title is-clickable"
-                  onClick={() => onPlay(vi.index)}
-                >
-                  {t.title}
-                </td>
-                <td className="col-artist">
-                  {t.artistId && t.artist ? (
-                    <Link to={`/artists/${t.artistId}`}>{t.artist}</Link>
-                  ) : (
-                    (t.artist ?? "—")
-                  )}
-                </td>
-                {showAlbum && (
-                  <td className="col-album">
-                    {t.albumId && t.album ? (
-                      <Link to={`/albums/${t.albumId}`}>{t.album}</Link>
-                    ) : (
-                      (t.album ?? "—")
-                    )}
-                  </td>
-                )}
-                <td className="col-time">{fmtDuration(t.duration)}</td>
-                <td className="col-menu" onClick={(e) => e.stopPropagation()}>
-                  <TrackRowMenu track={t} />
-                </td>
-              </tr>
+                track={t}
+                index={vi.index}
+                isPlaying={t.id === playingId}
+                showAlbum={showAlbum}
+                showCover={renderCover}
+                onPlay={onPlay}
+              />
             );
           })}
           {paddingBottom > 0 && (

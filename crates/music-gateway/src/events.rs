@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use music_core::SessionId;
 use music_recommend::{EventInput, EventType};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,11 @@ pub struct EventPayload {
     pub occurred_at: i64,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Active recommend-session at the moment the event fired. Optional
+    /// for backwards compat — pre-0007 clients omit it and the event
+    /// lands with NULL session_id (out-of-session).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +73,7 @@ pub async fn submit(
             track_id: music_core::TrackId::from(p.track_id),
             occurred_at: p.occurred_at,
             metadata: p.metadata,
+            session_id: p.session_id.map(SessionId::from),
         })
         .collect();
 

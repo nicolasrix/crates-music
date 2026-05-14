@@ -1,6 +1,6 @@
 # Testing
 
-The Rust workspace has ≈690 tests across 8 crates. The web app has
+The Rust workspace has ≈750 tests across 8 crates. The web app has
 72 Vitest tests. The Python embedder has ≈18.
 
 This doc covers how the test suites are organised, what mocks/stubs
@@ -74,8 +74,8 @@ files. It's why TLS termination lives in `main.rs` and not in
 | music-cache | 35 | Each test gets a `tempfile::tempdir()` for isolation. |
 | music-player | 8 | Most tests skip actual playback (no audio device in CI); they exercise the resolution / cache-read paths. |
 | music-sync | 50 | Pure state machine; no fixtures. Property-style tests for op application. |
-| music-recommend | 206 | `wiremock` for the embedder client; in-memory SQLite for the store; in-memory `usearch` index for the ANN. Heavy unit coverage on the post-retrieval modules (queue_filter, mmr, aggregate, feedback, projection). |
-| music-gateway | 315 | Largest suite. Each integration test gets its own `AppState` via `common::build_state`. ≈27 integration files. |
+| music-recommend | 227 | `wiremock` for the embedder client; in-memory SQLite for the store; in-memory `usearch` index for the ANN. Heavy unit coverage on the post-retrieval modules (queue_filter, mmr, aggregate, feedback, projection, sessions). |
+| music-gateway | 350 | Largest suite. Each integration test gets its own `AppState` via `common::build_state`. ≈27 integration files. |
 | music-cli | 31 | Mostly config + format unit tests; CLI dispatch goes through the `app::run` library entrypoint so end-to-end behaviour can be asserted without spawning a subprocess. |
 | **web** (Vitest) | 72 | 6 files — search ranking, latent-space binning, sync reducer, recommend filter shape. |
 

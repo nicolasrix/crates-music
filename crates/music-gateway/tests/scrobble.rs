@@ -282,3 +282,91 @@ async fn now_playing_ping_does_not_append_event_log() {
         .unwrap();
     assert!(recent.is_empty(), "now-playing pings must not log");
 }
+
+#[tokio::test]
+async fn submission_scrobble_during_active_session_stamps_session_id() {
+    // After StartSession, the in-memory anchor exposes a session_id;
+    // the scrobble interceptor must read it and tag the event row so
+    // per-session reconstruction (events.by_session) can find this
+    // scrobble.
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/scrobble"))
+        .and(query_param("id", "track-in-session"))
+        .respond_with(ok_subsonic_response())
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let state = common::build_state(cfg).await;
+    let app = build_router(state.clone());
+
+    // Open a session directly on the sync store so we don't depend on
+    // /v1/sync/ops being routed in this test.
+    let sid = music_core::SessionId::from("sess-scrobble-1".to_string());
+    state
+        .sync()
+        .apply(&music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-1".to_string()),
+                track_id: TrackId::from("track-in-session".to_string()),
+            }],
+            anchor_index: 0,
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/rest/scrobble?id=track-in-session&submission=true&time=1700000001000")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let by_sess = state.event_store().by_session(&sid, 10).await.unwrap();
+    assert_eq!(by_sess.len(), 1, "scrobble must be tagged with the active session");
+    assert_eq!(by_sess[0].track_id.as_str(), "track-in-session");
+}
+
+#[tokio::test]
+async fn submission_scrobble_without_active_session_stamps_null() {
+    // With no StartSession, the active anchor is None and the event
+    // row stores NULL for session_id. Out-of-session scrobbles still
+    // land — they just can't be reconstructed per-session.
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/scrobble"))
+        .and(query_param("id", "track-no-session"))
+        .respond_with(ok_subsonic_response())
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let state = common::build_state(cfg).await;
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/rest/scrobble?id=track-no-session&submission=true&time=1700000002000")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let recent = state.event_store().recent(10).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert!(
+        recent[0].session_id.is_none(),
+        "no active session ⇒ session_id must be NULL"
+    );
+}

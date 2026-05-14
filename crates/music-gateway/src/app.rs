@@ -10,6 +10,7 @@ use axum::{
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
+use crate::admin;
 use crate::auth::require_bearer;
 use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
@@ -39,11 +40,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sync/ops", post(sync_handlers::submit_op))
         .route("/v1/sync", get(crate::sync::ws::ws_handler))
         .route("/v1/recommend/next", get(recommend::next))
+        .route("/v1/recommend/station", get(recommend::station))
         .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
         .route("/v1/recommend/from-any", post(recommend::from_any))
+        .route("/v1/recommend/similar_albums", post(recommend::similar_albums))
+        .route("/v1/recommend/similar_artists", post(recommend::similar_artists))
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/events", post(events::submit))
+        .route(
+            "/v1/admin/cache/invalidate",
+            post(admin::invalidate_cache),
+        )
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))
         .route(
             "/v1/diagnostics/histogram",
@@ -52,6 +60,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/diagnostics/queue_depth",
             get(diagnostics_handlers::queue_depth),
+        )
+        .route(
+            "/v1/diagnostics/span_series",
+            get(diagnostics_handlers::span_series),
+        )
+        .route(
+            "/v1/diagnostics/span_children",
+            get(diagnostics_handlers::span_children),
         )
         .route(
             "/v1/diagnostics/recently_played",
@@ -85,6 +101,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/diagnostics/recommend/latent_space",
             get(diagnostics_handlers::recommend_latent_space),
+        )
+        .route(
+            "/v1/diagnostics/recommend/latent_neighbours",
+            get(diagnostics_handlers::recommend_latent_neighbours),
+        )
+        .route(
+            "/v1/diagnostics/recommend/sessions",
+            get(diagnostics_handlers::recommend_sessions),
         )
         // /rest/scrobble is intercepted to write the recommender's
         // recency clock before delegating to the same proxy used by

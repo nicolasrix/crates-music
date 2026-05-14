@@ -237,6 +237,188 @@ async fn recommend_summaries_includes_both_from_any_and_from_seeds() {
     assert_eq!(names, ["recommend.from_seeds", "recommend.from_any"]);
 }
 
+// --- span_series ---------------------------------------------------------
+//
+// Time-series of (end_ms, duration_ms) for a single span name. Drives
+// the per-name plot on the /diagnostics/tracing page.
+
+#[tokio::test]
+async fn span_series_returns_points_for_matching_name() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_batch(vec![
+            span("t", 1, "ingest.fetch_clip", 100, 200), // dur=100
+            span("t", 2, "ingest.fetch_clip", 300, 500), // dur=200
+            span("t", 3, "other.span", 0, 10),
+        ])
+        .await
+        .unwrap();
+    let pts = store
+        .span_series("ingest.fetch_clip", None, 100)
+        .await
+        .unwrap();
+    assert_eq!(pts.len(), 2);
+    // Newest first.
+    assert_eq!(pts[0].end_ms, 500);
+    assert_eq!(pts[0].duration_ms, 200);
+    assert_eq!(pts[1].end_ms, 200);
+    assert_eq!(pts[1].duration_ms, 100);
+}
+
+#[tokio::test]
+async fn span_series_applies_since_ms_filter() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_batch(vec![
+            span("t", 1, "x", 0, 100),
+            span("t", 2, "x", 0, 500),
+            span("t", 3, "x", 0, 900),
+        ])
+        .await
+        .unwrap();
+    let pts = store.span_series("x", Some(500), 100).await.unwrap();
+    let ends: Vec<i64> = pts.iter().map(|p| p.end_ms).collect();
+    assert_eq!(ends, [900, 500]);
+}
+
+#[tokio::test]
+async fn span_series_respects_limit() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    let batch: Vec<SpanRecord> = (0..20)
+        .map(|i| span("t", i, "x", 0, i * 10))
+        .collect();
+    store.insert_batch(batch).await.unwrap();
+    let pts = store.span_series("x", None, 5).await.unwrap();
+    assert_eq!(pts.len(), 5);
+}
+
+#[tokio::test]
+async fn span_series_empty_when_no_match() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_batch(vec![span("t", 1, "x", 0, 10)])
+        .await
+        .unwrap();
+    let pts = store.span_series("nope", None, 10).await.unwrap();
+    assert!(pts.is_empty());
+}
+
+// --- child_breakdown -----------------------------------------------------
+//
+// Aggregates the children of every span named `<parent_name>` into a
+// per-child-name summary. Drives the "where did the time go?" panel on
+// the expanded histogram row.
+
+fn nested_span(
+    trace_id: &str,
+    span_id: i64,
+    parent_span_id: Option<i64>,
+    name: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> SpanRecord {
+    SpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id,
+        parent_span_id,
+        name: name.to_string(),
+        target: "test".to_string(),
+        start_ms,
+        end_ms,
+        fields_json: "{}".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn child_breakdown_aggregates_children_per_name() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    // Parent "ingest.fetch_clip" with three children: get_song (10),
+    // stream_request (20), stream_body (970). Sum = 1000.
+    store
+        .insert_batch(vec![
+            nested_span("t1", 1, None, "ingest.fetch_clip", 0, 1000),
+            nested_span("t1", 2, Some(1), "fetch_clip.get_song", 0, 10),
+            nested_span("t1", 3, Some(1), "fetch_clip.stream_request", 10, 30),
+            nested_span("t1", 4, Some(1), "fetch_clip.stream_body", 30, 1000),
+            // Second parent run.
+            nested_span("t2", 5, None, "ingest.fetch_clip", 0, 2000),
+            nested_span("t2", 6, Some(5), "fetch_clip.get_song", 0, 20),
+            nested_span("t2", 7, Some(5), "fetch_clip.stream_body", 20, 2000),
+        ])
+        .await
+        .unwrap();
+
+    let breakdown = store
+        .child_breakdown("ingest.fetch_clip", None)
+        .await
+        .unwrap();
+    assert_eq!(breakdown.parent_count, 2);
+    assert_eq!(breakdown.parent_sum_ms, 1000 + 2000);
+
+    // Aggregate per child name.
+    let by_name: std::collections::HashMap<&str, &music_gateway::diagnostics::ChildAgg> = breakdown
+        .children
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    assert_eq!(by_name["fetch_clip.get_song"].count, 2);
+    assert_eq!(by_name["fetch_clip.get_song"].sum_ms, 10 + 20);
+    assert_eq!(by_name["fetch_clip.stream_body"].count, 2);
+    assert_eq!(by_name["fetch_clip.stream_body"].sum_ms, 970 + 1980);
+    assert_eq!(by_name["fetch_clip.stream_request"].count, 1);
+}
+
+#[tokio::test]
+async fn child_breakdown_empty_when_parent_has_no_instances() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_batch(vec![nested_span("t", 1, None, "unrelated", 0, 5)])
+        .await
+        .unwrap();
+    let r = store.child_breakdown("ingest.fetch_clip", None).await.unwrap();
+    assert_eq!(r.parent_count, 0);
+    assert_eq!(r.parent_sum_ms, 0);
+    assert!(r.children.is_empty());
+}
+
+#[tokio::test]
+async fn child_breakdown_excludes_grandchildren() {
+    // The breakdown is one level deep — direct children only. A
+    // grandchild span shouldn't be double-counted under its grandparent.
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_batch(vec![
+            nested_span("t", 1, None, "parent", 0, 100),
+            nested_span("t", 2, Some(1), "child", 0, 80),
+            nested_span("t", 3, Some(2), "grandchild", 0, 70),
+        ])
+        .await
+        .unwrap();
+    let r = store.child_breakdown("parent", None).await.unwrap();
+    let names: Vec<&str> = r.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["child"], "grandchild must not appear");
+}
+
+#[tokio::test]
+async fn child_breakdown_applies_since_ms_to_parent_only() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    // Old parent (end=100): excluded by since_ms=500.
+    // New parent (end=1000): included; its children counted.
+    store
+        .insert_batch(vec![
+            nested_span("t", 1, None, "p", 0, 100),
+            nested_span("t", 2, Some(1), "c", 0, 100),
+            nested_span("t", 3, None, "p", 900, 1000),
+            nested_span("t", 4, Some(3), "c", 900, 1000),
+        ])
+        .await
+        .unwrap();
+    let r = store.child_breakdown("p", Some(500)).await.unwrap();
+    assert_eq!(r.parent_count, 1);
+    assert_eq!(r.children.len(), 1);
+    assert_eq!(r.children[0].count, 1);
+}
+
 #[tokio::test]
 async fn recommend_summaries_applies_since_ms_filter() {
     let store = TraceStore::open_in_memory().await.unwrap();

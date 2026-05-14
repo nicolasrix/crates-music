@@ -35,6 +35,14 @@ export interface Track {
   playCount?: number;
   /** ISO8601 timestamp of the most recent play. */
   played?: string;
+  /** ISO8601 timestamp of when the track was added to the library
+   *  (Navidrome / OpenSubsonic `created` field on the song entity).
+   *  Currently unused for sorting — "recently added" views derive
+   *  their order from getAlbumList2?type=newest instead, which
+   *  guarantees they match the recently-added-albums view. Kept on
+   *  the type because the field is part of the wire format and may
+   *  be useful for future filters. */
+  created?: string;
 }
 
 export interface AlbumWithTracks {
