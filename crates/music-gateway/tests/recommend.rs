@@ -1389,6 +1389,325 @@ async fn from_any_unknown_diversity_mode_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// --- /v1/recommend/similar_albums + similar_artists -----------------
+//
+// Two endpoints sharing one internal grouper: take a list of seed
+// track ids (typically the tracks on the current album), run them
+// through the ANN, then aggregate hits by album_id (or artist_id)
+// using the track_metadata cache. Aggregation key is the only thing
+// that differs between the two endpoints; the tests below cover the
+// wiring on both, with the bulk of edge-case coverage on the album
+// variant.
+
+fn meta_full(
+    id: &str,
+    artist_id: &str,
+    artist: &str,
+    album_id: &str,
+    album: &str,
+    title: &str,
+) -> TrackMetadata {
+    TrackMetadata {
+        track_id: TrackId::from(id),
+        artist_id: Some(artist_id.into()),
+        artist: artist.into(),
+        album_id: Some(album_id.into()),
+        album: Some(album.into()),
+        title: title.into(),
+        title_normalized: normalize_title(title),
+        duration_seconds: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        disc_number: None,
+        bpm: None,
+        musical_key: None,
+    }
+}
+
+/// Seed an 8-track universe across three albums and two artists.
+///
+///   alb_a (ar_x):  t0, t1
+///   alb_b (ar_x):  t2, t3
+///   alb_c (ar_y):  t4, t5, t6, t7
+///
+/// ANN embeddings are unit vectors `unit_at(i)` so each track is its
+/// own neighbour cluster — query(t0) returns t0 first, then nothing
+/// usefully similar. That's fine: the grouper still folds *every*
+/// returned hit into its album/artist bucket, and we assert the seed
+/// album is excluded.
+async fn seed_universe(state: &music_gateway::state::AppState) {
+    let layout: &[(&str, &str, &str, &str, &str)] = &[
+        ("t0", "ar_x", "X", "alb_a", "Album A"),
+        ("t1", "ar_x", "X", "alb_a", "Album A"),
+        ("t2", "ar_x", "X", "alb_b", "Album B"),
+        ("t3", "ar_x", "X", "alb_b", "Album B"),
+        ("t4", "ar_y", "Y", "alb_c", "Album C"),
+        ("t5", "ar_y", "Y", "alb_c", "Album C"),
+        ("t6", "ar_y", "Y", "alb_c", "Album C"),
+        ("t7", "ar_y", "Y", "alb_c", "Album C"),
+    ];
+    let ann = state.ann();
+    for (i, (id, ar_id, ar, alb_id, alb)) in layout.iter().enumerate() {
+        ann.upsert(&TrackId::from(*id), &unit_at(i)).unwrap();
+        state
+            .metadata_store()
+            .upsert(&meta_full(id, ar_id, ar, alb_id, alb, &format!("Song {i}")))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn similar_albums_excludes_seed_album_and_returns_others() {
+    let state = build_state(test_config()).await;
+    seed_universe(&state).await;
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({
+            "seed_track_ids": ["t0", "t1"],
+            "exclude_album_ids": ["alb_a"],
+            "n": 5,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["all_seeds_unindexed"], false);
+    let results = body["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "should aggregate hits into other albums");
+    for r in results {
+        assert_ne!(r["album_id"], "alb_a", "seed album must be excluded");
+        // Each item must carry a numeric score and a supporting count.
+        assert!(r["score"].is_number());
+        let supporting = r["supporting_tracks"].as_u64().expect("supporting_tracks");
+        assert!(supporting >= 1, "at least one hit must support each result");
+    }
+}
+
+#[tokio::test]
+async fn similar_albums_signals_all_unindexed() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({"seed_track_ids": ["unknown1", "unknown2"], "n": 5}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["all_seeds_unindexed"], true);
+    let results = body["results"].as_array().expect("results");
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn similar_albums_rejects_empty_seeds() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({"seed_track_ids": [], "n": 5}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn similar_albums_rejects_n_zero() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({"seed_track_ids": ["t0"], "n": 0}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn similar_albums_caps_n_at_max() {
+    let state = build_state(test_config()).await;
+    seed_universe(&state).await;
+    let app = build_router(state);
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({"seed_track_ids": ["t0"], "n": 10000}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert!(results.len() <= 100, "n must be clamped to MAX_N");
+}
+
+#[tokio::test]
+async fn similar_albums_orders_by_score_desc() {
+    let state = build_state(test_config()).await;
+    seed_universe(&state).await;
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({
+            "seed_track_ids": ["t0", "t1"],
+            "exclude_album_ids": ["alb_a"],
+            "n": 10,
+            "per_seed_n": 50,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    let scores: Vec<f64> = results
+        .iter()
+        .map(|r| r["score"].as_f64().expect("numeric score"))
+        .collect();
+    for w in scores.windows(2) {
+        assert!(
+            w[0] >= w[1],
+            "results must be sorted by score desc, saw {} then {}",
+            w[0],
+            w[1],
+        );
+    }
+}
+
+#[tokio::test]
+async fn similar_albums_skips_hits_with_no_metadata() {
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    // Two indexed tracks: t0 has metadata in alb_known; t1 has no
+    // metadata row at all. After grouping, alb_known should appear
+    // and no nameless album should show up.
+    ann.upsert(&TrackId::from("seed"), &unit_at(0)).unwrap();
+    ann.upsert(&TrackId::from("t0"), &unit_at(1)).unwrap();
+    ann.upsert(&TrackId::from("t1"), &unit_at(2)).unwrap();
+    state
+        .metadata_store()
+        .upsert(&meta_full("t0", "ar_x", "X", "alb_known", "Known", "k"))
+        .await
+        .unwrap();
+    // intentionally NO metadata.upsert for t1.
+    let app = build_router(state);
+
+    let req = auth_post(
+        "/v1/recommend/similar_albums",
+        &json!({"seed_track_ids": ["seed"], "n": 5, "per_seed_n": 50}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    let ids: Vec<&str> = results
+        .iter()
+        .map(|r| r["album_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"alb_known"),
+        "alb_known should appear (got {ids:?})",
+    );
+    // No null album_id strings should sneak through serialisation.
+    for r in results {
+        assert!(r["album_id"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn similar_albums_requires_auth() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/recommend/similar_albums")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"seed_track_ids": ["t0"], "n": 5}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn similar_artists_excludes_seed_artist_and_returns_others() {
+    let state = build_state(test_config()).await;
+    seed_universe(&state).await;
+    let app = build_router(state);
+
+    // Seed with all ar_x tracks; exclude ar_x. The only other artist
+    // is ar_y, so ar_y must be the (only) result.
+    let req = auth_post(
+        "/v1/recommend/similar_artists",
+        &json!({
+            "seed_track_ids": ["t0", "t1", "t2", "t3"],
+            "exclude_artist_ids": ["ar_x"],
+            "n": 5,
+            "per_seed_n": 50,
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["all_seeds_unindexed"], false);
+    let results = body["results"].as_array().expect("results");
+    assert!(!results.is_empty());
+    let ids: Vec<&str> = results
+        .iter()
+        .map(|r| r["artist_id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&"ar_x"), "seed artist must be excluded");
+    assert!(ids.contains(&"ar_y"), "other artist must surface");
+}
+
+#[tokio::test]
+async fn similar_artists_signals_all_unindexed() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = auth_post(
+        "/v1/recommend/similar_artists",
+        &json!({"seed_track_ids": ["missing"], "n": 5}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["all_seeds_unindexed"], true);
+    let results = body["results"].as_array().expect("results");
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn similar_artists_rejects_empty_seeds() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = auth_post(
+        "/v1/recommend/similar_artists",
+        &json!({"seed_track_ids": [], "n": 5}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn similar_artists_requires_auth() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/recommend/similar_artists")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"seed_track_ids": ["t0"], "n": 5}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // --- /v1/recommend/station -------------------------------------------
 //
 // Text-query playlist. The sidecar is faked with wiremock so the test

@@ -43,6 +43,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/station", get(recommend::station))
         .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
         .route("/v1/recommend/from-any", post(recommend::from_any))
+        .route("/v1/recommend/similar_albums", post(recommend::similar_albums))
+        .route("/v1/recommend/similar_artists", post(recommend::similar_artists))
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/events", post(events::submit))

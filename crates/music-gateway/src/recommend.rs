@@ -766,6 +766,315 @@ pub async fn from_any(
     Err((StatusCode::NOT_FOUND, "no candidate seed is indexed"))
 }
 
+// --- /v1/recommend/similar_albums + similar_artists -----------------
+//
+// Both endpoints take a list of seed track ids (typically every track
+// on the current album), fan out per-seed ANN queries, then aggregate
+// hits by a metadata key — `album_id` for similar_albums, `artist_id`
+// for similar_artists. Score per group is the sum of per-hit
+// similarities; `supporting_tracks` is the count of distinct hits in
+// that group. Same group-key for the seed set is stripped via the
+// caller-supplied `exclude_*_ids` (the seed album/artist would
+// otherwise dominate trivially — every seed is a member of its own
+// group).
+
+/// Caller-friendly default: a page wants enough cards for a row and a
+/// table strip below it without paginating.
+const DEFAULT_GROUPED_N: usize = 10;
+/// Per-seed ANN top-K before grouping. Generous because the collapse
+/// from track → album drops the cardinality by ~10× on a typical
+/// catalogue.
+const DEFAULT_GROUPED_PER_SEED_N: usize = 50;
+
+#[derive(Clone, Copy)]
+enum GroupBy {
+    Album,
+    Artist,
+}
+
+fn default_grouped_n() -> usize {
+    DEFAULT_GROUPED_N
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SimilarAlbumsRequest {
+    pub seed_track_ids: Vec<String>,
+    /// Group ids to drop from the result — typically the seed album.
+    #[serde(default)]
+    pub exclude_album_ids: Vec<String>,
+    #[serde(default = "default_grouped_n")]
+    pub n: usize,
+    /// Per-seed ANN top-K. Defaults to [`DEFAULT_GROUPED_PER_SEED_N`].
+    pub per_seed_n: Option<usize>,
+    /// Random sample over `seed_track_ids` (caps the ANN fan-out).
+    /// Defaults to [`DEFAULT_SAMPLE_SIZE`].
+    pub sample_size: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarAlbumItem {
+    pub album_id: String,
+    pub score: f32,
+    pub supporting_tracks: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarAlbumsResponse {
+    pub model_version: Option<String>,
+    pub results: Vec<SimilarAlbumItem>,
+    pub all_seeds_unindexed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SimilarArtistsRequest {
+    pub seed_track_ids: Vec<String>,
+    #[serde(default)]
+    pub exclude_artist_ids: Vec<String>,
+    #[serde(default = "default_grouped_n")]
+    pub n: usize,
+    pub per_seed_n: Option<usize>,
+    pub sample_size: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarArtistItem {
+    pub artist_id: String,
+    pub score: f32,
+    pub supporting_tracks: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarArtistsResponse {
+    pub model_version: Option<String>,
+    pub results: Vec<SimilarArtistItem>,
+    pub all_seeds_unindexed: bool,
+}
+
+#[derive(Debug)]
+struct GroupedResult {
+    key: String,
+    score: f32,
+    supporting_tracks: usize,
+}
+
+/// Shared core for the two endpoints. ANN fan-out → metadata lookup →
+/// group + sum → top-N. Returns `(groups, all_seeds_unindexed)`. The
+/// `bool` mirrors [`FromSeedsResponse::all_seeds_unindexed`] so the
+/// frontend can distinguish "no neighbours yet" from "you haven't
+/// finished indexing this album".
+async fn group_similar_by(
+    state: &AppState,
+    seed_track_ids: &[String],
+    exclude_group_ids: &[String],
+    per_seed_n: Option<usize>,
+    sample_size: Option<usize>,
+    n: usize,
+    group_by: GroupBy,
+) -> Result<(Vec<GroupedResult>, bool), (StatusCode, &'static str)> {
+    if seed_track_ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "seed_track_ids must not be empty"));
+    }
+    if seed_track_ids.len() > MAX_SEEDS {
+        return Err((StatusCode::BAD_REQUEST, "too many seed_track_ids"));
+    }
+    if n == 0 {
+        return Err((StatusCode::BAD_REQUEST, "n must be >= 1"));
+    }
+
+    let n = n.min(MAX_N);
+    let per_seed_n = per_seed_n
+        .unwrap_or(DEFAULT_GROUPED_PER_SEED_N)
+        .clamp(1, MAX_N);
+    let sample_size = sample_size
+        .unwrap_or(DEFAULT_SAMPLE_SIZE)
+        .clamp(1, seed_track_ids.len());
+
+    let model_version = state.recommend_model_version().clone();
+
+    // Pick `sample_size` random seed indices. RNG is request-scoped —
+    // no shared state, no Mutex contention.
+    let mut rng = SmallRng::from_entropy();
+    let sampled_indices = sample_indices(&mut rng, seed_track_ids.len(), sample_size);
+    let sampled: Vec<&str> = sampled_indices
+        .iter()
+        .map(|&i| seed_track_ids[i].as_str())
+        .collect();
+
+    // Exclude every seed track from ANN candidates. A seed self-ranks
+    // at 1.0 and would trivially dominate any group containing it.
+    let seed_set: HashSet<TrackId> = seed_track_ids
+        .iter()
+        .map(|s| TrackId::from(s.as_str()))
+        .collect();
+    let seed_excl_vec: Vec<TrackId> = seed_set.iter().cloned().collect();
+
+    let mut seeds_indexed = 0usize;
+    let mut all_hits: Vec<music_recommend::ann::AnnQueryResult> = Vec::new();
+    for seed_str in &sampled {
+        let seed_id = TrackId::from(*seed_str);
+        let (vec, _src) = lookup_seed_vector(
+            state.ann(),
+            state.embedding_store(),
+            &seed_id,
+            &model_version,
+        )
+        .await;
+        let Some(vector) = vec else { continue };
+        seeds_indexed += 1;
+        match state
+            .ann()
+            .query_excluding(&vector, per_seed_n, &seed_excl_vec)
+        {
+            Ok(hits) => all_hits.extend(hits),
+            Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "ann query failed")),
+        }
+    }
+
+    if seeds_indexed == 0 {
+        return Ok((Vec::new(), true));
+    }
+
+    // Bulk metadata fetch for the unique candidates.
+    let hit_ids: Vec<TrackId> = all_hits
+        .iter()
+        .map(|h| h.track_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let metadata = state
+        .metadata_store()
+        .get_many(&hit_ids)
+        .await
+        .unwrap_or_default();
+
+    // Aggregate. `groups: key → (sum_score, set_of_contributing_tracks)`.
+    let exclude_set: HashSet<&str> = exclude_group_ids.iter().map(String::as_str).collect();
+    let mut groups: HashMap<String, (f32, HashSet<TrackId>)> = HashMap::new();
+    for hit in &all_hits {
+        let Some(m) = metadata.get(&hit.track_id) else {
+            continue;
+        };
+        let key = match group_by {
+            GroupBy::Album => m.album_id.as_deref(),
+            GroupBy::Artist => m.artist_id.as_deref(),
+        };
+        let Some(key) = key else { continue };
+        if exclude_set.contains(key) {
+            continue;
+        }
+        let entry = groups
+            .entry(key.to_string())
+            .or_insert((0.0, HashSet::new()));
+        entry.0 += hit.similarity;
+        entry.1.insert(hit.track_id.clone());
+    }
+
+    let mut results: Vec<GroupedResult> = groups
+        .into_iter()
+        .map(|(key, (score, supporters))| GroupedResult {
+            key,
+            score,
+            supporting_tracks: supporters.len(),
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(n);
+
+    Ok((results, false))
+}
+
+#[tracing::instrument(
+    name = "recommend.similar_albums",
+    skip_all,
+    fields(
+        seeds_total = tracing::field::Empty,
+        results = tracing::field::Empty,
+    ),
+)]
+pub async fn similar_albums(
+    State(state): State<AppState>,
+    payload: Result<Json<SimilarAlbumsRequest>, JsonRejection>,
+) -> Result<Json<SimilarAlbumsResponse>, (StatusCode, &'static str)> {
+    let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
+    tracing::Span::current().record("seeds_total", req.seed_track_ids.len());
+
+    let (grouped, all_unindexed) = group_similar_by(
+        &state,
+        &req.seed_track_ids,
+        &req.exclude_album_ids,
+        req.per_seed_n,
+        req.sample_size,
+        req.n,
+        GroupBy::Album,
+    )
+    .await?;
+
+    let model_version = state.recommend_model_version().clone();
+    let results: Vec<SimilarAlbumItem> = grouped
+        .into_iter()
+        .map(|g| SimilarAlbumItem {
+            album_id: g.key,
+            score: g.score,
+            supporting_tracks: g.supporting_tracks,
+        })
+        .collect();
+    tracing::Span::current().record("results", results.len());
+
+    Ok(Json(SimilarAlbumsResponse {
+        model_version: Some(model_version.as_str().to_string()),
+        results,
+        all_seeds_unindexed: all_unindexed,
+    }))
+}
+
+#[tracing::instrument(
+    name = "recommend.similar_artists",
+    skip_all,
+    fields(
+        seeds_total = tracing::field::Empty,
+        results = tracing::field::Empty,
+    ),
+)]
+pub async fn similar_artists(
+    State(state): State<AppState>,
+    payload: Result<Json<SimilarArtistsRequest>, JsonRejection>,
+) -> Result<Json<SimilarArtistsResponse>, (StatusCode, &'static str)> {
+    let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
+    tracing::Span::current().record("seeds_total", req.seed_track_ids.len());
+
+    let (grouped, all_unindexed) = group_similar_by(
+        &state,
+        &req.seed_track_ids,
+        &req.exclude_artist_ids,
+        req.per_seed_n,
+        req.sample_size,
+        req.n,
+        GroupBy::Artist,
+    )
+    .await?;
+
+    let model_version = state.recommend_model_version().clone();
+    let results: Vec<SimilarArtistItem> = grouped
+        .into_iter()
+        .map(|g| SimilarArtistItem {
+            artist_id: g.key,
+            score: g.score,
+            supporting_tracks: g.supporting_tracks,
+        })
+        .collect();
+    tracing::Span::current().record("results", results.len());
+
+    Ok(Json(SimilarArtistsResponse {
+        model_version: Some(model_version.as_str().to_string()),
+        results,
+        all_seeds_unindexed: all_unindexed,
+    }))
+}
+
 /// Build a [`QueueFilter`] from a request's `queue_context` plus the
 /// metadata store. One SQLite round-trip — the union of queue ids and
 /// candidate ids — feeds both queue-state seeding and per-candidate
