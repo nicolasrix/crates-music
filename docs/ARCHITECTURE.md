@@ -201,12 +201,21 @@ gateway stays lightweight. Boot probe: gateway checks the embedder's
 
 ```
 New track discovered (Subsonic poll)
-  → fetch first ~120 s of audio from Navidrome (range request)
+  → fetch first ~120 s of audio from Navidrome
+      MP3 sources → raw byte-range (no transcode, ~10× faster)
+      everything else (FLAC/OGG/OPUS/M4A) → ?format=mp3 transcode
   → POST /embed/audio to the sidecar
   → sidecar returns L2-normalized 512-dim float32 vector
   → upsert into content-ANN index (mmap'd HNSW, cosine)
   → mark track ready in catalog
 ```
+
+The MP3 fast-path matters because Navidrome's transcode step is
+realtime-rate-limited (~1× playback speed) and dominates ingest wall
+time on a mostly-MP3 homelab library. Raw byte-range works because
+the MP3 decoder resyncs to the next frame header after truncation.
+FLAC and friends would fail decode mid-frame, so they stay on the
+transcode path.
 
 Ingest is single-worker. Crash recovery is built in: rows flagged
 `in_progress` at startup get reset to `not_started`. The ANN is a

@@ -281,6 +281,49 @@ Note: with Σ-similarity scoring, `similarity` values are *sums* and
 can exceed 1.0. They are still comparable within a single response,
 but not across responses.
 
+#### `POST /v1/recommend/similar_albums`
+
+"Albums that sound like this album." Fans out per-seed ANN queries
+over the supplied tracks, aggregates hits by `album_id`, returns the
+top-N groups by Σ-similarity. Backs the similar-albums rail on the
+web Album page.
+
+Body:
+```json
+{
+  "seed_track_ids": ["track_a", "track_b", ...],
+  "exclude_album_ids": ["album_self"],   // drop the seed album from results
+  "n": 10,                                // default 10, capped at MAX_N
+  "per_seed_n": 50,                       // default 50
+  "sample_size": 8                        // default 8
+}
+```
+
+Response:
+```json
+{
+  "model_version": "clap-music_...",
+  "results": [
+    {"album_id": "alb_xyz", "score": 4.12, "supporting_tracks": 5}
+  ],
+  "all_seeds_unindexed": false
+}
+```
+
+- `score` is the sum of per-hit similarities for tracks rolled up to
+  this album; not comparable across responses.
+- `supporting_tracks` is the number of distinct tracks on the
+  candidate album that showed up as ANN hits. A high value means the
+  match is broad-based, not driven by one outlier track.
+- `all_seeds_unindexed: true` when none of the seeds have an
+  embedding yet — UI should render "still indexing this album."
+
+#### `POST /v1/recommend/similar_artists`
+
+Same shape as `similar_albums` but aggregates by `artist_id` instead.
+`exclude_artist_ids` replaces `exclude_album_ids`; the result item is
+`{artist_id, score, supporting_tracks}`.
+
 #### `GET /v1/recommend/station`
 
 Natural-language "playlist from a prompt." The gateway sends the
@@ -446,6 +489,24 @@ Response (202):
 {"accepted": 3}
 ```
 
+### Admin
+
+#### `POST /v1/admin/cache/invalidate`
+
+Clear the L2 browse cache. Use when new content has been added to
+Navidrome and you don't want to wait for the cache TTL (default 24 h)
+to expire. Cover-art rows are preserved — Navidrome cover ids are
+content-addressed, so the old entries become unreachable rather than
+stale.
+
+No body. Response:
+```json
+{"removed": 142}
+```
+
+Surfaced as a "Refresh metadata" button on the web `/diagnostics`
+page.
+
 ### Diagnostics
 
 Authenticated read-mostly endpoints under `/v1/diagnostics/*` that
@@ -476,6 +537,54 @@ quantiles are computed in Rust via nearest-rank on the sorted slice.
 | `since_ms` | — | Optional lower bound on `started_ms`. |
 
 Response: array of `{name, count, min_ms, max_ms, sum_ms, p50_ms, p95_ms, p99_ms}`.
+
+#### `GET /v1/diagnostics/span_series`
+
+Time-series of closed-span durations for a single span name. Backs
+the timeline charts on `/diagnostics/tracing`.
+
+| Query param | Default | Description |
+|---|---|---|
+| `name` | — | **Required.** Span name to plot (no "all" sentinel; use `histogram` for the cross-name view). |
+| `since_ms` | — | Optional lower bound on `end_ms`. |
+| `limit` | 2000 | Points returned. Clamped to `[1, 10000]`. |
+
+Response:
+```json
+{
+  "name": "fetch_clip.stream_body",
+  "points": [
+    {"end_ms": 1739000000000, "duration_ms": 142}
+  ]
+}
+```
+
+#### `GET /v1/diagnostics/span_children`
+
+Per-parent subspan aggregation. For a given parent span name (e.g.
+`ingest.fetch_clip`), returns the count + sum + mean duration of each
+distinct child name observed under it. Backs the child-breakdown
+panel that separates metadata-fetch from body-read for the ingest
+audio fetcher.
+
+| Query param | Default | Description |
+|---|---|---|
+| `name` | — | **Required.** Parent span name. |
+| `since_ms` | — | Optional lower bound on the parent's `started_ms`. |
+
+Response:
+```json
+{
+  "parent_name": "ingest.fetch_clip",
+  "parent_count": 124,
+  "parent_sum_ms": 8120,
+  "children": [
+    {"name": "fetch_clip.get_song",      "count": 124, "sum_ms":  720, "mean_ms":  5.8},
+    {"name": "fetch_clip.stream_request","count": 124, "sum_ms": 1140, "mean_ms":  9.2},
+    {"name": "fetch_clip.stream_body",   "count": 124, "sum_ms": 6260, "mean_ms": 50.4}
+  ]
+}
+```
 
 #### `GET /v1/diagnostics/queue_depth`
 
@@ -566,6 +675,34 @@ UMAP 2D projection of every embedded track. Backs the
 `embedding_projection_2d` table (computed by the
 `backfill_projection` binary; see
 [components/music-recommend.md](./components/music-recommend.md)).
+
+#### `GET /v1/diagnostics/recommend/latent_neighbours`
+
+Hover overlay for the latent-space scatter. Returns the k nearest
+neighbours of a seed track in the **original** CLAP space — the
+distances UMAP doesn't preserve. Cheap (sub-ms HNSW query) and
+fetched on-demand so `latent_space` itself stays small.
+
+| Query param | Default | Description |
+|---|---|---|
+| `track_id` | — | **Required.** Seed track. |
+| `k` | 10 | Neighbours to return. Clamped to `[1, 100]`. |
+
+Response:
+```json
+{
+  "track_id": "track_abc",
+  "neighbours": [
+    {"track_id": "track_xyz", "cosine_distance": 0.142}
+  ]
+}
+```
+
+- `cosine_distance = 1 - cosine_similarity`. Range `[0, 2]`, with
+  `0` = identical direction. Reported as distance (not similarity)
+  because the UI maps line length → distance.
+- 404 if the seed has no vector in the ANN (rare; possible after a
+  model-version flip). UI degrades to "no overlay" for that point.
 
 #### `GET /v1/diagnostics/recommend/sessions?limit=N`
 
