@@ -123,6 +123,59 @@ export function fetchHistogram(opts: { sinceMs?: number }): Promise<HistogramRes
   return getJson<HistogramResponse>(`/v1/diagnostics/histogram${suffix}`);
 }
 
+// --- span_series ----------------------------------------------------------
+//
+// Time-series of `(end_ms, duration_ms)` for a single span name. Powers
+// the per-row plot when a histogram row is expanded on /diagnostics/tracing.
+
+export interface SpanSeriesPoint {
+  end_ms: number;
+  duration_ms: number;
+}
+
+export interface SpanSeriesResponse {
+  name: string;
+  points: SpanSeriesPoint[];
+}
+
+export function fetchSpanSeries(opts: {
+  name: string;
+  sinceMs?: number;
+  limit?: number;
+}): Promise<SpanSeriesResponse> {
+  const qs = new URLSearchParams();
+  qs.set("name", opts.name);
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  return getJson<SpanSeriesResponse>(`/v1/diagnostics/span_series?${qs.toString()}`);
+}
+
+// --- span_children: parent → direct-child wall-time breakdown ------------
+
+export interface SpanChildAgg {
+  name: string;
+  count: number;
+  sum_ms: number;
+  mean_ms: number;
+}
+
+export interface SpanChildrenResponse {
+  parent_name: string;
+  parent_count: number;
+  parent_sum_ms: number;
+  children: SpanChildAgg[];
+}
+
+export function fetchSpanChildren(opts: {
+  name: string;
+  sinceMs?: number;
+}): Promise<SpanChildrenResponse> {
+  const qs = new URLSearchParams();
+  qs.set("name", opts.name);
+  if (opts.sinceMs !== undefined) qs.set("since_ms", String(opts.sinceMs));
+  return getJson<SpanChildrenResponse>(`/v1/diagnostics/span_children?${qs.toString()}`);
+}
+
 export function fetchQueueDepth(opts: { modelVersion?: string }): Promise<QueueDepthResponse> {
   const qs = new URLSearchParams();
   if (opts.modelVersion) qs.set("model_version", opts.modelVersion);

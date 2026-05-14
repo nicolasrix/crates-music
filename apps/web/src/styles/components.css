@@ -113,6 +113,62 @@ body {
 }
 .search-input:focus { border-color: var(--border-strong); }
 
+/* Custom dropdown — used by the latent-space session picker because
+   native <select> option lists are OS-controlled and can fill most
+   of the screen on tall monitors when there are many entries. The
+   trigger reuses .search-input for visual parity with the rest of
+   the inputs on the page; the menu is an absolutely-positioned <ul>
+   with capped height + overflow scroll. */
+.session-picker {
+  position: relative;
+  display: inline-block;
+}
+.session-picker-trigger {
+  width: auto;
+  font-family: var(--font-mono);
+  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+.session-picker-caret {
+  color: var(--fg-faint);
+  font-size: 0.85em;
+  line-height: 1;
+}
+.session-picker-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-pop);
+  z-index: 20;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.session-picker-menu li {
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--fg);
+  transition: background var(--dur-1) var(--ease-out-soft);
+}
+.session-picker-menu li:hover {
+  background: var(--surface-3);
+}
+.session-picker-menu li.is-selected {
+  color: var(--accent);
+}
+
 /* Detail-page hero. */
 .hero {
   padding: var(--space-7) var(--space-7) var(--space-6);

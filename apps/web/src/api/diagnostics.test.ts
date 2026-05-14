@@ -21,7 +21,11 @@ vi.stubGlobal("localStorage", {
   },
 });
 
-import { invalidateBrowseCache } from "./diagnostics";
+import {
+  fetchSpanChildren,
+  fetchSpanSeries,
+  invalidateBrowseCache,
+} from "./diagnostics";
 
 const ACCESS = "tok-access";
 const REFRESH = "tok-refresh";
@@ -70,5 +74,123 @@ describe("invalidateBrowseCache", () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response("err", { status: 500 }));
     vi.stubGlobal("fetch", fetchSpy);
     await expect(invalidateBrowseCache()).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("fetchSpanSeries", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("encodes name, since_ms, and limit in the query string", async () => {
+    seedTokens();
+    const body = { name: "ingest.fetch_clip", points: [] };
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchSpanSeries({
+      name: "ingest.fetch_clip",
+      sinceMs: 12345,
+      limit: 500,
+    });
+
+    expect(result).toEqual(body);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url.startsWith("/v1/diagnostics/span_series?")).toBe(true);
+    const qs = new URLSearchParams(url.split("?")[1]);
+    expect(qs.get("name")).toBe("ingest.fetch_clip");
+    expect(qs.get("since_ms")).toBe("12345");
+    expect(qs.get("limit")).toBe("500");
+  });
+
+  it("omits optional params when not provided", async () => {
+    seedTokens();
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ name: "x", points: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await fetchSpanSeries({ name: "x" });
+
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const qs = new URLSearchParams(url.split("?")[1]);
+    expect(qs.get("name")).toBe("x");
+    expect(qs.has("since_ms")).toBe(false);
+    expect(qs.has("limit")).toBe(false);
+  });
+
+  it("parses points from the response body", async () => {
+    seedTokens();
+    const points = [
+      { end_ms: 1000, duration_ms: 50 },
+      { end_ms: 2000, duration_ms: 75 },
+    ];
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ name: "x", points }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const r = await fetchSpanSeries({ name: "x" });
+    expect(r.points).toEqual(points);
+  });
+});
+
+describe("fetchSpanChildren", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("encodes name and optional since_ms", async () => {
+    seedTokens();
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          parent_name: "p",
+          parent_count: 0,
+          parent_sum_ms: 0,
+          children: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await fetchSpanChildren({ name: "ingest.fetch_clip", sinceMs: 99 });
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url.startsWith("/v1/diagnostics/span_children?")).toBe(true);
+    const qs = new URLSearchParams(url.split("?")[1]);
+    expect(qs.get("name")).toBe("ingest.fetch_clip");
+    expect(qs.get("since_ms")).toBe("99");
+  });
+
+  it("parses children with mean_ms", async () => {
+    seedTokens();
+    const body = {
+      parent_name: "p",
+      parent_count: 2,
+      parent_sum_ms: 3000,
+      children: [
+        { name: "c1", count: 2, sum_ms: 2500, mean_ms: 1250 },
+        { name: "c2", count: 2, sum_ms: 30, mean_ms: 15 },
+      ],
+    };
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const r = await fetchSpanChildren({ name: "p" });
+    expect(r.children).toHaveLength(2);
+    expect(r.children[0]!.mean_ms).toBe(1250);
+    expect(r.parent_sum_ms).toBe(3000);
   });
 });

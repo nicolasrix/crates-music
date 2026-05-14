@@ -62,6 +62,14 @@ pub fn build_router(state: AppState) -> Router {
             get(diagnostics_handlers::queue_depth),
         )
         .route(
+            "/v1/diagnostics/span_series",
+            get(diagnostics_handlers::span_series),
+        )
+        .route(
+            "/v1/diagnostics/span_children",
+            get(diagnostics_handlers::span_children),
+        )
+        .route(
             "/v1/diagnostics/recently_played",
             get(diagnostics_handlers::recently_played),
         )
