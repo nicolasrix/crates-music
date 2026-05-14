@@ -473,6 +473,14 @@ a.tile-title:hover {
   display: block;
   background: var(--surface-2);
 }
+/* Circular variant for artist photos — mirrors the ArtistHeroCard
+   convention so the hero strip and table views match. */
+.cover-thumb.is-circle { border-radius: var(--radius-full); }
+/* When the cover is the leading column (e.g. ArtistTable, which has
+   no row-number cell to provide a left gutter), restore the table's
+   normal left padding so the thumbnail doesn't sit flush against
+   the row's left edge. */
+.tracks .col-cover:first-child { padding-left: var(--space-4); }
 .tracks .col-title { color: var(--fg); }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
