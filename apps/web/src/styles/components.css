@@ -454,6 +454,25 @@ a.tile-title:hover {
 }
 .tracks tbody tr:hover { background: color-mix(in oklab, var(--surface-2) 60%, transparent); }
 .tracks .col-num { width: 48px; color: var(--fg-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Optional album-cover thumbnail column. The thumb is sized so the cell
+   ends up the same total height as a normal text cell — i.e. row height
+   doesn't grow when the column is shown. Text cells contribute ~18px
+   line + 24px vertical padding ≈ 42px; we mirror that with a 38px thumb
+   inside 4px/4px vertical padding (46px). Left padding stays zero so
+   the cover sits flush against the row-number cell. */
+.tracks .col-cover {
+  width: 46px;
+  padding: 4px var(--space-2) 4px 0;
+  cursor: pointer;
+}
+.cover-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 3px;
+  overflow: hidden;
+  display: block;
+  background: var(--surface-2);
+}
 .tracks .col-title { color: var(--fg); }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
