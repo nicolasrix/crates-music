@@ -8,6 +8,7 @@ use axum::{
     routing::{any, get, post},
 };
 use serde_json::json;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::admin;
@@ -16,6 +17,7 @@ use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
 use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
+use crate::readyz;
 use crate::recommend;
 use crate::recommend_feedback;
 use crate::scrobble;
@@ -25,6 +27,7 @@ use crate::sync::handlers as sync_handlers;
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz::readyz))
         .route("/oauth/setup", post(oauth_handlers::setup))
         .route(
             "/oauth/login",
@@ -119,12 +122,29 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/*subsonic_path", any(proxy))
         .layer(from_fn_with_state(state.clone(), require_bearer));
 
-    public
-        .merge(protected)
-        // Explicit 404 fallback. Without this, unmatched routes inherit the
-        // protected sub-router's `require_bearer` layer (which wraps its
-        // own fallback) and incorrectly return 401.
-        .fallback(not_found)
+    let merged = public.merge(protected);
+
+    // When `server.static_dir` is configured, the gateway hosts the web
+    // SPA from `<static_dir>/`:
+    //   * `/assets/*` is served by a non-fallback `ServeDir` so that a
+    //     missing hashed bundle is a real 404 (catches deploy skew).
+    //   * Everything else that didn't match an API route falls back to
+    //     `index.html` so React Router can take over client-side.
+    // When `static_dir` is `None`, the legacy explicit 404 fallback
+    // applies — preserving the no-SPA behaviour for dev where Vite
+    // serves the bundle on its own port.
+    let with_fallback = match state.config().server.static_dir.as_ref() {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            let assets_dir = dir.join("assets");
+            merged
+                .nest_service("/assets", ServeDir::new(assets_dir))
+                .fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+        }
+        None => merged.fallback(not_found),
+    };
+
+    with_fallback
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

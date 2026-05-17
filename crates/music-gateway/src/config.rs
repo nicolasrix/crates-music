@@ -30,6 +30,12 @@ pub struct ServerConfig {
     pub tls_key: PathBuf,
     /// Single shared bearer token. Static for P1; OAuth in a later phase.
     pub bearer_token: String,
+    /// Optional directory of built web SPA assets (`apps/web/dist`). When
+    /// set, the gateway serves it as a same-origin static site with SPA
+    /// fallback to `index.html`. Defaults to `None` — leave unset in
+    /// dev where Vite serves the SPA itself.
+    #[serde(default)]
+    pub static_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

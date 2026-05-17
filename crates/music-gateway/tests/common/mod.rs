@@ -22,6 +22,25 @@ const TEST_DIM: usize = 8;
 
 pub const TEST_BEARER: &str = "test-bearer-token";
 
+/// Poll the cache until `key` is present, or panic after a second. The
+/// browse-cache write is a fire-and-forget `tokio::spawn` in
+/// `proxy::browse_proxy` (intentional — saves ~13–20 ms p99 per request
+/// at the cost of a benign one-time upstream-redundancy on a tight race),
+/// so a test that populates the cache via one request and then asserts
+/// about the cached state of a *second* request must wait for the
+/// background write to land or it flakes. Use this whenever the test
+/// pattern is "fire request, then assert cache hit / 304 / wiremock
+/// `.expect(1)`".
+pub async fn wait_for_cache_entry(cache: &music_cache::Cache, key: &str) {
+    for _ in 0..50 {
+        if cache.get(key).await.unwrap().is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("cache entry for {key} did not commit within 1s");
+}
+
 pub fn test_config() -> Config {
     test_config_with_upstream("http://nav.test", "alice", "sesame")
 }
@@ -33,6 +52,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
             tls_cert: PathBuf::from("/dev/null"),
             tls_key: PathBuf::from("/dev/null"),
             bearer_token: TEST_BEARER.to_string(),
+            static_dir: None,
         },
         upstream: UpstreamConfig {
             navidrome_url: url.to_string(),
@@ -52,7 +72,14 @@ pub async fn build_state(config: Config) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    build_state_full(config, cache, oauth, SetupToken::none(), EmbedderHandle::disabled()).await
+    build_state_full(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        EmbedderHandle::disabled(),
+    )
+    .await
 }
 
 /// Build state with a caller-provided embedder handle. Used by tests
@@ -71,7 +98,14 @@ pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    build_state_full(config, cache, oauth, SetupToken::none(), EmbedderHandle::disabled()).await
+    build_state_full(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        EmbedderHandle::disabled(),
+    )
+    .await
 }
 
 pub async fn build_state_with_oauth(
@@ -82,7 +116,14 @@ pub async fn build_state_with_oauth(
     let cache = Cache::open_in_memory()
         .await
         .expect("in-memory cache opens cleanly");
-    build_state_full(config, cache, oauth, setup_token, EmbedderHandle::disabled()).await
+    build_state_full(
+        config,
+        cache,
+        oauth,
+        setup_token,
+        EmbedderHandle::disabled(),
+    )
+    .await
 }
 
 async fn build_state_full(
