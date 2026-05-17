@@ -177,7 +177,9 @@ async fn ws_receives_start_session_applied_frame_with_anchor_in_op() {
     let snapshot = next_text_message(&mut ws).await;
     assert_eq!(snapshot["type"], "snapshot");
     assert!(
-        snapshot["state"]["playback"].get("session_anchor").is_none(),
+        snapshot["state"]["playback"]
+            .get("session_anchor")
+            .is_none(),
         "initial snapshot must omit session_anchor"
     );
 

@@ -247,8 +247,7 @@ async fn client_events_get_requires_auth() {
 #[tokio::test]
 async fn client_events_get_empty_returns_empty_array() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) =
-        get_json(build_router(state), "/v1/diagnostics/client_events").await;
+    let (status, json) = get_json(build_router(state), "/v1/diagnostics/client_events").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["events"], json!([]));
 }
@@ -265,8 +264,7 @@ async fn client_events_get_filters_by_name() {
             {"session_id":"s","occurred_ms":3,"name":"web-vital.LCP","page_path":"/"}
         ]
     });
-    let (status, _) =
-        post_json(app, "/v1/diagnostics/client_events", body, None).await;
+    let (status, _) = post_json(app, "/v1/diagnostics/client_events", body, None).await;
     assert_eq!(status, StatusCode::OK);
 
     let (status, json) = get_json(

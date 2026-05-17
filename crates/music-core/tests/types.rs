@@ -189,7 +189,8 @@ fn playback_state_without_anchor_omits_field_on_wire() {
 #[test]
 fn playback_state_deserializes_legacy_payload_without_session_anchor() {
     // Snapshots written before the field existed must still parse.
-    let json = r#"{"queue":{"items":[]},"now_playing_index":null,"position_ms":0,"is_playing":false}"#;
+    let json =
+        r#"{"queue":{"items":[]},"now_playing_index":null,"position_ms":0,"is_playing":false}"#;
     let state: PlaybackState = serde_json::from_str(json).unwrap();
     assert!(state.session_anchor.is_none());
 }

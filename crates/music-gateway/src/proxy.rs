@@ -265,7 +265,13 @@ async fn cover_art_proxy(
             // Navidrome). Cooldown-gated so a burst of cache hits
             // doesn't translate to a burst of upstream requests.
             maybe_spawn_revalidation(state, &key, client_query);
-            return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+            return Ok(write_and_serve_placeholder(
+                state,
+                &key,
+                &placeholder_seed,
+                ttl,
+                now,
+            ));
         }
         // Run the placeholder classifier on the cache hit too. The
         // common path here is the second-visit-after-cold-cache
@@ -280,7 +286,13 @@ async fn cover_art_proxy(
             // recognises an entry as a Navidrome default, we want to
             // re-check whether real art has landed since.
             maybe_spawn_revalidation(state, &key, client_query);
-            return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+            return Ok(write_and_serve_placeholder(
+                state,
+                &key,
+                &placeholder_seed,
+                ttl,
+                now,
+            ));
         }
         if let Some(client_etag) = if_none_match
             && client_etag == entry.etag
@@ -316,7 +328,13 @@ async fn cover_art_proxy(
     // a real cover).
     if status == StatusCode::NOT_FOUND {
         tracing::Span::current().record("outcome", "placeholder_404");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     if !status.is_success() {
@@ -332,7 +350,13 @@ async fn cover_art_proxy(
     // not cache the JSON bytes.
     if is_subsonic_json_error(&upstream_headers, &body_bytes) {
         tracing::Span::current().record("outcome", "placeholder_subsonic_error");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     let etag = etag_for(&body_bytes);
@@ -345,7 +369,13 @@ async fn cover_art_proxy(
         .is_ok_and(|set| set.contains(&etag));
     if already_known {
         tracing::Span::current().record("outcome", "placeholder_known");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     // Synchronous cache write — *not* `tokio::spawn`. Without this,
@@ -372,7 +402,13 @@ async fn cover_art_proxy(
     // detection fires on the first parallel round, not the second.
     if classify_as_placeholder(state, &etag, &cover_id).await {
         tracing::Span::current().record("outcome", "placeholder_detected");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     tracing::Span::current().record("outcome", "upstream_fetch");

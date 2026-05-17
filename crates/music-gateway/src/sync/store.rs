@@ -122,7 +122,8 @@ impl SyncStore {
             version,
         });
         drop(guard);
-        self.mirror_session_lifecycle(op, &active_before, now_ms).await;
+        self.mirror_session_lifecycle(op, &active_before, now_ms)
+            .await;
         Ok(version)
     }
 

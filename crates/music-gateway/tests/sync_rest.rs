@@ -179,10 +179,7 @@ async fn post_op_rejects_unknown_op_type_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-async fn snapshot_json(
-    app: axum::Router,
-    auth: (&'static str, String),
-) -> serde_json::Value {
+async fn snapshot_json(app: axum::Router, auth: (&'static str, String)) -> serde_json::Value {
     let resp = app
         .oneshot(
             Request::get("/v1/sync/snapshot")
@@ -256,14 +253,19 @@ async fn post_start_session_sets_anchor_in_snapshot() {
 
     let snap = snapshot_json(app, (k, v)).await;
     assert_eq!(snap["version"], 1);
-    assert_eq!(snap["playback"]["queue"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        snap["playback"]["queue"]["items"].as_array().unwrap().len(),
+        2
+    );
     assert_eq!(snap["playback"]["now_playing_index"], 0);
     assert_eq!(snap["playback"]["is_playing"], true);
 
     let anchor = &snap["playback"]["session_anchor"];
     assert_eq!(anchor["session_id"], "sess-1");
     assert_eq!(anchor["track_id"], "t-1");
-    let started_ms = anchor["started_ms"].as_i64().expect("started_ms is integer");
+    let started_ms = anchor["started_ms"]
+        .as_i64()
+        .expect("started_ms is integer");
     assert!(
         started_ms >= before_ms && started_ms <= after_ms,
         "server-stamped started_ms ({started_ms}) must fall within [{before_ms}, {after_ms}]"
@@ -410,11 +412,7 @@ async fn ops_are_linearized_across_concurrent_posts() {
 
 // --- session lifecycle persistence (migration 0008) -----------------
 
-async fn post_op(
-    app: &axum::Router,
-    auth: &(&str, String),
-    body: serde_json::Value,
-) -> StatusCode {
+async fn post_op(app: &axum::Router, auth: &(&str, String), body: serde_json::Value) -> StatusCode {
     let resp = app
         .clone()
         .oneshot(
@@ -447,7 +445,12 @@ async fn start_session_persists_a_recommend_sessions_row() {
     assert_eq!(post_op(&app, &auth, body).await, StatusCode::OK);
 
     let sid = music_core::SessionId::from("sess-persist-1".to_string());
-    let row = state.sessions().get(&sid).await.unwrap().expect("row persisted");
+    let row = state
+        .sessions()
+        .get(&sid)
+        .await
+        .unwrap()
+        .expect("row persisted");
     assert_eq!(row.anchor_track_id.as_str(), "t-2");
     assert_eq!(row.items_count, 3);
     assert!(row.ended_ms.is_none());
@@ -469,7 +472,12 @@ async fn stop_session_closes_persisted_row() {
     assert_eq!(post_op(&app, &auth, stop).await, StatusCode::OK);
 
     let sid = music_core::SessionId::from("sess-stop-1".to_string());
-    let row = state.sessions().get(&sid).await.unwrap().expect("row persisted");
+    let row = state
+        .sessions()
+        .get(&sid)
+        .await
+        .unwrap()
+        .expect("row persisted");
     assert!(
         row.ended_ms.is_some(),
         "stop_session must stamp ended_ms; got {row:?}"
@@ -537,7 +545,10 @@ async fn clear_op_implicitly_stops_the_active_persisted_session() {
         .await
         .unwrap()
         .unwrap();
-    assert!(row.ended_ms.is_some(), "clear must close the active session");
+    assert!(
+        row.ended_ms.is_some(),
+        "clear must close the active session"
+    );
     assert!(state.sessions().active().await.unwrap().is_none());
 }
 

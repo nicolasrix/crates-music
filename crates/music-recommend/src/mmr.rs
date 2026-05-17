@@ -208,8 +208,8 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)] // exact-equality is intentional: the helper
-                            // returns literal 0.0 / 1.0 in the cases we
-                            // assert on.
+// returns literal 0.0 / 1.0 in the cases we
+// assert on.
 mod tests {
     use super::*;
 
@@ -417,10 +417,7 @@ mod tests {
         //   a: 0.5*0.5 - 0.5*0 (b has no vector) = 0.25
         //   No other candidates.
         // → a wins.
-        let cs = vec![
-            cand("a", 0.5, vec![1.0, 0.0]),
-            cand_no_vec("b", 0.9),
-        ];
+        let cs = vec![cand("a", 0.5, vec![1.0, 0.0]), cand_no_vec("b", 0.9)];
         let out = no_penalty(&cs, 0.5, 2);
         assert_eq!(out, vec![1, 0]);
     }

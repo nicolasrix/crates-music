@@ -472,7 +472,10 @@ pub async fn list_client_events(
     State(state): State<AppState>,
     Query(q): Query<ClientEventsQuery>,
 ) -> Result<Json<ClientEventsResponse>, (StatusCode, Json<Value>)> {
-    let limit = q.limit.unwrap_or(DEFAULT_TRACE_LIMIT).clamp(1, MAX_TRACE_LIMIT);
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_TRACE_LIMIT)
+        .clamp(1, MAX_TRACE_LIMIT);
     let rows = state
         .trace_store()
         .recent_client_events(limit, q.name.as_deref())
@@ -625,10 +628,7 @@ pub async fn recommend_queue_fill(
 
     let mut buckets: Vec<FillBucket> = FILL_BUCKETS
         .iter()
-        .map(|(label, ..)| FillBucket {
-            label,
-            count: 0,
-        })
+        .map(|(label, ..)| FillBucket { label, count: 0 })
         .collect();
     let mut total: u64 = 0;
     for row in &rows {
@@ -674,8 +674,7 @@ pub async fn recommend_shortfall(
         .recommend_summaries(q.since_ms)
         .await
         .map_err(db_error)?;
-    let mut counts: std::collections::BTreeMap<String, u64> =
-        std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for row in &rows {
         let key = row
             .shortfall_reason
@@ -1001,9 +1000,10 @@ pub async fn recommend_latent_space(
     State(state): State<AppState>,
     Query(q): Query<LatentSpaceQuery>,
 ) -> Result<Json<LatentSpaceResponse>, (StatusCode, Json<Value>)> {
-    let model_version = q
-        .model_version
-        .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from);
+    let model_version = q.model_version.map_or_else(
+        || state.recommend_model_version().clone(),
+        ModelVersion::from,
+    );
 
     let versions = state
         .projection()
@@ -1169,9 +1169,10 @@ pub async fn queue_depth(
     State(state): State<AppState>,
     Query(q): Query<QueueDepthQuery>,
 ) -> Result<Json<QueueDepthResponse>, (StatusCode, Json<Value>)> {
-    let model_version = q
-        .model_version
-        .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from);
+    let model_version = q.model_version.map_or_else(
+        || state.recommend_model_version().clone(),
+        ModelVersion::from,
+    );
     let counts = state
         .embedding_store()
         .counts(&model_version)
@@ -1300,10 +1301,10 @@ pub async fn recommend_sessions(
         .map_err(db_error)?;
 
     let model_version = if include_events {
-        Some(
-            q.model_version
-                .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from),
-        )
+        Some(q.model_version.map_or_else(
+            || state.recommend_model_version().clone(),
+            ModelVersion::from,
+        ))
     } else {
         None
     };
@@ -1362,7 +1363,11 @@ async fn compute_session_segments(
     for e in events {
         if !vectors.contains_key(&e.track_id) {
             let key = EmbeddingKey::new(e.track_id.clone(), model_version.clone());
-            let vec = state.embedding_store().get(&key).await?.map(|emb| emb.vector);
+            let vec = state
+                .embedding_store()
+                .get(&key)
+                .await?
+                .map(|emb| emb.vector);
             vectors.insert(e.track_id.clone(), vec);
         }
     }

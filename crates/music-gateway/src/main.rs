@@ -20,7 +20,9 @@ use music_gateway::ingest::{
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
 use music_gateway::{AppState, Config, build_router};
 use music_recommend::ann::AnnIndex;
-use music_recommend::ingest::{AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store};
+use music_recommend::ingest::{
+    AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store,
+};
 use music_recommend::metadata::MetadataStore;
 use music_recommend::projection::ProjectionStore;
 use music_recommend::store::EmbeddingStore;
@@ -149,8 +151,7 @@ async fn main() -> Result<()> {
     let recommend = boot_recommender(&config.oauth.state_db, &embedder).await?;
 
     let fetcher: Arc<dyn AudioFetcher> = Arc::new(
-        SubsonicAudioFetcher::new(&config.upstream)
-            .context("building Subsonic ingest fetcher")?,
+        SubsonicAudioFetcher::new(&config.upstream).context("building Subsonic ingest fetcher")?,
     );
     let metadata_fetcher: Arc<dyn MetadataFetcher> = Arc::new(
         SubsonicMetadataFetcher::new(&config.upstream)
@@ -283,9 +284,12 @@ async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<
     // directory on the sidecar side. The file definitely exists by now
     // — `EmbeddingStore::open` created/opened it above — so
     // `canonicalize` won't fail on a missing target.
-    let recommend_db_path = recommend_db_path
-        .canonicalize()
-        .with_context(|| format!("canonicalizing recommend DB path {}", recommend_db_path.display()))?;
+    let recommend_db_path = recommend_db_path.canonicalize().with_context(|| {
+        format!(
+            "canonicalizing recommend DB path {}",
+            recommend_db_path.display()
+        )
+    })?;
 
     Ok(RecommenderState {
         embedding_store,

@@ -371,11 +371,11 @@ mod server_timing_parser {
         // Each input is something a buggy backend might emit. None of
         // them should panic; we either extract what we can or drop.
         for header in [
-            ";dur=10",          // empty name
-            "decode;dur=",      // missing value
-            "decode;dur=NaN",   // unparseable
-            ",,, ,",            // pure separators
-            "decode;dur=42;",   // trailing semicolon
+            ";dur=10",        // empty name
+            "decode;dur=",    // missing value
+            "decode;dur=NaN", // unparseable
+            ",,, ,",          // pure separators
+            "decode;dur=42;", // trailing semicolon
         ] {
             let _ = parse_server_timing(header);
         }
@@ -514,7 +514,10 @@ async fn reduce_omits_proj_version_when_none() {
         .await;
 
     let client = client_for(&server);
-    let out = client.reduce(&default_reduce_params()).await.expect("reduce");
+    let out = client
+        .reduce(&default_reduce_params())
+        .await
+        .expect("reduce");
     assert_eq!(out.proj_version, "derived-from-defaults");
     assert_eq!(out.written, 0);
 }

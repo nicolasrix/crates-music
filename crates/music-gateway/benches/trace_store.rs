@@ -37,7 +37,11 @@ fn make_record(i: usize) -> SpanRecord {
     SpanRecord {
         trace_id: format!("{i:016x}"),
         span_id: i64_i,
-        parent_span_id: if i.is_multiple_of(4) { None } else { Some(i64_i - 1) },
+        parent_span_id: if i.is_multiple_of(4) {
+            None
+        } else {
+            Some(i64_i - 1)
+        },
         name: "ingest.embed_one".to_string(),
         target: "music_recommend::ingest".to_string(),
         start_ms: 1_700_000_000_000 + i64_i,

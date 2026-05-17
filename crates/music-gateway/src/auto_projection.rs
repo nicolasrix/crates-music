@@ -111,7 +111,13 @@ async fn run_loop(
                 continue;
             }
         };
-        match decide_action(&state, current, QUIET_INTERVAL, MIN_NEW_EMBEDDINGS, Instant::now()) {
+        match decide_action(
+            &state,
+            current,
+            QUIET_INTERVAL,
+            MIN_NEW_EMBEDDINGS,
+            Instant::now(),
+        ) {
             Action::Reduce => {
                 let ts = now_unix_ms();
                 let pv_2d = format!("auto-{ts}");
@@ -129,30 +135,14 @@ async fn run_loop(
                 // failure (3D errored, 2D landed) retries on the next
                 // quiet window. The wasted second 2D run is bounded —
                 // it only repeats while embeddings keep landing.
-                let ok_2d = run_one_reduce(
-                    &embedder,
-                    &recommend_db_path,
-                    &model_version,
-                    &pv_2d,
-                    2,
-                )
-                .await;
-                let ok_3d = run_one_reduce(
-                    &embedder,
-                    &recommend_db_path,
-                    &model_version,
-                    &pv_3d,
-                    3,
-                )
-                .await;
+                let ok_2d =
+                    run_one_reduce(&embedder, &recommend_db_path, &model_version, &pv_2d, 2).await;
+                let ok_3d =
+                    run_one_reduce(&embedder, &recommend_db_path, &model_version, &pv_3d, 3).await;
                 if ok_2d && ok_3d {
                     state.last_reduced_count = current;
                     if let Err(e) = projection_store
-                        .prune_proj_versions(
-                            &model_version,
-                            AUTO_PROJ_PATTERN,
-                            KEEP_AUTO_RUNS,
-                        )
+                        .prune_proj_versions(&model_version, AUTO_PROJ_PATTERN, KEEP_AUTO_RUNS)
                         .await
                     {
                         tracing::warn!(error = %e, "auto-projection: prune failed");

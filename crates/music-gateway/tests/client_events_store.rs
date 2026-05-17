@@ -32,7 +32,12 @@ async fn insert_batch_round_trips_newest_first() {
     store
         .insert_client_events(vec![
             rec("web-vital.LCP", 1_700_000_000_500, Some(1234.5), "/albums"),
-            rec("playback.start", 1_700_000_001_000, Some(187.0), "/albums/abc"),
+            rec(
+                "playback.start",
+                1_700_000_001_000,
+                Some(187.0),
+                "/albums/abc",
+            ),
         ])
         .await
         .unwrap();
@@ -69,7 +74,13 @@ async fn name_filter_excludes_other_events() {
 async fn empty_batch_is_a_noop() {
     let store = TraceStore::open_in_memory().await.unwrap();
     store.insert_client_events(vec![]).await.unwrap();
-    assert!(store.recent_client_events(50, None).await.unwrap().is_empty());
+    assert!(
+        store
+            .recent_client_events(50, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

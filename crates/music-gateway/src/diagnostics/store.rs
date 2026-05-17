@@ -236,12 +236,10 @@ impl TraceStore {
         // alternative — emulating quantiles via window functions — is
         // O(n log n) on the SQLite side and harder to test.
         let rows = if let Some(s) = since_ms {
-            sqlx::query(
-                "SELECT name, (end_ms - start_ms) AS dur_ms FROM spans WHERE end_ms >= ?",
-            )
-            .bind(s)
-            .fetch_all(&self.pool)
-            .await?
+            sqlx::query("SELECT name, (end_ms - start_ms) AS dur_ms FROM spans WHERE end_ms >= ?")
+                .bind(s)
+                .fetch_all(&self.pool)
+                .await?
         } else {
             sqlx::query("SELECT name, (end_ms - start_ms) AS dur_ms FROM spans")
                 .fetch_all(&self.pool)

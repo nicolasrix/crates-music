@@ -233,11 +233,7 @@ async fn submission_scrobble_appends_event_log_with_client_time() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let recent = state
-        .event_store()
-        .recently_played(10, None)
-        .await
-        .unwrap();
+    let recent = state.event_store().recently_played(10, None).await.unwrap();
     assert_eq!(recent.len(), 1, "exactly one scrobble event should land");
     assert_eq!(recent[0].track_id.as_str(), "track-evt");
     assert_eq!(
@@ -275,11 +271,7 @@ async fn now_playing_ping_does_not_append_event_log() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let recent = state
-        .event_store()
-        .recently_played(10, None)
-        .await
-        .unwrap();
+    let recent = state.event_store().recently_played(10, None).await.unwrap();
     assert!(recent.is_empty(), "now-playing pings must not log");
 }
 
@@ -330,7 +322,11 @@ async fn submission_scrobble_during_active_session_stamps_session_id() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let by_sess = state.event_store().by_session(&sid, 10).await.unwrap();
-    assert_eq!(by_sess.len(), 1, "scrobble must be tagged with the active session");
+    assert_eq!(
+        by_sess.len(),
+        1,
+        "scrobble must be tagged with the active session"
+    );
     assert_eq!(by_sess[0].track_id.as_str(), "track-in-session");
 }
 

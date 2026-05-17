@@ -61,9 +61,9 @@ use music_recommend::metadata::{MetadataStore, TrackMetadata};
 use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
-use music_recommend::{MmrCandidate, mmr_rerank};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
+use music_recommend::{MmrCandidate, mmr_rerank};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -199,9 +199,14 @@ async fn main() -> Result<()> {
     };
     eprintln!("model_version: {model_version}");
 
-    let seed_pool = sample_seed_pool(&embedding_store, &model_version, args.iterations, args.rng_seed)
-        .await
-        .context("sampling seed track ids")?;
+    let seed_pool = sample_seed_pool(
+        &embedding_store,
+        &model_version,
+        args.iterations,
+        args.rng_seed,
+    )
+    .await
+    .context("sampling seed track ids")?;
     eprintln!("seed pool: {} tracks", seed_pool.len());
     if seed_pool.is_empty() {
         return Err(anyhow!(
@@ -333,7 +338,9 @@ async fn run_one(
     //    going to walk the candidates. For cold mode the filter
     //    rarely drops anything, but use the same N so the bench is
     //    apples-to-apples between modes.
-    let internal_n = top_n.saturating_mul(FILTER_BUFFER_FACTOR).min(MAX_INTERNAL_N);
+    let internal_n = top_n
+        .saturating_mul(FILTER_BUFFER_FACTOR)
+        .min(MAX_INTERNAL_N);
 
     // --- timer starts: ANN query + metadata fetch + filter walk ---
     let t0 = Instant::now();
@@ -343,8 +350,7 @@ async fn run_one(
     // 6. Build the per-candidate metadata lookup. Single SQLite hit
     //    that covers queue ids + candidate ids — same shape as the
     //    handler's `build_filter_with_metadata`.
-    let mut needed: Vec<TrackId> =
-        Vec::with_capacity(queue_track_ids.len() + candidates.len());
+    let mut needed: Vec<TrackId> = Vec::with_capacity(queue_track_ids.len() + candidates.len());
     needed.extend(queue_track_ids.iter().cloned());
     needed.extend(candidates.iter().map(|c| c.track_id.clone()));
     let metadata_map = metadata.get_many(&needed).await?;
@@ -824,9 +830,12 @@ fn percentile_f32(sorted: &[f32], p: f64) -> Option<f64> {
         return None;
     }
     // Nearest-rank: `idx = ceil(p * n) - 1`, clamped.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1))
-        .min(sorted.len() - 1);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1)).min(sorted.len() - 1);
     Some(f64::from(sorted[idx]))
 }
 
@@ -834,9 +843,12 @@ fn percentile_u64(sorted: &[u64], p: f64) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1))
-        .min(sorted.len() - 1);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1)).min(sorted.len() - 1);
     #[allow(clippy::cast_precision_loss)]
     Some(sorted[idx] as f64)
 }
@@ -895,9 +907,12 @@ fn percentile_f64(sorted: &[f64], p: f64) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1))
-        .min(sorted.len() - 1);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let idx = (((p * sorted.len() as f64).ceil() as usize).saturating_sub(1)).min(sorted.len() - 1);
     Some(sorted[idx])
 }
 
@@ -923,7 +938,8 @@ fn latency_summary(values: &[u64]) -> LatencySummary {
 
 fn print_table(r: &Report) {
     let opt = |x: Option<f64>| x.map_or_else(|| "  -   ".to_string(), |v| format!("{v:>7.4}"));
-    let opt_us = |x: Option<f64>| x.map_or_else(|| "    -    ".to_string(), |v| format!("{v:>9.1}"));
+    let opt_us =
+        |x: Option<f64>| x.map_or_else(|| "    -    ".to_string(), |v| format!("{v:>9.1}"));
 
     println!();
     println!("=== recommend-bench ===");
@@ -983,10 +999,7 @@ fn print_table(r: &Report) {
         opt(r.drop_.min),
         opt(r.drop_.max),
     );
-    println!(
-        "admit_dist (1-sim)        {}",
-        opt(r.admit.mean_distance),
-    );
+    println!("admit_dist (1-sim)        {}", opt(r.admit.mean_distance),);
     println!();
     println!(
         "tax/call    {:>4} {} {} {}     -    {}",
@@ -1080,4 +1093,3 @@ mod tests {
         assert_eq!(s.max, Some(10_000.0));
     }
 }
-

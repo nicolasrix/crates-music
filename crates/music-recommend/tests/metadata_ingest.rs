@@ -19,12 +19,10 @@ use music_core::TrackId;
 use music_recommend::ann::AnnIndex;
 use music_recommend::embedder::{EmbedderClient, EmbedderConfig};
 use music_recommend::ingest::{
-    AudioFetcher, FetchError, IngestOutcome, IngestWorker, IngestWorkerConfig,
-    MetadataFetcher, MetadataIngest,
+    AudioFetcher, FetchError, IngestOutcome, IngestWorker, IngestWorkerConfig, MetadataFetcher,
+    MetadataIngest,
 };
-use music_recommend::metadata::{
-    MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
-};
+use music_recommend::metadata::{MetadataStore, TrackMetadata, backfill_metadata, normalize_title};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use serde_json::json;
@@ -279,7 +277,10 @@ async fn metadata_persisted_even_when_audio_fetch_fails() {
     assert_eq!(metadata_fetcher.calls(), 1);
     // Metadata row IS present despite audio failure.
     let m = metadata.get(&TrackId::from("t1")).await.unwrap();
-    assert!(m.is_some(), "metadata row should be written before audio fetch");
+    assert!(
+        m.is_some(),
+        "metadata row should be written before audio fetch"
+    );
 }
 
 #[tokio::test]
@@ -321,10 +322,7 @@ async fn metadata_upsert_is_idempotent_across_re_ingest() {
     // semantic. To force a real re-ingest, mark_failed + reset_failed.
     store
         .mark_failed(
-            &music_recommend::EmbeddingKey::new(
-                TrackId::from("t1"),
-                ModelVersion::from("stub-v1"),
-            ),
+            &music_recommend::EmbeddingKey::new(TrackId::from("t1"), ModelVersion::from("stub-v1")),
             "test forced",
         )
         .await
@@ -346,19 +344,14 @@ async fn metadata_upsert_is_idempotent_across_re_ingest() {
 /// what the worker would produce: status='done' under model_version.
 async fn seed_done_embeddings(store: &EmbeddingStore, ids: &[&str]) {
     for id in ids {
-        let key = music_recommend::EmbeddingKey::new(
-            TrackId::from(*id),
-            ModelVersion::from("stub-v1"),
-        );
+        let key =
+            music_recommend::EmbeddingKey::new(TrackId::from(*id), ModelVersion::from("stub-v1"));
         store.enqueue(&key).await.unwrap();
         // Bypass the worker — we just want the row to look done.
         let dim = 4;
         let v = vec![0.1f32; dim];
         store
-            .mark_done(&music_recommend::Embedding {
-                key,
-                vector: v,
-            })
+            .mark_done(&music_recommend::Embedding { key, vector: v })
             .await
             .unwrap();
     }
@@ -466,10 +459,8 @@ async fn backfill_only_walks_rows_for_the_given_model_version() {
     let (store, metadata, _dir) = fresh_stores().await;
     // One row under stub-v1, one row under a different version.
     seed_done_embeddings(&store, &["t1"]).await;
-    let other_key = music_recommend::EmbeddingKey::new(
-        TrackId::from("t2"),
-        ModelVersion::from("other-v1"),
-    );
+    let other_key =
+        music_recommend::EmbeddingKey::new(TrackId::from("t2"), ModelVersion::from("other-v1"));
     store.enqueue(&other_key).await.unwrap();
     store
         .mark_done(&music_recommend::Embedding {
