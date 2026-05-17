@@ -15,6 +15,7 @@ This directory is the onboarding entry point. Follow the docs in this order:
 | [CONFIGURATION.md](./CONFIGURATION.md) | Every field of `gateway.toml`, all environment variables, and what each script in `scripts/` does |
 | [API.md](./API.md) | Every endpoint the gateway exposes, with example requests |
 | [TESTING.md](./TESTING.md) | How tests are organised; how to run a single test or the whole suite |
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Run the gateway + embedder in containers (`docker compose`). Operator guide. |
 
 ## Per-component reference
 

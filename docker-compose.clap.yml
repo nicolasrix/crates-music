@@ -1,0 +1,36 @@
+# CLAP-variant compose override.
+#
+# Use:
+#   cp docker/.env.example .env
+#   $EDITOR .env                       # set NAVIDROME_*, CLAP_CHECKPOINT_PATH
+#   docker compose -f docker-compose.yml -f docker-compose.clap.yml up --build
+#
+# Swaps the stub embedder for the CPU-CLAP variant and bind-mounts the
+# checkpoint file from the host. The gateway image is unchanged.
+#
+# ROCm GPU variant lives in a separate file (TBD); this one is the
+# CPU-only path — slow but hermetic and works on any x86-64 host.
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clap
+    image: crates-music/embedder-clap:dev
+    environment:
+      EMBEDDER_BACKEND: clap
+      CLAP_CHECKPOINT: /models/clap.pt
+      # OMP/MKL/NUMBA thread caps are set in the Dockerfile; uncomment
+      # to override per-deploy. Higher = faster first-load and per-track
+      # throughput on hosts with cores to spare.
+      # OMP_NUM_THREADS: 8
+      # MKL_NUM_THREADS: 8
+      # NUMBA_NUM_THREADS: 8
+    volumes:
+      # Bind-mount the checkpoint read-only. The .pt file is large
+      # (~2 GB for music_audioset_epoch_15) and licensed under
+      # research terms — operators provide it, we don't ship it.
+      - type: bind
+        source: ${CLAP_CHECKPOINT_PATH:?set CLAP_CHECKPOINT_PATH in .env to the host path of the .pt file}
+        target: /models/clap.pt
+        read_only: true
