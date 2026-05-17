@@ -55,3 +55,7 @@ services:
         source: ${CLAP_CHECKPOINT_PATH:?set CLAP_CHECKPOINT_PATH in .env to the host path of the .pt file}
         target: /models/clap.pt
         read_only: true
+    # The model lives on the GPU, but torch still keeps a sizeable CPU
+    # mirror for staging tensors + the MIOpen JIT pipeline. 6 GB
+    # observed safe; tighten once you've watched a sustained ingest run.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-6g}

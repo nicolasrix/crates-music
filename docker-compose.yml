@@ -36,6 +36,18 @@ services:
       embedder:
         condition: service_healthy
     restart: unless-stopped
+    # The gateway is mostly I/O bound (HTTP proxy + SQLite). 1 GB is
+    # plenty for the in-memory caches; bump via env if you turn the
+    # audio-cache budget way up.
+    mem_limit: ${GATEWAY_MEM_LIMIT:-1g}
+    # `docker logs` without rotation grows unbounded — one log4j-style
+    # incident eats the host disk. 10 MB × 3 files = 30 MB ceiling per
+    # service is generous for a single-user deploy.
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
 
   embedder:
     build:
@@ -57,6 +69,14 @@ services:
     expose:
       - "9000"
     restart: unless-stopped
+    # Stub backend is tiny (Python + numpy). The CLAP overrides bump
+    # this up to accommodate the ~2 GB model in float32.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
 
   # Minimal Navidrome stand-in for the smoke test. Returns just enough
   # JSON for `Subsonic::ping` to succeed so `/readyz` can flip healthy
@@ -88,6 +108,12 @@ services:
     expose:
       - "4533"
     restart: unless-stopped
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
 
 volumes:
   # Single named volume holds everything the gateway needs to persist:

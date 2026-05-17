@@ -90,6 +90,41 @@ The web client (Phase B follow-up) and operator-mounted certs can ride
 on the same env surface — see the `[server]`/`[oauth]` blocks in
 [`CONFIGURATION.md`](./CONFIGURATION.md) for the underlying TOML schema.
 
+## Resource limits & log rotation
+
+The compose files cap each container's memory and rotate its JSON log
+file by default. The intent is "an OOM in one container can't take the
+host down, and `docker logs` can't fill the disk." Defaults:
+
+| Service | Default `mem_limit` | Notes |
+|---|---|---|
+| `gateway` | `1g` | Mostly I/O bound. Bump if you raise the audio cache budget into the multi-GB range. |
+| `embedder` (stub) | `512m` | Tiny — numpy + a couple of buffers. |
+| `embedder` (CLAP CPU, `.clap.yml`) | `4g` | ~2 GB of float32 weights + librosa/torch working memory. |
+| `embedder` (CLAP ROCm, `.clap-rocm.yml`) | `6g` | Model lives on the GPU; CPU mirror + MIOpen JIT pipeline costs ~5 GB sustained. |
+| `navidrome-stub` (smoke profile) | `128m` | One-file Python server. |
+
+All capped via env in `.env`:
+
+```
+GATEWAY_MEM_LIMIT=2g
+EMBEDDER_MEM_LIMIT=8g     # honoured by base + both CLAP overrides
+```
+
+JSON log rotation is global:
+
+```
+LOG_MAX_SIZE=10m          # per file
+LOG_MAX_FILE=3            # rotated files retained
+```
+
+Logs are still streamed live via `docker compose logs -f`; rotation
+only governs the on-disk JSON tail.
+
+If a container hits its memory cap, Docker OOM-kills it and `restart:
+unless-stopped` brings it back. Check with `docker inspect <id> --format
+'{{.State.OOMKilled}}'` after a crash — if `true`, raise the cap.
+
 ## Volumes
 
 One named volume, `gw-data`, mounted at `/data` in the gateway container.

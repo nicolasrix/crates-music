@@ -34,3 +34,9 @@ services:
         source: ${CLAP_CHECKPOINT_PATH:?set CLAP_CHECKPOINT_PATH in .env to the host path of the .pt file}
         target: /models/clap.pt
         read_only: true
+    # Bumps the base 512m cap. CLAP holds ~2 GB of float32 weights in
+    # RAM plus working memory for librosa / torch; 4 GB is the working
+    # default observed across a few hours of ingest. Operators with a
+    # tighter host can lower via env once they've measured their
+    # particular checkpoint.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-4g}
