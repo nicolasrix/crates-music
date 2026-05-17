@@ -2,6 +2,8 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
+# Dev-machine-local cargo overrides (build.target-dir redirect).
+/.cargo/
 
 # Editor / OS
 .DS_Store
