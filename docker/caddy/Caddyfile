@@ -1,0 +1,64 @@
+# Caddy reverse proxy for the crates-music gateway.
+#
+# Terminates public TLS with a Let's Encrypt certificate (auto-renewed
+# every 60 days via DNS-01 against Cloudflare), then forwards to the
+# gateway container over the internal docker network.
+#
+# Required runtime env:
+#   CLOUDFLARE_API_TOKEN   — scoped Zone:DNS:Edit on example.com only
+#   GATEWAY_PUBLIC_HOST    — e.g. crates.example.com (the public name)
+#   GATEWAY_UPSTREAM       — e.g. gateway:8443 (the internal service:port)
+#   LE_CONTACT_EMAIL       — registration email for LE expiry warnings
+#
+# Switch to LE staging while testing by setting:
+#   ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory
+# (LE production rate-limits at 5 duplicate certs per week; staging
+# certs are not browser-trusted but exercise the same code path.)
+{
+	email {$LE_CONTACT_EMAIL}
+	# Default ACME endpoint is LE production. Override to staging via
+	# ACME_DIRECTORY=… in .env while iterating on the issuance flow.
+	acme_ca {$ACME_DIRECTORY:https://acme-v02.api.letsencrypt.org/directory}
+}
+
+{$GATEWAY_PUBLIC_HOST} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	# Gateway speaks HTTPS internally with a mkcert-issued self-signed
+	# cert. Skip verification on this hop — the connection lives
+	# entirely inside the docker network (gateway is `expose`d, not
+	# published to the host), so it's not exposed to the LAN. The
+	# public TLS guarantee lives at *this* boundary, not the loopback.
+	reverse_proxy https://{$GATEWAY_UPSTREAM} {
+		transport http {
+			tls_insecure_skip_verify
+		}
+
+		# X-Forwarded-For and X-Forwarded-Proto are set by reverse_proxy
+		# by default — don't restate them. X-Real-IP isn't a default,
+		# so we add it for the gateway's tracing layer (which prefers
+		# a single-IP field over parsing the XFF list).
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		# Don't leak the Caddy version in 4xx/5xx error pages.
+		-Server
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# HSTS deliberately commented out for first deploy. Turn on
+		# AFTER you've watched at least one renewal cycle succeed —
+		# browsers cache HSTS for `max-age` seconds, so a premature
+		# enable + cert mishap leaves clients unable to reach the
+		# site over plain HTTP for fallback.
+		# Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
