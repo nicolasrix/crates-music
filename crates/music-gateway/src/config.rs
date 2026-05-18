@@ -94,6 +94,13 @@ pub struct EmbedderConfigSection {
     /// 120-second audio clip on CPU can take 10+ seconds.
     #[serde(default = "default_embedder_timeout_secs")]
     pub timeout_seconds: u64,
+    /// Optional bearer token for split-host deployments. When set,
+    /// every outgoing request to the embedder carries
+    /// `Authorization: Bearer <token>`. Must match the embedder's
+    /// `EMBEDDER_BEARER_TOKEN`. Omit (or leave null) for same-host
+    /// deployments where the docker bridge is the trust boundary.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
 }
 
 fn default_embedder_timeout_secs() -> u64 {

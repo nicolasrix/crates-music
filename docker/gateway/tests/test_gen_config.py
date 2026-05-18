@@ -80,6 +80,39 @@ def test_embedder_timeout_override() -> None:
     assert parsed["embedder"]["timeout_seconds"] == 120
 
 
+def test_embedder_bearer_token_omitted_when_unset() -> None:
+    env = _minimum_env() | {"EMBEDDER_URL": "http://embedder:9000"}
+    parsed = tomllib.loads(build_config(env))
+    assert "bearer_token" not in parsed["embedder"]
+
+
+def test_embedder_bearer_token_emitted_when_set() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://gpu-box.lan:9000",
+        "EMBEDDER_BEARER_TOKEN": "shared-secret",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["embedder"]["bearer_token"] == "shared-secret"
+
+
+def test_embedder_bearer_token_empty_treated_as_unset() -> None:
+    # Empty env var is a common deploy mistake. Matches the embedder
+    # side, which also disables enforcement on empty.
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://embedder:9000",
+        "EMBEDDER_BEARER_TOKEN": "",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert "bearer_token" not in parsed["embedder"]
+
+
+def test_embedder_bearer_token_ignored_when_url_unset() -> None:
+    # A token without a URL is meaningless — no [embedder] section at all.
+    env = _minimum_env() | {"EMBEDDER_BEARER_TOKEN": "stray"}
+    parsed = tomllib.loads(build_config(env))
+    assert "embedder" not in parsed
+
+
 def test_oauth_redirect_uris_comma_separated() -> None:
     env = _minimum_env() | {
         "OAUTH_WEB_REDIRECT_URIS": (

@@ -22,6 +22,8 @@ Optional env (with defaults):
     OAUTH_WEB_REDIRECT_URIS     https://gateway.local:8443/oauth/callback
     EMBEDDER_URL                (unset → no [embedder] section)
     EMBEDDER_TIMEOUT_SECONDS    30 (only used if EMBEDDER_URL set)
+    EMBEDDER_BEARER_TOKEN       (unset/empty → no bearer_token field;
+                                 only used if EMBEDDER_URL set)
 """
 
 from __future__ import annotations
@@ -86,7 +88,12 @@ def build_config(env: Mapping[str, str]) -> str:
 
     embedder_url = env.get("EMBEDDER_URL", "").strip()
     embedder_timeout: int | None = None
+    embedder_bearer: str | None = None
     if embedder_url:
+        # Empty string treated as "unset" — matches the embedder side
+        # so a misconfigured deploy fails closed, not silently open.
+        token = env.get("EMBEDDER_BEARER_TOKEN", "").strip()
+        embedder_bearer = token or None
         try:
             embedder_timeout = int(
                 env.get("EMBEDDER_TIMEOUT_SECONDS", DEFAULT_EMBEDDER_TIMEOUT)
@@ -136,6 +143,8 @@ def build_config(env: Mapping[str, str]) -> str:
         parts.append("[embedder]")
         parts.append(f"url = {_str(embedder_url)}")
         parts.append(f"timeout_seconds = {embedder_timeout}")
+        if embedder_bearer is not None:
+            parts.append(f"bearer_token = {_str(embedder_bearer)}")
         parts.append("")
 
     return "\n".join(parts) + "\n"

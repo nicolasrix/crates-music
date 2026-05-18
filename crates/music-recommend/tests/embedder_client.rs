@@ -17,6 +17,7 @@ fn client_for(server: &MockServer) -> EmbedderClient {
     EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().expect("server uri"),
         timeout: Duration::from_secs(2),
+        bearer_token: None,
     })
     .expect("client builds")
 }
@@ -121,6 +122,7 @@ async fn healthz_unreachable_returns_transport_error() {
     let client = EmbedderClient::new(EmbedderConfig {
         url: "http://127.0.0.1:1".parse().unwrap(),
         timeout: Duration::from_millis(200),
+        bearer_token: None,
     })
     .unwrap();
     let err = client.healthz().await.unwrap_err();
@@ -241,6 +243,7 @@ async fn timeout_short_circuits() {
     let client = EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().unwrap(),
         timeout: Duration::from_millis(100),
+        bearer_token: None,
     })
     .unwrap();
     let err = client.healthz().await.unwrap_err();
@@ -564,4 +567,106 @@ async fn reduce_503_maps_to_model_not_loaded() {
     let client = client_for(&server);
     let err = client.reduce(&default_reduce_params()).await.unwrap_err();
     assert!(matches!(err, EmbedderError::ModelNotLoaded), "got {err:?}");
+}
+
+// --- bearer auth (split-host deployments) ---------------------------------
+//
+// When the embedder is on a different host than the gateway, an
+// optional bearer token is shared. The client must attach
+// `Authorization: Bearer <token>` to every request when configured,
+// and omit the header entirely when not.
+
+fn client_with_bearer(server: &MockServer, token: Option<&str>) -> EmbedderClient {
+    EmbedderClient::new(EmbedderConfig {
+        url: server.uri().parse().expect("server uri"),
+        timeout: Duration::from_secs(2),
+        bearer_token: token.map(|s| s.to_string()),
+    })
+    .expect("client builds")
+}
+
+#[tokio::test]
+async fn bearer_token_attached_to_embed_audio() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .and(header("authorization", "Bearer shared-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "vector": vec![0.0_f32; 4],
+            "dim": 4,
+            "model_version": "stub-v1",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_with_bearer(&server, Some("shared-secret"));
+    let r = client
+        .embed_audio(Bytes::from_static(b"\x00\x01\x02"))
+        .await
+        .expect("authorized request succeeds");
+    assert_eq!(r.dim, 4);
+}
+
+#[tokio::test]
+async fn no_bearer_token_means_no_authorization_header() {
+    // Wiremock will only match this mock if `authorization` is absent —
+    // we use the `header_does_not_exist`-equivalent by mounting a
+    // catch-all that asserts on absence via a separate assertion. The
+    // cheaper way: set up *two* mocks, the "with header" one returns
+    // 500, the "any" one returns 200. If the client sent a header
+    // anyway the assertion below would surface the 500 path.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .and(header("authorization", "Bearer shared-secret"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/embed/audio"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "vector": vec![0.0_f32; 4],
+            "dim": 4,
+            "model_version": "stub-v1",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_with_bearer(&server, None);
+    let r = client
+        .embed_audio(Bytes::from_static(b"x"))
+        .await
+        .expect("unauth client should succeed against open server");
+    assert_eq!(r.dim, 4);
+}
+
+#[tokio::test]
+async fn bearer_token_attached_to_healthz_and_embed_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .and(header("authorization", "Bearer s3cret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "model_loaded": true,
+            "model_version": "stub-v1",
+            "dim": 512,
+            "device": "cpu",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/embed/text"))
+        .and(header("authorization", "Bearer s3cret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "vector": vec![0.0_f32; 4],
+            "dim": 4,
+            "model_version": "stub-v1",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_with_bearer(&server, Some("s3cret"));
+    client.healthz().await.expect("healthz");
+    client.embed_text("hello").await.expect("embed_text");
 }

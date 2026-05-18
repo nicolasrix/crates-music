@@ -1756,6 +1756,7 @@ mod station {
         let client = EmbedderClient::new(EmbedderConfig {
             url,
             timeout: Duration::from_secs(2),
+            bearer_token: None,
         })
         .expect("client builds");
         let health = EmbedderHealth {

@@ -333,6 +333,100 @@ def test_reduce_does_not_require_model_loaded(
     assert r.status_code == 200, r.text
 
 
+# --- bearer auth (optional, for split-host deployments) -------------------
+#
+# When EMBEDDER_BEARER_TOKEN is set in the environment the embedder
+# requires `Authorization: Bearer <token>` on /embed/* and /reduce.
+# /healthz stays open — boot probes shouldn't need to be told the
+# secret, and a 200 from /healthz doesn't leak compute time.
+
+
+@pytest.fixture
+def secured_app(monkeypatch):
+    monkeypatch.setenv("EMBEDDER_BEARER_TOKEN", "shared-secret")
+    app = build_app()
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    app.dependency_overrides[get_embedder] = lambda: stub
+    return app
+
+
+def test_auth_healthz_stays_open_when_token_set(secured_app):
+    client = TestClient(secured_app)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+
+
+def test_auth_embed_audio_401_without_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_embed_audio_401_with_wrong_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={
+            "content-type": "application/octet-stream",
+            "Authorization": "Bearer not-the-token",
+        },
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_embed_audio_200_with_correct_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={
+            "content-type": "application/octet-stream",
+            "Authorization": "Bearer shared-secret",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_auth_embed_text_401_without_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post("/embed/text", json={"text": "hello"})
+    assert r.status_code == 401, r.text
+
+
+def test_auth_reduce_401_without_bearer(secured_app, monkeypatch, tmp_path):
+    # /reduce also opens the gateway's DB file — privileged.
+    monkeypatch.setattr("embedder.reduce.run", lambda **_: ("pv", 0))
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()
+    client = TestClient(secured_app)
+    r = client.post(
+        "/reduce",
+        json={"db_path": str(db_file), "model_version": "stub-v1"},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_no_token_set_allows_everything(monkeypatch):
+    # Default behaviour: env var absent → no enforcement, calls pass
+    # through. Single-host deployments don't need to set anything.
+    monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
+    app = build_app()
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    app.dependency_overrides[get_embedder] = lambda: stub
+    client = TestClient(app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_vectors_are_l2_normalized(app_with_loaded_stub):
     # CLAP outputs are approximately L2-normalized. The stub follows
     # the same convention so callers can assume cosine ≈ dot product.

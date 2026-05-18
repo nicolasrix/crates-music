@@ -81,6 +81,7 @@ fn build_client(server: &MockServer) -> EmbedderClient {
     EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().expect("server uri"),
         timeout: Duration::from_secs(5),
+        bearer_token: None,
     })
     .expect("client builds")
 }

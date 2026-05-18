@@ -506,6 +506,127 @@ been developed and tested on AMD; CUDA-flavoured CLAP would mean a
 third Dockerfile and a different wheel index, and there's no
 hardware to validate it against.
 
+## Split-host deployment (gateway + remote embedder)
+
+Common homelab topology: the server box (NAS, mini PC) runs the
+gateway and Navidrome; a separate workstation has the GPU and runs
+the embedder. The embedder is a stateless HTTP service, so this is a
+configuration concern, not an architectural one — but the default
+`docker-compose.yml` assumes co-located containers, so two new
+compose files exist for the split layout:
+
+| File | Purpose |
+|---|---|
+| `docker-compose.gateway-only.yml` | Just the gateway. Requires `EMBEDDER_URL` pointing at the remote embedder. |
+| `docker-compose.embedder-only.yml` | Just the embedder, with its port published on the host network. Stacks with `docker-compose.clap.yml` / `docker-compose.clap-rocm.yml` for real inference. |
+
+The gateway dials the embedder over the LAN; the embedder doesn't
+need a route back. Audio bytes (~3–10 MB per track) ride the request,
+so an ingest run is bandwidth-cheap compared to Navidrome serving
+those same bytes to the gateway in the first place.
+
+### Sharing a bearer token
+
+The embedder accepts unauthenticated requests by default. On a
+trusted LAN with no untrusted devices that's defensible (same threat
+model as Navidrome). Split-host adds at least one network hop where
+the embedder is reachable from anything that can route to it, so a
+shared bearer token is the recommended defense:
+
+```bash
+# On either host — pick one, share with the other via your usual
+# secrets path (password manager, etc).
+openssl rand -hex 32
+# e.g. 6a9c… (32 bytes hex; 64 chars)
+```
+
+Set `EMBEDDER_BEARER_TOKEN=<same value>` in the `.env` on **both**
+hosts. The gateway attaches `Authorization: Bearer <token>` to every
+outgoing call; the embedder rejects requests without the matching
+token with 401. `/healthz` stays open on the embedder so boot probes
+don't need the secret.
+
+When unset on both sides, the embedder runs un-authenticated — fine
+for `localhost` co-located deploys, not recommended otherwise.
+
+### Bringing up the GPU box (embedder)
+
+```bash
+# On the GPU box — clone the repo (the embedder image builds from
+# this checkout's Dockerfile + services/embedder/).
+git clone https://github.com/<you>/crates-music
+cd crates-music
+
+cp docker/.env.example .env
+$EDITOR .env
+# Set:
+#   EMBEDDER_BEARER_TOKEN=<the shared secret>
+#   EMBEDDER_PORT=9000             # default, change if port-conflict
+#   CLAP_CHECKPOINT_PATH=/path/to/clap.pt   # if running CLAP-ROCm
+
+# Bring it up — pick one of:
+#
+# (a) stub backend, no GPU, deterministic vectors (dev / smoke):
+docker compose -f docker-compose.embedder-only.yml up --build
+#
+# (b) CLAP CPU inference:
+docker compose -f docker-compose.embedder-only.yml \
+               -f docker-compose.clap.yml up --build
+#
+# (c) CLAP ROCm GPU inference (this is the whole point):
+docker compose -f docker-compose.embedder-only.yml \
+               -f docker-compose.clap-rocm.yml up --build
+
+# Confirm from the gateway box that the embedder is reachable:
+curl http://gpu-box.lan:9000/healthz
+# {"status":"ok","model_loaded":true,"model_version":"clap-...","dim":512,"device":"cuda"}
+```
+
+`/healthz` works without a bearer token — that's intentional. The
+inference endpoints (`/embed/audio`, `/embed/text`, `/reduce`)
+require one when configured.
+
+### Bringing up the gateway box (no local embedder)
+
+```bash
+cd crates-music
+cp docker/.env.example .env
+$EDITOR .env
+# Set:
+#   NAVIDROME_URL=http://nav.lan:4533
+#   NAVIDROME_USERNAME=alice
+#   NAVIDROME_PASSWORD=wonderland
+#   EMBEDDER_URL=http://gpu-box.lan:9000       # the GPU host
+#   EMBEDDER_BEARER_TOKEN=<the same secret as the GPU box>
+
+docker compose -f docker-compose.gateway-only.yml up --build
+```
+
+The gateway logs `embedder: ready model=… dim=512` on first probe.
+If the embedder is unreachable at boot, the gateway logs a warning
+and starts in degraded mode (recommendation endpoints fall back to
+tag-only similarity); restart the gateway after fixing connectivity.
+
+### Limitations of the split-host layout
+
+- **No `/reduce` (UMAP projection).** The reducer opens the
+  gateway's `gateway-state.recommend.sqlite` directly — it needs the
+  file on the same host. In split-host mode that file lives on the
+  gateway box, not the embedder box. Audio + text embedding are
+  unaffected (bytes ride the request). The 2-D projection feature on
+  the diagnostics page just shows "no projection yet" until you do
+  one of: run the gateway and embedder on the same host, mount the
+  recommend SQLite over a network filesystem (NFS / SMB), or move
+  the reducer to the gateway side. None of those are wired today.
+- **No automatic failover.** If the GPU box goes down, ingest stalls
+  until it comes back. Existing embeddings keep working; the
+  recommender doesn't need the embedder to serve `/v1/recommend/next`
+  for already-embedded tracks.
+- **No TLS on the embedder hop by default.** http:// over the LAN is
+  the documented path. If you need TLS, front the embedder with
+  Caddy/Traefik on the GPU box and point `EMBEDDER_URL` at the
+  https:// fronting URL.
+
 ## Known limitations (Phase A + B)
 
 - **No multi-arch builds.** x86-64 only; ARM hosts (Pi 5, Apple
