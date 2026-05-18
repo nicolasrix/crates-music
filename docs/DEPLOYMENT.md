@@ -256,6 +256,107 @@ bearer tokens, certs, and embeddings all carry over. The container
 restarts in a few seconds — the rebuild is the long part (Rust
 release build of the workspace).
 
+Run a backup before any non-trivial upgrade — see [Backups](#backups).
+
+## Backups
+
+Two scripts under `scripts/` snapshot and restore the gateway's
+irreplaceable state:
+
+| Script | Purpose |
+|---|---|
+| `scripts/backup.sh <state-dir> <output-dir>` | Online snapshot to a timestamped `.tar.gz`. Safe while the gateway is running. |
+| `scripts/restore.sh [--force] <archive> <dest-dir>` | Verify checksums and restore. Refuses to clobber a non-empty dest without `--force`. |
+
+**What's in a backup:**
+
+- `gateway-state.sqlite` — OAuth tokens, master password, sync state, play counts.
+- `gateway-state.recommend.sqlite` — CLAP embeddings + ingest queue (skipped if absent).
+- `certs/cert.pem` + `certs/key.pem` — TLS keypair (losing it means re-trusting on every paired device).
+- `manifest.json` — sha256 of each file. Restore aborts if any checksum doesn't match.
+
+**Deliberately not backed up — all regenerable:**
+
+- `gateway-cache.sqlite` (L2 metadata cache — refetches from Navidrome).
+- `gateway-state.traces.sqlite` (diagnostics ring — regenerates organically).
+- `gateway-state.ann` + `.ann.keys` (HNSW mmap — rebuilds at boot from `.recommend.sqlite`).
+
+### Running a backup
+
+The compose stack mounts the gateway state at `/data` inside the container
+and the `gw-data` named volume on the host. The scripts run on the host
+against the volume's mount point — they don't need a running gateway,
+just access to the files.
+
+```bash
+# Find where docker put the volume on the host.
+STATE="$(docker volume inspect crates-music_gw-data --format '{{.Mountpoint}}')"
+
+mkdir -p /var/backups/crates-music
+scripts/backup.sh "$STATE" /var/backups/crates-music
+```
+
+Output:
+
+```
+snapshotting gateway-state.sqlite...
+snapshotting gateway-state.recommend.sqlite...
+copying certs...
+writing manifest...
+writing /var/backups/crates-music/crates-music-backup-20260518T090000Z.tar.gz...
+done: /var/backups/crates-music/crates-music-backup-20260518T090000Z.tar.gz (12M)
+```
+
+The archive is chmod 0600 — it contains the TLS private key and OAuth
+refresh tokens. Anyone who can read it owns the deployment.
+
+### Restoring
+
+```bash
+# Stop the gateway first — restoring over open DBs corrupts both.
+docker compose stop gateway
+
+# Wipe the volume's data and restore into it.
+STATE="$(docker volume inspect crates-music_gw-data --format '{{.Mountpoint}}')"
+sudo rm -rf "$STATE"/*
+sudo scripts/restore.sh /var/backups/crates-music/crates-music-backup-20260518T090000Z.tar.gz "$STATE"
+
+docker compose start gateway
+```
+
+Restore verifies every file's sha256 against `manifest.json` before
+placing it. A corrupted archive fails before any state on disk is
+touched.
+
+### Cron snippet (daily, keep last 14)
+
+```cron
+# m h dom mon dow command
+0 4 * * * STATE=$(docker volume inspect crates-music_gw-data --format '{{.Mountpoint}}') && /opt/crates-music/scripts/backup.sh "$STATE" /var/backups/crates-music >> /var/log/crates-music-backup.log 2>&1
+5 4 * * * find /var/backups/crates-music -name 'crates-music-backup-*.tar.gz' -mtime +14 -delete
+```
+
+The two lines are separated by a minute so the deletion runs after
+the new backup lands — that way a backup failure leaves you with the
+old set rather than nothing.
+
+### Restore drill
+
+Untested backups aren't backups. The roundtrip test under
+`scripts/tests/backup-roundtrip.sh` exercises the round trip against
+synthetic fixtures and runs in under a second:
+
+```bash
+bash scripts/tests/backup-roundtrip.sh
+# all checks passed
+```
+
+For a real-data drill: take a backup, restore it into a *separate*
+state directory, point a second gateway instance at it (different
+host port), and confirm OAuth login + playback work. That's the only
+way to know your backup is actually viable; the in-tree test only
+proves the *mechanism* is sound, not that the data on disk today is.
+
 ## Debugging
 
 Show recent logs:
