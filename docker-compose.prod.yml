@@ -16,11 +16,18 @@
 #
 # Required env (in .env alongside this file, mode 0600):
 #   NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD
-#   GATEWAY_PUBLIC_HOST     — public hostname (e.g. crates.example.com)
+#   GATEWAY_PUBLIC_HOST     — bare public hostname (e.g. crates.example.com),
+#                             used as the Caddy site address + TLS SNI
+#   GATEWAY_PUBLIC_BASE_URL — full URL clients use, including port if non-443
+#                             (e.g. https://crates.example.com:8443).
+#                             Drives the OAuth redirect_uri.
 #   CLOUDFLARE_API_TOKEN    — scoped Zone:DNS:Edit on the parent zone only
 #   LE_CONTACT_EMAIL        — LE registration + expiry-warning recipient
 #
 # Optional env:
+#   CADDY_HTTPS_PORT        — alt HTTPS port when 443 is taken (the NAS host).
+#                             Defaults to 443. Whatever you pick must
+#                             also appear in GATEWAY_PUBLIC_BASE_URL.
 #   EMBEDDER_URL            — split-host: remote embedder URL
 #   EMBEDDER_BEARER_TOKEN   — shared with the embedder host
 #   ACME_DIRECTORY          — set to staging while iterating on the flow
@@ -34,15 +41,21 @@ services:
     container_name: crates-caddy
     restart: unless-stopped
     ports:
-      # 80 is needed for the HTTPS redirect and for LE's HTTP-01
-      # fallback (we use DNS-01 by default, but Caddy's ACME client
-      # treats HTTP-01 as a backup if DNS-01 fails — leaving :80 open
-      # makes that fallback work).
-      - "80:80"
-      - "443:443"
-      # HTTP/3 over QUIC. Free latency win on mobile. Omit if you'd
-      # rather not open UDP at the firewall.
-      - "443:443/udp"
+      # HTTPS port is env-driven: default 443 for local dev, override
+      # via CADDY_HTTPS_PORT=8443 on the NAS host where :443 is taken by
+      # an existing reverse proxy (Traefik in our homelab). The same
+      # value is also exposed inside the container — Caddyfile reads
+      # CADDY_HTTPS_PORT to know what to bind.
+      #
+      # NOTE: we no longer publish :80. With DNS-01 issuance the HTTP-01
+      # fallback is unused, and without :80 there's no HTTP→HTTPS
+      # redirect — clients must use the explicit https://host:port URL.
+      # That's reflected in OAUTH_WEB_REDIRECT_URIS below.
+      #
+      # NOTE: HTTP/3 / QUIC is omitted. UDP doesn't help when we're
+      # already on a non-default port (clients fall back to TCP for
+      # the first connection anyway); revisit if mobile clients ship.
+      - "${CADDY_HTTPS_PORT:-443}:${CADDY_HTTPS_PORT:-443}"
     volumes:
       # Caddyfile is baked into the image (see docker/caddy/Dockerfile)
       # so no bind mount needed. Behaviour is parametrized by env vars.
@@ -65,6 +78,7 @@ services:
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env}
       LE_CONTACT_EMAIL: ${LE_CONTACT_EMAIL:?set LE_CONTACT_EMAIL in .env}
       ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+      CADDY_HTTPS_PORT: ${CADDY_HTTPS_PORT:-443}
     depends_on:
       gateway:
         condition: service_started
@@ -89,9 +103,12 @@ services:
       # and bring up an embedder service via one of the clap overrides.
       EMBEDDER_URL: ${EMBEDDER_URL:?set EMBEDDER_URL in .env}
       EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
-      # OAuth redirect must match the public host Caddy terminates at,
-      # otherwise the browser-side callback URL doesn't validate.
-      OAUTH_WEB_REDIRECT_URIS: https://${GATEWAY_PUBLIC_HOST}/oauth/callback
+      # OAuth redirect must match the URL the browser actually loads,
+      # *including the port* when it isn't the default 443. The base
+      # URL is a separate env var (rather than derived from HOST+PORT)
+      # because doing the omit-port-when-443 conditional inside compose
+      # interpolation is fiddly — spelling it out once is clearer.
+      OAUTH_WEB_REDIRECT_URIS: ${GATEWAY_PUBLIC_BASE_URL:?set GATEWAY_PUBLIC_BASE_URL in .env}/oauth/callback
       GATEWAY_HOSTNAME: ${GATEWAY_PUBLIC_HOST}
       RUST_LOG: ${RUST_LOG:-info,music_gateway=info,sqlx=warn}
     volumes:
