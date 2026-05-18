@@ -32,11 +32,7 @@ impl PlayHistoryStore {
     /// wall-clock millisecond timestamp the client recorded for the
     /// listen — we trust it; the recommender doesn't care about
     /// sub-minute precision.
-    pub async fn record_submission(
-        &self,
-        track_id: &TrackId,
-        played_at_ms: i64,
-    ) -> Result<()> {
+    pub async fn record_submission(&self, track_id: &TrackId, played_at_ms: i64) -> Result<()> {
         sqlx::query(
             "INSERT INTO play_history (track_id, last_played_ms)
              VALUES (?, ?)

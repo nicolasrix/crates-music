@@ -1218,12 +1218,28 @@ async fn from_any_mmr_prefers_fresh_artist_at_close_relevance() {
     ann.upsert(&TrackId::from("seed"), &unit_at(0)).unwrap();
     // `same` is nearly aligned with the seed direction.
     let same_vec: Vec<f32> = (0..DIM)
-        .map(|i| if i == 0 { 0.98 } else if i == 1 { 0.199 } else { 0.0 })
+        .map(|i| {
+            if i == 0 {
+                0.98
+            } else if i == 1 {
+                0.199
+            } else {
+                0.0
+            }
+        })
         .collect();
     ann.upsert(&TrackId::from("same"), &same_vec).unwrap();
     // `fresh` is a bit further from the seed direction.
     let fresh_vec: Vec<f32> = (0..DIM)
-        .map(|i| if i == 0 { 0.95 } else if i == 1 { 0.312 } else { 0.0 })
+        .map(|i| {
+            if i == 0 {
+                0.95
+            } else if i == 1 {
+                0.312
+            } else {
+                0.0
+            }
+        })
         .collect();
     ann.upsert(&TrackId::from("fresh"), &fresh_vec).unwrap();
     state
@@ -1477,7 +1493,10 @@ async fn similar_albums_excludes_seed_album_and_returns_others() {
     let body = read_json(resp).await;
     assert_eq!(body["all_seeds_unindexed"], false);
     let results = body["results"].as_array().expect("results array");
-    assert!(!results.is_empty(), "should aggregate hits into other albums");
+    assert!(
+        !results.is_empty(),
+        "should aggregate hits into other albums"
+    );
     for r in results {
         assert_ne!(r["album_id"], "alb_a", "seed album must be excluded");
         // Each item must carry a numeric score and a supporting count.
@@ -1737,6 +1756,7 @@ mod station {
         let client = EmbedderClient::new(EmbedderConfig {
             url,
             timeout: Duration::from_secs(2),
+            bearer_token: None,
         })
         .expect("client builds");
         let health = EmbedderHealth {
@@ -1757,9 +1777,7 @@ mod station {
         Mock::given(method("POST"))
             .and(path("/embed/text"))
             .and(body_json(json!({ "text": "sunny afternoon" })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(fake_embed_response(unit_at(3))),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_embed_response(unit_at(3))))
             .mount(&server)
             .await;
 
@@ -1773,9 +1791,7 @@ mod station {
 
         let app = build_router(state);
         let resp = app
-            .oneshot(auth_get(
-                "/v1/recommend/station?text=sunny+afternoon&n=3",
-            ))
+            .oneshot(auth_get("/v1/recommend/station?text=sunny+afternoon&n=3"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1815,9 +1831,8 @@ mod station {
         // Whitespace-only is also rejected — it would be a meaningless
         // CLAP query and we don't want to burn a sidecar round-trip on it.
         let server2 = MockServer::start().await;
-        let app = build_router(
-            build_state_with_embedder(test_config(), ready_handle(&server2)).await,
-        );
+        let app =
+            build_router(build_state_with_embedder(test_config(), ready_handle(&server2)).await);
         let resp = app
             .oneshot(auth_get("/v1/recommend/station?text=%20%20&n=3"))
             .await

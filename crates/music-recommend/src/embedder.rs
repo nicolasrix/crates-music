@@ -62,6 +62,13 @@ pub fn parse_server_timing(header: &str) -> Vec<(String, f64)> {
 pub struct EmbedderConfig {
     pub url: Url,
     pub timeout: Duration,
+    /// Optional shared secret for split-host deployments (gateway and
+    /// embedder on different machines, reachable over the LAN). When
+    /// `Some`, the client attaches `Authorization: Bearer <token>` to
+    /// every outgoing request. When `None`, no auth header is sent —
+    /// suitable for single-host deployments where docker's bridge
+    /// network is the trust boundary.
+    pub bearer_token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +136,28 @@ pub struct ReduceResult {
 
 impl EmbedderClient {
     pub fn new(config: EmbedderConfig) -> Result<Self, EmbedderError> {
-        let http = Client::builder().timeout(config.timeout).build()?;
+        let mut builder = Client::builder().timeout(config.timeout);
+        if let Some(token) = &config.bearer_token {
+            // Default headers ride on every request — covers /healthz,
+            // /embed/audio, /embed/text, /reduce uniformly without
+            // touching the per-call paths.
+            let mut headers = reqwest::header::HeaderMap::new();
+            let value = format!("Bearer {token}");
+            // Mark the header sensitive so reqwest's debug output
+            // doesn't print the token. HeaderValue::from_str only
+            // rejects bytes outside 0x20..=0x7e or 0x09, which a
+            // sensible token avoids — but a junk token here would
+            // surface as a clear "invalid header" error at startup,
+            // not a silent miss at first request time.
+            let mut header_value =
+                reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
+                    EmbedderError::InvalidResponse(format!("bearer_token has invalid bytes: {e}"))
+                })?;
+            header_value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
+            builder = builder.default_headers(headers);
+        }
+        let http = builder.build()?;
         Ok(Self {
             http,
             base: config.url,

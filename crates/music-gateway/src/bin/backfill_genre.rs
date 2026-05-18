@@ -35,7 +35,10 @@ const CANDIDATE_CAP: i64 = 50_000;
 const FETCH_PAUSE: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Parser)]
-#[command(name = "backfill-genre", about = "Backfill null genre rows in track_metadata")]
+#[command(
+    name = "backfill-genre",
+    about = "Backfill null genre rows in track_metadata"
+)]
 struct Args {
     /// Path to the gateway config TOML — same file the gateway binary uses.
     #[arg(short, long, env = "MUSIC_GATEWAY_CONFIG")]
@@ -52,7 +55,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let args = Args::parse();

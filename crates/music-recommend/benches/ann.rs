@@ -34,7 +34,9 @@ fn make_vector(seed: u64) -> Vec<f32> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     (0..DIM)
         .map(|_| {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             // Map to [-1, 1) by taking the high 24 bits as a signed int.
             let bits = (state >> 40) as i32;
             f32::from(bits as i16) / 32_768.0

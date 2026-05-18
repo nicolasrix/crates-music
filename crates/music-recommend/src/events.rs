@@ -244,11 +244,7 @@ impl EventStore {
     /// the diagnostic story behind a session ("what did the user do
     /// during s_abc?") is one call to this method. `id ASC` tiebreaks
     /// same-millisecond events stably.
-    pub async fn by_session(
-        &self,
-        session_id: &SessionId,
-        limit: u32,
-    ) -> Result<Vec<StoredEvent>> {
+    pub async fn by_session(&self, session_id: &SessionId, limit: u32) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
             "SELECT id, event_type, track_id, occurred_at, received_at, metadata, session_id
                  FROM events
@@ -722,7 +718,13 @@ mod tests {
     async fn count_events_per_session_empty_input_returns_empty_map() {
         let pool = test_pool().await;
         let store = EventStore::new(pool);
-        assert!(store.count_events_per_session(&[]).await.unwrap().is_empty());
+        assert!(
+            store
+                .count_events_per_session(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -754,10 +756,9 @@ mod tests {
     fn event_input_deserializes_with_legacy_payload_missing_session_id() {
         // Backwards compat: pre-0007 clients POST without session_id.
         // serde default must kick in, not 422 the request.
-        let parsed: EventInput = serde_json::from_str(
-            r#"{"event_type":"scrobble","track_id":"t1","occurred_at":1000}"#,
-        )
-        .expect("parses without session_id");
+        let parsed: EventInput =
+            serde_json::from_str(r#"{"event_type":"scrobble","track_id":"t1","occurred_at":1000}"#)
+                .expect("parses without session_id");
         assert!(parsed.session_id.is_none());
     }
 

@@ -102,6 +102,7 @@ pub async fn boot_probe(cfg: Option<&EmbedderConfigSection>) -> EmbedderHandle {
     let client = match EmbedderClient::new(EmbedderConfig {
         url,
         timeout: Duration::from_secs(cfg.timeout_seconds),
+        bearer_token: cfg.bearer_token.clone(),
     }) {
         Ok(c) => c,
         Err(e) => {

@@ -16,6 +16,7 @@ pub mod events;
 pub mod ingest;
 pub mod oauth;
 pub mod proxy;
+pub mod readyz;
 pub mod recommend;
 pub mod recommend_feedback;
 pub mod scrobble;

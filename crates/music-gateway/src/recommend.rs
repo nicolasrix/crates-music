@@ -414,10 +414,10 @@ pub struct FromSeedsResponse {
     ),
 )]
 #[allow(clippy::too_many_lines)] // Validation + ANN fan-out + filter
-                                 // dispatch + serialization are tightly
-                                 // coupled at the HTTP boundary and
-                                 // splitting them obscures the request
-                                 // lifecycle.
+// dispatch + serialization are tightly
+// coupled at the HTTP boundary and
+// splitting them obscures the request
+// lifecycle.
 pub async fn from_seeds(
     State(state): State<AppState>,
     payload: Result<Json<FromSeedsRequest>, JsonRejection>,
@@ -1432,8 +1432,7 @@ async fn apply_queue_filter_generic<C: CandidateLike>(
     top_n: usize,
 ) -> (Vec<C>, FilterStats) {
     let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id().clone()).collect();
-    let (filter, metadata) =
-        build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
+    let (filter, metadata) = build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
     let cfg = qc.config();
 
     match cfg.diversity_mode {
@@ -1518,9 +1517,7 @@ fn walk_mmr<C: CandidateLike>(
             track_id: c.track_id().clone(),
             sim_to_seed: c.sim(),
             vector: ann.get_vector(c.track_id()).ok().flatten(),
-            artist_key: metadata
-                .get(c.track_id())
-                .map(QueueFilter::artist_key_for),
+            artist_key: metadata.get(c.track_id()).map(QueueFilter::artist_key_for),
         })
         .collect();
 
@@ -1735,10 +1732,7 @@ mod tests {
         s.record_drop(FilterDecision::RejectArtistCap, 0.82);
         // best dropped (0.85) - worst admitted (0.7) = 0.15
         let gap = s.sim_gap().expect("gap defined");
-        assert!(
-            (gap - 0.15_f32).abs() < 1e-6,
-            "expected ~0.15, got {gap}"
-        );
+        assert!((gap - 0.15_f32).abs() < 1e-6, "expected ~0.15, got {gap}");
     }
 
     #[test]
@@ -1846,20 +1840,14 @@ mod tests {
 
     #[test]
     fn ids_as_json_multiple_are_comma_separated() {
-        assert_eq!(
-            ids_as_json(&["a", "b", "c"]),
-            "[\"a\",\"b\",\"c\"]"
-        );
+        assert_eq!(ids_as_json(&["a", "b", "c"]), "[\"a\",\"b\",\"c\"]");
     }
 
     #[test]
     fn ids_as_json_escapes_quotes_and_backslashes() {
         // Defensive: track ids are opaque, so we treat them as untrusted
         // strings at the JSON serialization seam.
-        assert_eq!(
-            ids_as_json(&["a\"b", "c\\d"]),
-            "[\"a\\\"b\",\"c\\\\d\"]"
-        );
+        assert_eq!(ids_as_json(&["a\"b", "c\\d"]), "[\"a\\\"b\",\"c\\\\d\"]");
     }
 
     #[test]

@@ -1,0 +1,58 @@
+# Split-host deployment — embedder-only side.
+#
+# Use this on the machine that hosts the embedder (typically the GPU
+# box). The gateway runs on a separate host using
+# docker-compose.gateway-only.yml and reaches this embedder over the
+# LAN.
+#
+# Bring up the *stub* embedder (no GPU, no PyTorch):
+#
+#   cp docker/.env.example .env
+#   EMBEDDER_BEARER_TOKEN=$(openssl rand -hex 32)
+#   echo "EMBEDDER_BEARER_TOKEN=$EMBEDDER_BEARER_TOKEN" >> .env
+#   docker compose -f docker-compose.embedder-only.yml up --build
+#
+# For CLAP CPU inference, stack the CPU override on top:
+#
+#   docker compose -f docker-compose.embedder-only.yml \
+#                  -f docker-compose.clap.yml up --build
+#
+# For CLAP ROCm GPU inference, stack the ROCm override:
+#
+#   docker compose -f docker-compose.embedder-only.yml \
+#                  -f docker-compose.clap-rocm.yml up --build
+#
+# The bearer token must match the EMBEDDER_BEARER_TOKEN on the gateway
+# host. Generate one with `openssl rand -hex 32`.
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile
+    image: crates-music/embedder:dev
+    container_name: crates-embedder
+    environment:
+      EMBEDDER_BACKEND: ${EMBEDDER_BACKEND:-stub}
+      # Shared secret enforced on /embed/* and /reduce. When unset the
+      # embedder accepts unauthenticated requests — only do that on a
+      # trusted LAN.
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+    # Expose on the host network so the gateway box can reach us. The
+    # base docker-compose.yml uses `expose:` (intra-compose only); in
+    # split-host mode we need the port published on the host.
+    ports:
+      - "${EMBEDDER_PORT:-9000}:9000"
+    # Note: no shared volume with the gateway here — /reduce in
+    # split-host mode would need the gateway's recommend.sqlite, which
+    # lives on the other machine. UMAP projection is therefore
+    # gateway-only-side work until we add a sqlite-over-network shim.
+    # Audio + text embedding both work fine (the bytes ride the
+    # request).
+    restart: unless-stopped
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"

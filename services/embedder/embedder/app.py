@@ -133,6 +133,37 @@ def get_embedder(request: Request) -> Embedder:
 EmbedderDep = Annotated[Embedder, Depends(get_embedder)]
 
 
+def _require_bearer(request: Request) -> None:
+    """FastAPI dependency guarding privileged endpoints.
+
+    If `app.state.bearer_token` is None (the default — no
+    `EMBEDDER_BEARER_TOKEN` in the env at build time), this is a
+    no-op. When configured, requires `Authorization: Bearer <token>`
+    on the incoming request and raises 401 otherwise.
+
+    Deliberately not applied to /healthz — boot probes shouldn't need
+    to be told the secret, and 200/503 on /healthz doesn't reveal
+    anything compute-y. /embed/* and /reduce both fan out to the
+    model and/or open caller-supplied files, so they're the actual
+    privileged surface.
+    """
+    token = request.app.state.bearer_token
+    if token is None:
+        return
+    header = request.headers.get("authorization", "")
+    expected = f"Bearer {token}"
+    # Constant-time compare: avoids leaking token length / common-prefix
+    # info via response timing. The header is short so the cost is
+    # negligible either way; this is the cheap correct thing.
+    import hmac
+
+    if not hmac.compare_digest(header, expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+BearerDep = Annotated[None, Depends(_require_bearer)]
+
+
 # --- app factory ------------------------------------------------------------
 
 
@@ -140,6 +171,12 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
     """Construct a fresh FastAPI app, optionally with a specific backend."""
     app = FastAPI(title="music-embedder", version="0.1.0")
     app.state.embedder = embedder or _default_embedder()
+    # Optional bearer-token gate for split-host deployments (gateway and
+    # embedder on different machines, embedder reachable on the LAN).
+    # Empty string is treated as "unset" so an accidentally empty env
+    # var doesn't quietly accept everyone with `Bearer `.
+    token = os.environ.get("EMBEDDER_BEARER_TOKEN", "").strip()
+    app.state.bearer_token = token or None
 
     @app.get("/healthz", response_model=HealthResponse)
     def healthz(emb: EmbedderDep, response: Response) -> HealthResponse:
@@ -155,7 +192,7 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         )
 
     @app.post("/embed/audio")
-    async def embed_audio(req: Request, emb: EmbedderDep) -> Response:
+    async def embed_audio(req: Request, emb: EmbedderDep, _: BearerDep) -> Response:
         # Inference runs in the default threadpool so concurrent calls
         # don't block the event loop. The actual GPU forward pass still
         # serializes on the device (only one CUDA/HIP stream by
@@ -171,14 +208,14 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         return _build_embed_response(result, emb.model_version)
 
     @app.post("/embed/text")
-    async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep) -> Response:
+    async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep, _: BearerDep) -> Response:
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
         result = await asyncio.to_thread(emb.embed_text, payload.text)
         return _build_embed_response(result, emb.model_version)
 
     @app.post("/reduce", response_model=ReduceResponse)
-    async def reduce(payload: ReduceRequest) -> ReduceResponse:
+    async def reduce(payload: ReduceRequest, _: BearerDep) -> ReduceResponse:
         # The reducer doesn't need the CLAP model — it reads stored
         # embeddings from SQLite. Intentionally no `emb.loaded` guard.
         db_path = Path(payload.db_path)

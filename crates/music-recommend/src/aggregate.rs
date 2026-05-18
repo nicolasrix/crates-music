@@ -314,7 +314,11 @@ mod tests {
         let weights = [-1.0, 1.0];
         let out = aggregate_seed_results_weighted(&per_seed, &weights, &HashSet::new(), 10);
         let ids: Vec<&str> = out.iter().map(|r| r.track_id.as_str()).collect();
-        assert_eq!(ids, vec!["b"], "negative-weighted seed must not surface candidates");
+        assert_eq!(
+            ids,
+            vec!["b"],
+            "negative-weighted seed must not surface candidates"
+        );
     }
 
     #[test]
@@ -327,10 +331,8 @@ mod tests {
         let only_one = [3.0];
         let out = aggregate_seed_results_weighted(&per_seed, &only_one, &HashSet::new(), 10);
         // a gets 0.5*3.0 = 1.5; b gets 0.5*1.0 (default) = 0.5
-        let by_id: std::collections::HashMap<&str, f32> = out
-            .iter()
-            .map(|r| (r.track_id.as_str(), r.score))
-            .collect();
+        let by_id: std::collections::HashMap<&str, f32> =
+            out.iter().map(|r| (r.track_id.as_str(), r.score)).collect();
         assert!((by_id["a"] - 1.5).abs() < 1e-6);
         assert!((by_id["b"] - 0.5).abs() < 1e-6);
     }

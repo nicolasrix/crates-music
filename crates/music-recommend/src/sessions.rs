@@ -239,7 +239,10 @@ mod tests {
         s.start(&sid("s2"), &tid("t2"), 1, 2_000).await.unwrap();
         s.start(&sid("s3"), &tid("t3"), 1, 3_000).await.unwrap();
         let rows = s.recent(10).await.unwrap();
-        let ids: Vec<_> = rows.iter().map(|r| r.session_id.as_str().to_owned()).collect();
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|r| r.session_id.as_str().to_owned())
+            .collect();
         assert_eq!(ids, vec!["s3", "s2", "s1"]);
     }
 

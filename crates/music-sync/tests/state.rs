@@ -95,7 +95,8 @@ fn remove_before_cursor_decrements_cursor() {
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
     s.apply(&push("c", "t-3"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW)
+        .unwrap();
     s.apply(&remove("a"), NOW).unwrap();
     assert_eq!(item_ids(&s), vec!["b", "c"]);
     assert_eq!(
@@ -111,7 +112,8 @@ fn remove_after_cursor_does_not_move_cursor() {
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
     s.apply(&push("c", "t-3"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW)
+        .unwrap();
     s.apply(&remove("c"), NOW).unwrap();
     assert_eq!(s.playback.now_playing_index, Some(0));
 }
@@ -124,7 +126,8 @@ fn remove_now_playing_keeps_cursor_pointing_at_next_track() {
     let mut s = SyncState::new();
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW)
+        .unwrap();
     s.apply(&remove("a"), NOW).unwrap();
     assert_eq!(item_ids(&s), vec!["b"]);
     assert_eq!(s.playback.now_playing_index, Some(0));
@@ -134,7 +137,8 @@ fn remove_now_playing_keeps_cursor_pointing_at_next_track() {
 fn remove_last_item_clears_cursor() {
     let mut s = SyncState::new();
     s.apply(&push("a", "t-1"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW)
+        .unwrap();
     s.apply(&remove("a"), NOW).unwrap();
     assert!(s.playback.queue.items.is_empty());
     assert_eq!(s.playback.now_playing_index, None);
@@ -177,7 +181,8 @@ fn reorder_now_playing_item_makes_cursor_follow_it() {
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
     s.apply(&push("c", "t-3"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(2) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(2) }, NOW)
+        .unwrap();
     s.apply(&reorder("c", 0), NOW).unwrap();
     assert_eq!(item_ids(&s), vec!["c", "a", "b"]);
     assert_eq!(s.playback.now_playing_index, Some(0));
@@ -190,7 +195,8 @@ fn reorder_other_item_across_cursor_keeps_cursor_on_same_track() {
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
     s.apply(&push("c", "t-3"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW)
+        .unwrap();
     s.apply(&reorder("c", 0), NOW).unwrap();
     assert_eq!(item_ids(&s), vec!["c", "a", "b"]);
     assert_eq!(
@@ -205,7 +211,8 @@ fn set_now_playing_in_bounds_succeeds() {
     let mut s = SyncState::new();
     s.apply(&push("a", "t-1"), NOW).unwrap();
     s.apply(&push("b", "t-2"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(1) }, NOW)
+        .unwrap();
     assert_eq!(s.playback.now_playing_index, Some(1));
 }
 
@@ -226,24 +233,30 @@ fn set_now_playing_out_of_bounds_is_rejected() {
 fn set_now_playing_to_none_always_succeeds() {
     let mut s = SyncState::new();
     s.apply(&push("a", "t-1"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: None }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW)
+        .unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: None }, NOW)
+        .unwrap();
     assert_eq!(s.playback.now_playing_index, None);
 }
 
 #[test]
 fn set_position_overwrites_position() {
     let mut s = SyncState::new();
-    s.apply(&SyncOp::SetPosition { position_ms: 100 }, NOW).unwrap();
-    s.apply(&SyncOp::SetPosition { position_ms: 200 }, NOW).unwrap();
+    s.apply(&SyncOp::SetPosition { position_ms: 100 }, NOW)
+        .unwrap();
+    s.apply(&SyncOp::SetPosition { position_ms: 200 }, NOW)
+        .unwrap();
     assert_eq!(s.playback.position_ms, 200);
 }
 
 #[test]
 fn set_playing_lww_last_write_wins() {
     let mut s = SyncState::new();
-    s.apply(&SyncOp::SetPlaying { is_playing: true }, NOW).unwrap();
-    s.apply(&SyncOp::SetPlaying { is_playing: false }, NOW).unwrap();
+    s.apply(&SyncOp::SetPlaying { is_playing: true }, NOW)
+        .unwrap();
+    s.apply(&SyncOp::SetPlaying { is_playing: false }, NOW)
+        .unwrap();
     assert!(!s.playback.is_playing);
 }
 
@@ -251,9 +264,12 @@ fn set_playing_lww_last_write_wins() {
 fn clear_resets_queue_cursor_position_and_play_flag() {
     let mut s = SyncState::new();
     s.apply(&push("a", "t-1"), NOW).unwrap();
-    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW).unwrap();
-    s.apply(&SyncOp::SetPosition { position_ms: 999 }, NOW).unwrap();
-    s.apply(&SyncOp::SetPlaying { is_playing: true }, NOW).unwrap();
+    s.apply(&SyncOp::SetNowPlaying { index: Some(0) }, NOW)
+        .unwrap();
+    s.apply(&SyncOp::SetPosition { position_ms: 999 }, NOW)
+        .unwrap();
+    s.apply(&SyncOp::SetPlaying { is_playing: true }, NOW)
+        .unwrap();
     s.apply(&SyncOp::Clear, NOW).unwrap();
     assert!(s.playback.queue.items.is_empty());
     assert_eq!(s.playback.now_playing_index, None);
@@ -336,8 +352,13 @@ fn start_session_anchor_index_5_anchors_at_track_5_not_0() {
 fn start_session_sets_is_playing_and_resets_position() {
     // Replaces the 4-op pattern (clear + push + set_now_playing + set_playing).
     let mut s = SyncState::new();
-    s.apply(&SyncOp::SetPosition { position_ms: 42_000 }, NOW)
-        .unwrap();
+    s.apply(
+        &SyncOp::SetPosition {
+            position_ms: 42_000,
+        },
+        NOW,
+    )
+    .unwrap();
     s.apply(&start(vec![item("qi-1", "t-1")], 0, "sess-1"), NOW)
         .unwrap();
     assert!(s.playback.is_playing);

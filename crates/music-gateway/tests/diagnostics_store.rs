@@ -135,11 +135,7 @@ async fn empty_batch_inserts_nothing_without_error() {
 // or `recommend.from_seeds`; everything else (sync ops, cache misses,
 // etc.) is invisible to this surface.
 
-fn recommend_span(
-    name: &str,
-    end_ms: i64,
-    fields: &serde_json::Value,
-) -> SpanRecord {
+fn recommend_span(name: &str, end_ms: i64, fields: &serde_json::Value) -> SpanRecord {
     SpanRecord {
         trace_id: format!("trace-{end_ms}"),
         span_id: end_ms,
@@ -187,10 +183,7 @@ async fn recommend_summaries_extracts_full_from_any_fields() {
     assert_eq!(s.end_ms, 1_000);
     assert_eq!(s.requested_n, Some(20));
     assert_eq!(s.results, Some(17));
-    assert_eq!(
-        s.shortfall_reason.as_deref(),
-        Some("filter_starved_artist")
-    );
+    assert_eq!(s.shortfall_reason.as_deref(), Some("filter_starved_artist"));
     assert_eq!(s.result_track_ids, vec!["t-1", "t-2", "t-3"]);
     assert!((s.admitted_sims[0] - 0.84_f32).abs() < 1e-5);
 }
@@ -284,9 +277,7 @@ async fn span_series_applies_since_ms_filter() {
 #[tokio::test]
 async fn span_series_respects_limit() {
     let store = TraceStore::open_in_memory().await.unwrap();
-    let batch: Vec<SpanRecord> = (0..20)
-        .map(|i| span("t", i, "x", 0, i * 10))
-        .collect();
+    let batch: Vec<SpanRecord> = (0..20).map(|i| span("t", i, "x", 0, i * 10)).collect();
     store.insert_batch(batch).await.unwrap();
     let pts = store.span_series("x", None, 5).await.unwrap();
     assert_eq!(pts.len(), 5);
@@ -375,7 +366,10 @@ async fn child_breakdown_empty_when_parent_has_no_instances() {
         .insert_batch(vec![nested_span("t", 1, None, "unrelated", 0, 5)])
         .await
         .unwrap();
-    let r = store.child_breakdown("ingest.fetch_clip", None).await.unwrap();
+    let r = store
+        .child_breakdown("ingest.fetch_clip", None)
+        .await
+        .unwrap();
     assert_eq!(r.parent_count, 0);
     assert_eq!(r.parent_sum_ms, 0);
     assert!(r.children.is_empty());

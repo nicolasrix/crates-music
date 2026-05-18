@@ -30,6 +30,12 @@ pub struct ServerConfig {
     pub tls_key: PathBuf,
     /// Single shared bearer token. Static for P1; OAuth in a later phase.
     pub bearer_token: String,
+    /// Optional directory of built web SPA assets (`apps/web/dist`). When
+    /// set, the gateway serves it as a same-origin static site with SPA
+    /// fallback to `index.html`. Defaults to `None` — leave unset in
+    /// dev where Vite serves the SPA itself.
+    #[serde(default)]
+    pub static_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +94,13 @@ pub struct EmbedderConfigSection {
     /// 120-second audio clip on CPU can take 10+ seconds.
     #[serde(default = "default_embedder_timeout_secs")]
     pub timeout_seconds: u64,
+    /// Optional bearer token for split-host deployments. When set,
+    /// every outgoing request to the embedder carries
+    /// `Authorization: Bearer <token>`. Must match the embedder's
+    /// `EMBEDDER_BEARER_TOKEN`. Omit (or leave null) for same-host
+    /// deployments where the docker bridge is the trust boundary.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
 }
 
 fn default_embedder_timeout_secs() -> u64 {

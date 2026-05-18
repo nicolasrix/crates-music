@@ -335,7 +335,12 @@ mod tests {
     async fn downvoted_in_session_returns_empty_for_unknown_session() {
         let s = store().await;
         s.record(&tid("t1"), "sess-A", -1, 100, 100).await.unwrap();
-        assert!(s.downvoted_in_session("sess-nope").await.unwrap().is_empty());
+        assert!(
+            s.downvoted_in_session("sess-nope")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -81,9 +81,11 @@ pub fn normalize_title(s: &str) -> String {
         // close_idx is the position of the trailing ')' in `trimmed`.
         let close_idx = trimmed.len() - 1;
         let inner = &trimmed[open_idx + 1..close_idx];
-        let has_keyword = EDITION_KEYWORDS
-            .iter()
-            .any(|kw| inner.split(|c: char| !c.is_alphanumeric()).any(|tok| tok == *kw));
+        let has_keyword = EDITION_KEYWORDS.iter().any(|kw| {
+            inner
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|tok| tok == *kw)
+        });
         if !has_keyword {
             break;
         }
@@ -254,7 +256,11 @@ impl MetadataStore {
             return Ok(Vec::new());
         }
         let present = self.get_many(ids).await?;
-        Ok(ids.iter().filter(|id| !present.contains_key(*id)).cloned().collect())
+        Ok(ids
+            .iter()
+            .filter(|id| !present.contains_key(*id))
+            .cloned()
+            .collect())
     }
 
     /// Find `track_id`s that are present as `done` embeddings under
@@ -485,15 +491,15 @@ mod tests {
 
     #[test]
     fn strips_acoustic_version() {
-        assert_eq!(normalize_title("Wonderwall (Acoustic Version)"), "wonderwall");
+        assert_eq!(
+            normalize_title("Wonderwall (Acoustic Version)"),
+            "wonderwall"
+        );
     }
 
     #[test]
     fn strips_feat_collaborator() {
-        assert_eq!(
-            normalize_title("Imagine (feat. John Lennon)"),
-            "imagine"
-        );
+        assert_eq!(normalize_title("Imagine (feat. John Lennon)"), "imagine");
     }
 
     #[test]
@@ -528,10 +534,7 @@ mod tests {
 
     #[test]
     fn strips_multiple_trailing_edition_suffixes() {
-        assert_eq!(
-            normalize_title("Song (Live) (Remastered)"),
-            "song"
-        );
+        assert_eq!(normalize_title("Song (Live) (Remastered)"), "song");
     }
 
     // --- normalize_title: things we DO NOT strip ---
@@ -564,10 +567,7 @@ mod tests {
     #[test]
     fn does_not_strip_middle_paren_even_with_keyword() {
         // "live" is in the middle, not the end — keep the title intact.
-        assert_eq!(
-            normalize_title("Live and Let Die"),
-            "live and let die"
-        );
+        assert_eq!(normalize_title("Live and Let Die"), "live and let die");
     }
 
     // --- normalize_title: edge cases ---

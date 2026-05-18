@@ -35,6 +35,7 @@ async fn boot_probe_loaded_marks_ready() {
     let cfg = EmbedderConfigSection {
         url: server.uri(),
         timeout_seconds: 2,
+        bearer_token: None,
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(h.ready());
@@ -63,6 +64,7 @@ async fn boot_probe_503_keeps_client_but_not_ready() {
     let cfg = EmbedderConfigSection {
         url: server.uri(),
         timeout_seconds: 2,
+        bearer_token: None,
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -78,6 +80,7 @@ async fn boot_probe_unreachable_keeps_client_for_retries() {
     let cfg = EmbedderConfigSection {
         url: "http://127.0.0.1:1".to_string(),
         timeout_seconds: 1,
+        bearer_token: None,
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -95,6 +98,7 @@ async fn boot_probe_invalid_url_falls_back_to_disabled() {
     let cfg = EmbedderConfigSection {
         url: "not a url at all".to_string(),
         timeout_seconds: 1,
+        bearer_token: None,
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -131,6 +135,7 @@ async fn ready_flips_from_not_loaded_to_loaded_after_record() {
     let cfg = EmbedderConfigSection {
         url: server.uri(),
         timeout_seconds: 2,
+        bearer_token: None,
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -162,6 +167,7 @@ async fn boot_probe_respects_short_timeout() {
     let cfg = EmbedderConfigSection {
         url: server.uri(),
         timeout_seconds: 1,
+        bearer_token: None,
     };
     let start = std::time::Instant::now();
     let h = boot_probe(Some(&cfg)).await;

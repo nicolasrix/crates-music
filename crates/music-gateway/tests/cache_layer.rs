@@ -66,14 +66,9 @@ async fn browse_response_is_cached_then_served_without_second_upstream_call() {
         .mount(&upstream)
         .await;
 
-    let app = build_router(
-        common::build_state(common::test_config_with_upstream(
-            &upstream.uri(),
-            "alice",
-            "sesame",
-        ))
-        .await,
-    );
+    let cache = Cache::open_in_memory().await.unwrap();
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state_with_cache(cfg, cache.clone()).await);
 
     let r1 = app
         .clone()
@@ -81,6 +76,8 @@ async fn browse_response_is_cached_then_served_without_second_upstream_call() {
         .await
         .unwrap();
     assert_eq!(r1.status(), StatusCode::OK);
+
+    common::wait_for_cache_entry(&cache, "getAlbumList2|size=20|type=newest").await;
 
     let r2 = app
         .oneshot(auth("/rest/getAlbumList2?type=newest&size=20"))
@@ -124,14 +121,9 @@ async fn if_none_match_match_returns_304() {
         .mount(&upstream)
         .await;
 
-    let app = build_router(
-        common::build_state(common::test_config_with_upstream(
-            &upstream.uri(),
-            "alice",
-            "sesame",
-        ))
-        .await,
-    );
+    let cache = Cache::open_in_memory().await.unwrap();
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state_with_cache(cfg, cache.clone()).await);
 
     // Populate, capture the etag.
     let r1 = app
@@ -146,6 +138,8 @@ async fn if_none_match_match_returns_304() {
         .to_str()
         .unwrap()
         .to_string();
+
+    common::wait_for_cache_entry(&cache, "getAlbumList2|type=newest").await;
 
     // Re-request with matching If-None-Match.
     let r2 = app
@@ -164,14 +158,9 @@ async fn if_none_match_mismatch_returns_cached_body() {
         .mount(&upstream)
         .await;
 
-    let app = build_router(
-        common::build_state(common::test_config_with_upstream(
-            &upstream.uri(),
-            "alice",
-            "sesame",
-        ))
-        .await,
-    );
+    let cache = Cache::open_in_memory().await.unwrap();
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state_with_cache(cfg, cache.clone()).await);
 
     // Populate.
     let _ = app
@@ -179,6 +168,8 @@ async fn if_none_match_mismatch_returns_cached_body() {
         .oneshot(auth("/rest/getAlbumList2?type=newest"))
         .await
         .unwrap();
+
+    common::wait_for_cache_entry(&cache, "getAlbumList2|type=newest").await;
 
     let response = app
         .oneshot(auth_if_none_match(
@@ -204,20 +195,18 @@ async fn cache_key_normalises_query_param_order() {
         .mount(&upstream)
         .await;
 
-    let app = build_router(
-        common::build_state(common::test_config_with_upstream(
-            &upstream.uri(),
-            "alice",
-            "sesame",
-        ))
-        .await,
-    );
+    let cache = Cache::open_in_memory().await.unwrap();
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state_with_cache(cfg, cache.clone()).await);
 
     let _ = app
         .clone()
         .oneshot(auth("/rest/getAlbumList2?type=newest&size=20"))
         .await
         .unwrap();
+
+    common::wait_for_cache_entry(&cache, "getAlbumList2|size=20|type=newest").await;
+
     let _ = app
         .oneshot(auth("/rest/getAlbumList2?size=20&type=newest"))
         .await
