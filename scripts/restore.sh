@@ -88,12 +88,16 @@ cp -p "$STAGE/gateway-state.sqlite" "$DEST/gateway-state.sqlite"
 if [[ -f "$STAGE/gateway-state.recommend.sqlite" ]]; then
   cp -p "$STAGE/gateway-state.recommend.sqlite" "$DEST/gateway-state.recommend.sqlite"
 fi
-cp -p "$STAGE/certs/cert.pem" "$DEST/certs/cert.pem"
-cp -p "$STAGE/certs/key.pem"  "$DEST/certs/key.pem"
+# Restore whichever cert files the archive carries — naming varies by
+# toolchain (mkcert vs entrypoint self-sign), so we don't hard-code.
+cp -rp "$STAGE/certs/." "$DEST/certs/"
 
-# Keep the TLS key non-world-readable. Cargo doesn't enforce this; the
-# OS-level perms are the only thing keeping it private if the parent
-# dir is loose.
-chmod 0600 "$DEST/certs/key.pem"
+# Lock down anything that looks like a private key. mkcert names them
+# *-key.pem; the entrypoint uses key.pem. cp -p preserves perms from
+# the archive, but defense-in-depth: if a wonky umask leaked a 0644
+# private key into the source dir, this catches it on the way back out.
+shopt -s nullglob
+for f in "$DEST/certs/"*key*.pem; do chmod 0600 "$f"; done
+shopt -u nullglob
 
 echo "done. start the gateway against $DEST and it should come up restored."

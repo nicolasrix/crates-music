@@ -8,8 +8,12 @@
 #                                      sync ops, play counts. Required.
 #   - gateway-state.recommend.sqlite   CLAP embeddings + ingest queue.
 #                                      Optional — skipped if absent.
-#   - certs/cert.pem + certs/key.pem   TLS keypair. Required (losing it
-#                                      means re-trusting on every device).
+#   - certs/                           TLS material directory (whatever
+#                                      *.pem files live there). File
+#                                      names vary by toolchain (mkcert
+#                                      uses host.local.pem, the docker
+#                                      entrypoint uses cert.pem) so we
+#                                      copy the dir as-is. Required.
 #
 # Deliberately *not* backed up — all derivable:
 #   - gateway-cache.sqlite             L2 metadata cache (re-fetched
@@ -52,12 +56,15 @@ command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum not in PATH" >&2; exit
 
 STATE_DB="$STATE_DIR/gateway-state.sqlite"
 RECOMMEND_DB="$STATE_DIR/gateway-state.recommend.sqlite"
-CERT="$STATE_DIR/certs/cert.pem"
-KEY="$STATE_DIR/certs/key.pem"
+CERTS_DIR="$STATE_DIR/certs"
 
 [[ -f "$STATE_DB" ]] || { echo "missing required: $STATE_DB" >&2; exit 1; }
-[[ -f "$CERT"     ]] || { echo "missing required: $CERT" >&2; exit 1; }
-[[ -f "$KEY"      ]] || { echo "missing required: $KEY" >&2; exit 1; }
+[[ -d "$CERTS_DIR" ]] || { echo "missing required certs dir: $CERTS_DIR" >&2; exit 1; }
+# At least one *.pem must be present — empty cert dir is operator error.
+shopt -s nullglob
+PEM_FILES=("$CERTS_DIR"/*.pem)
+shopt -u nullglob
+[[ ${#PEM_FILES[@]} -gt 0 ]] || { echo "no *.pem files in $CERTS_DIR" >&2; exit 1; }
 
 # Staging dir lives next to the output so the final atomic rename
 # (mv archive into place) doesn't cross filesystems.
@@ -80,9 +87,10 @@ else
   echo "(skipping .recommend.sqlite — not present)"
 fi
 
-echo "copying certs..."
-cp -p "$CERT" "$STAGE/certs/cert.pem"
-cp -p "$KEY"  "$STAGE/certs/key.pem"
+echo "copying certs ($CERTS_DIR -> $STAGE/certs)..."
+# cp -rp on the dir contents (the trailing /. preserves perms on every
+# entry without re-creating the parent dir).
+cp -rp "$CERTS_DIR/." "$STAGE/certs/"
 
 # Manifest: lets restore verify the archive wasn't truncated or
 # corrupted in transit, and records the snapshot timestamp + tool
