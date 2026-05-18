@@ -23,6 +23,15 @@ RUN xcaddy build \
 FROM caddy:2-alpine
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
+# Bake the Caddyfile into the image. The file uses {$ENV_VAR}
+# substitution for everything host-specific (public hostname, CF
+# token, ACME directory), so the same image works for dev and prod —
+# behaviour is determined by the env at container start, not the
+# Caddyfile content. This makes the image portable to NAS app platforms,
+# which doesn't have a clean way to bind-mount files from a repo
+# checkout into the Apps UI.
+COPY docker/caddy/Caddyfile /etc/caddy/Caddyfile
+
 # Caddy's default healthcheck endpoint is its admin API on :2019,
 # loopback-only by default. `caddy` user already exists in the base
 # image; no extra user-management needed.

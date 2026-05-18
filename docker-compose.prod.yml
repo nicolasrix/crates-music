@@ -44,14 +44,21 @@ services:
       # rather not open UDP at the firewall.
       - "443:443/udp"
     volumes:
-      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddyfile is baked into the image (see docker/caddy/Dockerfile)
+      # so no bind mount needed. Behaviour is parametrized by env vars.
+      #
       # CRITICAL: caddy-data holds the LE account key and issued cert.
       # If you lose this volume Caddy re-registers with LE (new account
       # key, fresh issuance counter against rate limits). Worth backing
       # up; not catastrophic to rebuild, but you'll burn ~5 minutes and
       # one of LE's weekly issuance allowances.
-      - caddy-data:/data
-      - caddy-config:/config
+      #
+      # Volume source is env-driven so the same compose works locally
+      # (named volume default) and on NAS app platforms (override with an
+      # absolute path to a ZFS-snapshottable dataset, e.g.
+      # CADDY_DATA_DIR=/mnt/<pool>/crates-music-state/caddy-data).
+      - ${CADDY_DATA_DIR:-caddy-data}:/data
+      - ${CADDY_CONFIG_DIR:-caddy-config}:/config
     environment:
       GATEWAY_PUBLIC_HOST: ${GATEWAY_PUBLIC_HOST:?set GATEWAY_PUBLIC_HOST in .env}
       GATEWAY_UPSTREAM: gateway:8443
@@ -88,7 +95,10 @@ services:
       GATEWAY_HOSTNAME: ${GATEWAY_PUBLIC_HOST}
       RUST_LOG: ${RUST_LOG:-info,music_gateway=info,sqlx=warn}
     volumes:
-      - gw-data:/data
+      # Same env-driven pattern as caddy-data — local default is a
+      # named volume, override on the NAS host via GATEWAY_DATA_DIR=
+      # /mnt/<pool>/crates-music-state/gw-data so ZFS snapshots cover it.
+      - ${GATEWAY_DATA_DIR:-gw-data}:/data
     # NOTE: no `ports:` — gateway is reachable only via Caddy on the
     # internal compose network. Publishing :8443 to the host would
     # bypass TLS termination (clients could hit the mkcert cert
@@ -104,6 +114,9 @@ services:
         max-file: "${LOG_MAX_FILE:-3}"
 
 volumes:
+  # Named volumes only used when *_DIR env vars are unset (i.e., local
+  # dev/test deploys). On NAS app platforms these declarations are inert —
+  # the env-driven absolute paths bypass the named-volume mechanism.
   gw-data:
   caddy-data:
   caddy-config:
