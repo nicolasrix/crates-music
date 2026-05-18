@@ -32,8 +32,9 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 # checkout into the Apps UI.
 COPY docker/caddy/Caddyfile /etc/caddy/Caddyfile
 
-# Caddy's default healthcheck endpoint is its admin API on :2019,
-# loopback-only by default. `caddy` user already exists in the base
-# image; no extra user-management needed.
+# Caddy's admin API on :2019 binds to 127.0.0.1 only. We probe via
+# the literal IPv4 — `localhost` in Alpine resolves to ::1 first,
+# which the admin endpoint doesn't listen on, and busybox wget
+# doesn't fall back to v4 → "Connection refused".
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:2019/config/ || exit 1
+    CMD wget --quiet --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1
