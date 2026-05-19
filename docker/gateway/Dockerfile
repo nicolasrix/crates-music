@@ -98,15 +98,16 @@ ENV DATA_DIR=/data \
 USER gateway
 EXPOSE 8443
 
-# Readiness, not liveness — `/readyz` returns 503 when Navidrome or a
-# configured embedder is unreachable, so the container reports
-# `unhealthy` when traffic can't actually be served. Self-signed certs
-# at first boot mean curl needs -k; that's also fine with operator-
-# mounted real certs (curl runs the same way either way). The
-# 30 s start_period covers TLS bind + SQLite migrations + the first
-# Navidrome probe.
+# Liveness — `/healthz` returns 200 whenever the HTTP layer is up.
+# `/readyz` is *too strict* for the container health signal: a
+# degraded (embedder-unreachable) gateway is still serving Subsonic,
+# OAuth, sync, and audio cache traffic, and we don't want docker /
+# NAS app platforms to recycle it. Operators see degradation via
+# /v1/diagnostics and the explicit /readyz endpoint instead.
+# Self-signed certs at first boot mean curl needs -k. The 30 s
+# start_period covers TLS bind + SQLite migrations.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl --silent --fail --insecure https://localhost:8443/readyz \
+    CMD curl --silent --fail --insecure https://localhost:8443/healthz \
         || exit 1
 
 ENTRYPOINT ["/opt/gateway/entrypoint.sh"]
