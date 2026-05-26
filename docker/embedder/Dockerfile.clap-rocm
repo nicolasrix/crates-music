@@ -66,11 +66,14 @@ RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
         'torchvision==0.24.*' \
         'pytorch-triton-rocm'
 
-# Remaining audio stack — same as the CPU variant.
+# Remaining audio stack — same as the CPU variant. `umap-learn`
+# powers `embedder.reduce` / the `/reduce` endpoint; numba/scipy/
+# sklearn arrive transitively via librosa so this is a cheap add.
 RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
         'laion-clap>=1.1.6' \
         'librosa>=0.10' \
-        'soundfile>=0.12'
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
 
 COPY services/embedder/embedder ./embedder
 RUN pip install --no-cache-dir --default-timeout=300 --retries=5 --no-deps .

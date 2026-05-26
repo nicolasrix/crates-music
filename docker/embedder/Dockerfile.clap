@@ -59,10 +59,17 @@ RUN pip install --no-cache-dir \
 # The remaining audio stack — pulled from PyPI as normal. soundfile
 # needs libsndfile1 at runtime (installed in stage 2); librosa pulls
 # numba + scipy + sklearn transitively.
+#
+# `umap-learn` is the only piece of the `[reduce]` extra not already
+# present (scipy/sklearn/numba arrive via librosa). It powers
+# `embedder.reduce` and the `/reduce` HTTP endpoint — without it the
+# endpoint 503s with "reduce extra not installed". ~1 MB pure-Python,
+# no native compile, so the prod sidecar can carry it cheaply.
 RUN pip install --no-cache-dir \
         'laion-clap>=1.1.6' \
         'librosa>=0.10' \
-        'soundfile>=0.12'
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
 
 # Install the embedder package itself last, --no-deps so we don't
 # re-resolve the carefully-pinned torch wheels.
