@@ -14,7 +14,8 @@ Cargo.lock.bak
 /config.toml
 /gateway.toml
 /.env
-/.env.local
+/.env.*
+!/.env.example
 
 # Local TLS certs (mkcert-generated, contains private key)
 /certs/
