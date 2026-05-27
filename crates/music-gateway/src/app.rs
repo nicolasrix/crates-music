@@ -55,6 +55,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/cache/invalidate",
             post(admin::invalidate_cache),
         )
+        .route(
+            "/v1/admin/cache/invalidate_covers",
+            post(admin::invalidate_covers),
+        )
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))
         .route(
             "/v1/diagnostics/histogram",

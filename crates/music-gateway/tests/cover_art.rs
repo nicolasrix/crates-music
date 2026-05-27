@@ -559,6 +559,49 @@ async fn detected_placeholder_evicts_existing_cache_entries() {
 }
 
 #[tokio::test]
+async fn track_level_ids_sharing_album_cover_are_not_classified_as_placeholder() {
+    // Every track in an album resolves to the same cover art bytes via
+    // its mf-* id. An album with 15 tracks produces 15 distinct mf-*
+    // entries with the same etag — well above the duplicate threshold.
+    // The classifier must ignore mf-* ids when counting duplicates,
+    // otherwise real album art gets replaced with SVG placeholders.
+    let real_album_art: &[u8] = b"real-album-cover-shared-across-tracks";
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/getCoverArt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(real_album_art),
+        )
+        .mount(&upstream)
+        .await;
+
+    let app = build_router(
+        common::build_state(common::test_config_with_upstream(
+            &upstream.uri(),
+            "alice",
+            "sesame",
+        ))
+        .await,
+    );
+
+    for i in 1..=15 {
+        let r = app
+            .clone()
+            .oneshot(auth(&format!("/rest/getCoverArt?id=mf-track{i}&size=96")))
+            .await
+            .unwrap();
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            b.as_ref(),
+            real_album_art,
+            "track #{i} sharing album cover must not be classified as placeholder",
+        );
+    }
+}
+
+#[tokio::test]
 async fn seed_param_drives_placeholder_initial() {
     // The web client passes `?seed=<display name>` so the placeholder's
     // initial reflects the album title / artist name rather than the

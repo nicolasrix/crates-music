@@ -34,7 +34,7 @@ const GATEWAY_CLIENT_NAME: &str = "crates-music-gateway";
 // `seed` is a gateway-only hint for the cover-art placeholder rendering
 // (web client passes the album/artist display name); strip it before the
 // upstream request so Navidrome doesn't see an unexpected param.
-const STRIPPED_PARAM_KEYS: &[&str] = &["u", "p", "t", "s", "v", "c", "f", "seed"];
+const STRIPPED_PARAM_KEYS: &[&str] = &["u", "p", "t", "s", "v", "c", "f", "seed", "access_token"];
 
 /// Subsonic methods we cache. Catalog browse only — playback / mutating /
 /// session endpoints stay pass-through.
@@ -619,6 +619,12 @@ fn write_and_serve_placeholder(
 /// (multi-disc, deluxe edition, compilation re-use) stays under the
 /// threshold and is left alone.
 ///
+/// Only entity-level IDs (`al-*`, `ar-*`) count toward the threshold.
+/// Track-level IDs (`mf-*`) are excluded because every track in an
+/// album resolves to the same album cover bytes — an album with 15
+/// tracks produces 15 entries with identical etags, which would
+/// false-positive as the Navidrome default without this filter.
+///
 /// Different sizes of the same id (`id=X&size=200` and `id=X&size=600`
 /// when Navidrome doesn't re-thumbnail) are filtered out — those are
 /// the same album, not duplication.
@@ -632,6 +638,7 @@ async fn is_duplicate_cover_etag(
         .iter()
         .filter_map(|k| cover_id_from_cache_key(k))
         .filter(|id| *id != current_cover_id)
+        .filter(|id| !id.starts_with("mf-"))
         .collect();
     Ok(distinct_other_ids.len() >= PLACEHOLDER_DUPLICATE_THRESHOLD)
 }
