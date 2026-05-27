@@ -130,7 +130,19 @@ def test_default_proj_version_rejects_unsupported_dim() -> None:
 # proj_version so they describe the same snapshot.
 
 
-def test_compute_pcs_returns_shape_n_by_requested_components() -> None:
+@pytest.fixture
+def sklearn_module():
+    """Gate PCA tests on scikit-learn availability — it's a transitive
+    dep of the `reduce` extra, not installed in the base dev profile."""
+    return pytest.importorskip(
+        "sklearn",
+        reason="install with `uv sync --extra reduce` to run PCA-backed tests",
+    )
+
+
+def test_compute_pcs_returns_shape_n_by_requested_components(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # 30 points × 8 dims → 4 PCs, one per requested component, no padding.
     rng = np.random.default_rng(0)
     matrix = rng.standard_normal((30, 8)).astype(np.float32)
@@ -139,7 +151,9 @@ def test_compute_pcs_returns_shape_n_by_requested_components() -> None:
     assert np.isfinite(pcs).all()
 
 
-def test_compute_pcs_clamps_components_to_n_when_few_points() -> None:
+def test_compute_pcs_clamps_components_to_n_when_few_points(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # sklearn's PCA can't produce more components than min(N-1, D).
     # We clamp internally so a 3-point input doesn't crash — the
     # reducer must keep working on tiny dev datasets.
@@ -153,7 +167,9 @@ def test_compute_pcs_clamps_components_to_n_when_few_points() -> None:
     assert pcs.shape[1] >= 1
 
 
-def test_compute_pcs_clamps_components_to_dimensionality() -> None:
+def test_compute_pcs_clamps_components_to_dimensionality(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # Embeddings can't have more axes than their own dimensionality.
     rng = np.random.default_rng(0)
     matrix = rng.standard_normal((10, 2)).astype(np.float32)
@@ -161,7 +177,9 @@ def test_compute_pcs_clamps_components_to_dimensionality() -> None:
     assert pcs.shape == (10, 2)
 
 
-def test_compute_pcs_is_deterministic_with_seeded_input() -> None:
+def test_compute_pcs_is_deterministic_with_seeded_input(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     rng = np.random.default_rng(7)
     matrix = rng.standard_normal((20, 8)).astype(np.float32)
     a = compute_pcs(matrix, n_components=4)
@@ -172,7 +190,9 @@ def test_compute_pcs_is_deterministic_with_seeded_input() -> None:
     np.testing.assert_allclose(np.abs(a), np.abs(b), rtol=0, atol=1e-6)
 
 
-def test_compute_pcs_empty_input_returns_empty_array() -> None:
+def test_compute_pcs_empty_input_returns_empty_array(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     matrix = np.zeros((0, 8), dtype=np.float32)
     pcs = compute_pcs(matrix, n_components=4)
     assert pcs.shape == (0, 0)
