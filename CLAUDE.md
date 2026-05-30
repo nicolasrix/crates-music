@@ -250,13 +250,40 @@ music-specific acoustic similarity. Done so far:
 - Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +
   xlm-roberta-base into the HF cache; `docker-compose.clamp3.yml` flips
   the gateway to 768 via `gen_config.py`'s new optional `[recommend]`
-  section.
+  section. GPU twins `docker/embedder/Dockerfile.clamp3-rocm` +
+  `docker-compose.clamp3-rocm.yml` (rocm6.4 wheels, MIOpen kernel cache,
+  HF prebake) — the split-host shape, since the embedder runs on the
+  GPU host's GPU (RDNA4) and the gateway reaches it over the LAN.
+- **GPU image built + smoke-tested + swapped live (2026-05-30).** Real
+  forward pass on RDNA4 verified end-to-end: `/healthz` →
+  `dim:768, device:cuda`, saas `state_dict` aligns, output L2-normed
+  (norm=1.0), warm ~230 ms/clip (cold first call ~5 s = MIOpen JIT,
+  then cached). The GPU box's `:9000` embedder is now CLaMP 3 (was CLAP),
+  same container name + port + shared bearer token.
 
-Not yet done: **end-to-end build/smoke run on the host** (image not
-built; real forward pass unverified), and the **production cutover**
-(stage the saas checkpoint, wipe the 512-dim ANN sidecar, re-embed the
-library on CPU — recommender runs degraded until it drains). The 512→768
-dim change makes the existing ANN non-migratable.
+Deployment topology (discovered 2026-05-30): the **GPU embedder runs on
+the GPU host** (`192.0.2.53:9000`); the **live recommender consumer is
+the NAS gateway** (`crates-gateway`), whose `EMBEDDER_URL` dials that
+box over the LAN. the NAS host's own `crates-embedder` (CLAP CPU) is vestigial
+— unused while `EMBEDDER_URL` points off-box. The GPU host additionally
+runs a caddy+gateway *cert/proxy test* instance with a deliberately-dead
+embedder URL — not a recommender.
+
+Not yet done — **production cutover on the NAS host** (the irreversible part):
+the live `crates-music/gateway:dev` image there was built 2026-05-27, days
+*before* the 768 support (gen_config.py `RECOMMEND_EMBEDDING_DIM` +
+`[recommend].embedding_dim`, all committed 2026-05-30) — its baked
+`gen_config.py` has zero `RECOMMEND_EMBEDDING_DIM` references, so a
+YAML-only `RECOMMEND_EMBEDDING_DIM: '768'` edit is a **silent no-op**.
+The cutover is therefore: (1) rebuild `crates-music/gateway:dev` from this
+branch and ship it to the NAS host (`scripts/ship-image.sh … nas-host`,
+`REMOTE_DOCKER="sudo docker"`); (2) add `RECOMMEND_EMBEDDING_DIM: '768'`
+to the gateway service in the NAS Custom App YAML; (3) wipe the
+512-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) from the gateway's
+`gw-data` — the 512→768 change makes it non-migratable; (4) Save/restart;
+(5) re-embed via `scripts/enqueue_all_tracks.py` — recommender runs
+degraded until the GPU drains the queue. Until step 1–4 land, the NAS
+gateway (512) is dim-mismatched against the now-768 embedder.
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
