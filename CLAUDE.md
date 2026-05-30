@@ -231,6 +231,33 @@ web has the optimistic-update sync provider. Single-linearizer model
 (P6.8), text-query stations via CLAP's text encoder (P6.9). The event
 log is in place to capture signal for P6.8 when it lands.
 
+**CLaMP 3 migration — in flight (`feat/clamp3-migration`).** Swapping
+the content embedder from LAION CLAP (512-dim) to
+[CLaMP 3](https://github.com/sanderwood/clamp3) (768-dim) for stronger
+music-specific acoustic similarity. Done so far:
+
+- Upstream inference code vendored under
+  `services/embedder/embedder/_clamp3/` (slim `model.py` / `audio_io.py`
+  / `feature_extractor.py` / MusicHuBERT, pinned at upstream `9016d2b`,
+  `LICENSES/` + `VENDORED.md`).
+- `Clamp3Embedder` backend (`embedder/clamp3_backend.py`): MERT-v1-95M
+  frontend → mean-over-13-layers → BOS/EOS markers → CLaMP 3 audio
+  encoder → L2-norm, producing 768-dim vectors. Selected via
+  `EMBEDDER_BACKEND=clamp3` (`CLAMP3_CHECKPOINT` + `MERT_FOLDER`), behind
+  the new `[clamp3]` extra. `embed_text` deliberately raises until P6.9.
+- Dim is now a per-backend property (not an app constant);
+  `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
+- Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +
+  xlm-roberta-base into the HF cache; `docker-compose.clamp3.yml` flips
+  the gateway to 768 via `gen_config.py`'s new optional `[recommend]`
+  section.
+
+Not yet done: **end-to-end build/smoke run on the host** (image not
+built; real forward pass unverified), and the **production cutover**
+(stage the saas checkpoint, wipe the 512-dim ANN sidecar, re-embed the
+library on CPU — recommender runs degraded until it drains). The 512→768
+dim change makes the existing ANN non-migratable.
+
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
 plus a web `/diagnostics` page that renders them and a browser RUM
