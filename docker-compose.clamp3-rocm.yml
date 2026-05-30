@@ -1,0 +1,56 @@
+# CLaMP 3-variant compose override — AMD ROCm GPU inference.
+#
+# GPU twin of docker-compose.clamp3.yml. Stacks on the split-host
+# embedder-only base (the GPU box runs the embedder; the gateway runs on
+# the NAS host and reaches it over the LAN at $EMBEDDER_URL):
+#
+#   cp docker/.env.example .env
+#   $EDITOR .env    # set EMBEDDER_BEARER_TOKEN (match the gateway),
+#                   # CLAMP3_CHECKPOINT_PATH, optional RENDER_GID/VIDEO_GID
+#   docker compose -f docker-compose.embedder-only.yml \
+#                  -f docker-compose.clamp3-rocm.yml up --build
+#
+# A supported split-host shape: gateway + caddy on the NAS host, the GPU
+# CLaMP 3 embedder here on :9000. The cutover from the CLAP GPU embedder
+# is: bring this up on the same port + bearer token, then on the gateway
+# set recommend.embedding_dim = 768 and wipe the 512-dim ANN sidecar.
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clamp3-rocm
+    image: crates-music/embedder-clamp3-rocm:dev
+    environment:
+      EMBEDDER_BACKEND: clamp3
+      # CLAMP3_CHECKPOINT + MERT_FOLDER default to the baked values
+      # (canonical saas filename + the offline-cached MERT hub id), so
+      # they need no override as long as the bind target below matches.
+      # HSA_OVERRIDE_GFX_VERSION: only if rocm-smi sees the card but torch
+      # reports cuda.is_available()==False. Unnecessary on RDNA4.
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+    devices:
+      # ROCm kernel driver entry point + render nodes. /dev/dri/card* is
+      # not needed (display output); the embedder only computes.
+      - /dev/kfd
+      - /dev/dri
+    # Host group memberships for the devices above. Arch/Cachy/Fedora
+    # default to 988/984; Debian uses render=109, video=44. Check with
+    # `getent group render video` and override in .env. Belt-and-braces
+    # when the host device nodes are mode 666.
+    group_add:
+      - "${RENDER_GID:-988}"
+      - "${VIDEO_GID:-984}"
+    volumes:
+      # Bind the saas .pth read-only at the canonical in-container path
+      # (matches the Dockerfile's CLAMP3_CHECKPOINT default, so the
+      # model_version stays the canonical name regardless of the host
+      # filename/location). The checkpoint is data — never baked.
+      - type: bind
+        source: ${CLAMP3_CHECKPOINT_PATH:?set CLAMP3_CHECKPOINT_PATH in .env to the host path of the saas .pth}
+        target: /models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth
+        read_only: true
+    # CLaMP 3 stages more CPU-side weight memory than CLAP (saas checkpoint
+    # + MERT-95M + xlm-roberta-base) plus the MIOpen JIT pipeline. 8 GB
+    # observed safe; tighten once you've watched a sustained ingest run.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-8g}
