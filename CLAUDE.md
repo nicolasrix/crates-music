@@ -251,6 +251,20 @@ music-specific acoustic similarity. Done so far:
   tokenize → MAX_TEXT_LENGTH-windowed CLaMP 3 text encoder →
   token-count-weighted mean → L2-norm, into the *same* 768-dim joint
   space as audio. Drives `GET /v1/recommend/station?text=…` (P6.9).
+- **ABTT whitening** (`music-recommend/src/whitening.rs`): CLaMP 3
+  embeddings are anisotropic (a narrow cone → inflated, poorly-separated
+  cosines, esp. for text-query stations). All-but-the-Top fixes this:
+  subtract the corpus mean, project out the top ~dim/100 principal
+  directions (power-iteration + deflation, no linalg dep), renormalize.
+  Fit *post-hoc* over the existing audio embeddings — **no re-embedding**.
+  The transform lives in `AnnIndex` (whitens on `upsert`/`rebuild_from`/
+  `query`; `None` = identity), so the ANN holds de-coned vectors and the
+  single rule "whiten a raw vector exactly once on entry" holds — the only
+  consumer change is `lookup_seed_vector` returning the raw SQLite row.
+  Cached per-model in `embedding_whitening` (migration 0011), fit-or-load
+  at boot, gated by `[recommend].whitening_enabled` (default true). Refit
+  via `POST /v1/recommend/refit_whitening`. Audio-only for now; a separate
+  text-mean (cross-modal gap) correction is a tracked follow-up.
 - Dim is now a per-backend property (not an app constant);
   `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
 - Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +

@@ -15,6 +15,7 @@ use music_recommend::FeedbackStore;
 use music_recommend::PlayHistoryStore;
 use music_recommend::ProjectionStore;
 use music_recommend::SessionStore;
+use music_recommend::WhiteningStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
@@ -49,6 +50,11 @@ struct Inner {
     projection: ProjectionStore,
     sessions: SessionStore,
     ann: Arc<AnnIndex>,
+    /// Persistence for the ANN's whitening transform. The *live* transform
+    /// lives in `ann` (shared with the ingest worker); this store just
+    /// caches the fitted (mean, components) so the refit endpoint can
+    /// persist them and a restart can reload without refitting.
+    whitening_store: WhiteningStore,
     /// The model_version the recommender stamps on enqueue + ANN
     /// queries. Sourced from the embedder's last health probe; falls
     /// back to "default" when the embedder is disabled.
@@ -99,6 +105,7 @@ impl AppState {
         let feedback = FeedbackStore::new(embedding_store.pool().clone());
         let projection = ProjectionStore::new(embedding_store.pool().clone());
         let sessions = SessionStore::new(embedding_store.pool().clone());
+        let whitening_store = WhiteningStore::new(embedding_store.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -116,6 +123,7 @@ impl AppState {
                 projection,
                 sessions,
                 ann,
+                whitening_store,
                 recommend_model_version,
                 trace_store,
                 placeholder_etags: RwLock::new(HashSet::new()),
@@ -158,6 +166,10 @@ impl AppState {
 
     pub fn ann(&self) -> &Arc<AnnIndex> {
         &self.inner.ann
+    }
+
+    pub fn whitening_store(&self) -> &WhiteningStore {
+        &self.inner.whitening_store
     }
 
     pub fn embedding_store(&self) -> &EmbeddingStore {

@@ -1871,3 +1871,64 @@ mod station {
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 }
+
+// --- /v1/recommend/refit_whitening -----------------------------------
+
+mod refit_whitening {
+    use super::*;
+    use music_recommend::{Embedding, EmbeddingKey};
+
+    /// Seed `count` done embeddings into the store for the state's model.
+    async fn seed_done(state: &music_gateway::AppState, count: usize) {
+        let mv = state.recommend_model_version().clone();
+        for i in 0..count {
+            let key = EmbeddingKey::new(TrackId::from(format!("t{i}")), mv.clone());
+            state.embedding_store().enqueue(&key).await.unwrap();
+            // Spread the vectors across axes so the corpus has variance to
+            // fit a transform from (a constant corpus yields k = 0).
+            let mut v = unit_at(i % DIM);
+            v[(i + 1) % DIM] = 0.5;
+            state
+                .embedding_store()
+                .mark_done(&Embedding::new(key, v))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fits_persists_and_installs_on_ann() {
+        let state = build_state(test_config()).await;
+        seed_done(&state, DIM).await;
+        assert!(!state.ann().has_whitening());
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(auth_post("/v1/recommend/refit_whitening", &json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json(resp).await;
+        assert_eq!(body["n_samples"], DIM);
+        assert_eq!(body["dim"], DIM);
+        assert!(body["k"].as_u64().unwrap() >= 1);
+
+        // Transform is now live on the ANN, and persisted so a reload
+        // wouldn't have to refit.
+        assert!(state.ann().has_whitening());
+        let mv = state.recommend_model_version().clone();
+        assert!(state.whitening_store().get(&mv).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn conflict_when_no_embeddings() {
+        let state = build_state(test_config()).await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(auth_post("/v1/recommend/refit_whitening", &json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+}

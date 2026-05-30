@@ -18,12 +18,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use music_core::TrackId;
 use serde::{Deserialize, Serialize};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+
+use crate::whitening::Whitening;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnnError {
@@ -38,6 +41,9 @@ pub enum AnnError {
 
     #[error("lock poisoned")]
     Poisoned,
+
+    #[error("whitening: {0}")]
+    Whitening(String),
 }
 
 /// Map any usearch (cxx) error into our type. Local helper instead of
@@ -62,6 +68,19 @@ pub struct AnnIndex {
     /// lock unless there's actually something to flush. Atomic so the
     /// signal is lock-free.
     dirty: AtomicBool,
+    /// Optional All-but-the-Top whitening transform. When `Some`, every
+    /// raw vector that *enters* the index — via `upsert`, `rebuild_from`,
+    /// or as a `query` input — is whitened first, so the HNSW holds (and
+    /// compares) de-coned vectors. `None` is identity: the index behaves
+    /// exactly as it did before whitening existed (this is what tests and
+    /// the `whitening_enabled = false` config path rely on).
+    ///
+    /// Held in its own lock so a refit (`set_whitening`) doesn't contend
+    /// with the index lock, and so a `query` can clone the `Arc` out
+    /// without holding a lock across the search. `get_vector` returns the
+    /// *stored* (already-whitened) vector — that's correct for MMR's
+    /// candidate-vs-candidate cosine and is why no caller re-whitens.
+    whitening: RwLock<Option<Arc<Whitening>>>,
 }
 
 impl std::fmt::Debug for AnnIndex {
@@ -99,6 +118,7 @@ impl AnnIndex {
             }),
             dim,
             dirty: AtomicBool::new(false),
+            whitening: RwLock::new(None),
         })
     }
 
@@ -144,7 +164,47 @@ impl AnnIndex {
             // A freshly-opened index reflects whatever's on disk. Not
             // dirty until something mutates it.
             dirty: AtomicBool::new(false),
+            whitening: RwLock::new(None),
         })
+    }
+
+    /// Install (or clear) the whitening transform. Subsequent `upsert`,
+    /// `rebuild_from`, and `query` calls apply it. Changing the transform
+    /// does NOT retroactively re-whiten vectors already in the index — the
+    /// caller must follow a `set_whitening` with a `rebuild_from` so the
+    /// stored vectors match the new transform. Rejects a transform whose
+    /// dimensionality doesn't match the index.
+    pub fn set_whitening(&self, whitening: Option<Arc<Whitening>>) -> Result<(), AnnError> {
+        if let Some(w) = &whitening
+            && w.dim() != self.dim
+        {
+            return Err(AnnError::DimMismatch {
+                expected: self.dim,
+                got: w.dim(),
+            });
+        }
+        let mut guard = self.whitening.write().map_err(|_| AnnError::Poisoned)?;
+        *guard = whitening;
+        Ok(())
+    }
+
+    /// Whether a whitening transform is currently installed.
+    pub fn has_whitening(&self) -> bool {
+        self.whitening.read().is_ok_and(|g| g.is_some())
+    }
+
+    /// Apply the installed transform to a raw vector, or pass it through
+    /// unchanged when whitening is disabled. Returns an owned vector
+    /// either way — the per-call clone (≈3 KB at dim 768) is negligible
+    /// next to the HNSW search it precedes.
+    fn whiten(&self, raw: &[f32]) -> Result<Vec<f32>, AnnError> {
+        let guard = self.whitening.read().map_err(|_| AnnError::Poisoned)?;
+        match guard.as_ref() {
+            Some(w) => w
+                .transform(raw)
+                .map_err(|e| AnnError::Whitening(e.to_string())),
+            None => Ok(raw.to_vec()),
+        }
     }
 
     pub fn len(&self) -> Result<usize, AnnError> {
@@ -164,6 +224,10 @@ impl AnnIndex {
                 got: vector.len(),
             });
         }
+        // Whiten on the way in (identity when disabled). Dimensionality
+        // is preserved, so the stored vector is still `self.dim`-long.
+        let vector = self.whiten(vector)?;
+        let vector = vector.as_slice();
         let mut inner = self.inner.write().map_err(|_| AnnError::Poisoned)?;
         // Replace path: usearch supports duplicate-key removal via
         // `remove`, so we evict the old vector before inserting the
@@ -263,6 +327,13 @@ impl AnnIndex {
         if k == 0 {
             return Ok(Vec::new());
         }
+        // Whiten the query into the same space as the stored vectors
+        // (identity when disabled). Raw text/seed vectors arrive here;
+        // a seed already in the index is fetched + whitened upstream by
+        // its raw store row, never via `get_vector`, so it's whitened
+        // exactly once.
+        let query = self.whiten(query)?;
+        let query = query.as_slice();
         let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
         let index_size = inner.forward.len();
         // Over-fetch by `exclude.len()` so we can drop matches and
@@ -367,6 +438,9 @@ impl AnnIndex {
     where
         I: IntoIterator<Item = (&'a TrackId, &'a [f32])>,
     {
+        // Snapshot the transform once (clone the Arc, drop the guard) so
+        // the per-vector whitening below holds only the index lock.
+        let whitening = self.whitening.read().map_err(|_| AnnError::Poisoned)?.clone();
         let mut inner = self.inner.write().map_err(|_| AnnError::Poisoned)?;
         inner.index.reset().map_err(to_usearch_err)?;
         inner.forward.clear();
@@ -379,10 +453,16 @@ impl AnnIndex {
                     got: v.len(),
                 });
             }
+            let whitened: Vec<f32> = match &whitening {
+                Some(w) => w
+                    .transform(v)
+                    .map_err(|e| AnnError::Whitening(e.to_string()))?,
+                None => v.to_vec(),
+            };
             let key = inner.next_key;
             inner.next_key += 1;
             ensure_capacity(&inner.index, inner.forward.len() + 1)?;
-            inner.index.add(key, v).map_err(to_usearch_err)?;
+            inner.index.add(key, &whitened).map_err(to_usearch_err)?;
             inner.forward.insert(id.clone(), key);
             inner.reverse.insert(key, id.clone());
         }
@@ -432,4 +512,127 @@ fn ensure_capacity(index: &Index, needed: usize) -> Result<(), AnnError> {
     let cap = needed.next_power_of_two().max(64);
     index.reserve(cap).map_err(to_usearch_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // Test fixtures build vectors from small integer indices; the f32
+    // casts are exact at these magnitudes.
+    #![allow(clippy::cast_precision_loss)]
+    use super::*;
+    use crate::whitening::Whitening;
+
+    /// Strongly anisotropic corpus: a large shared component on axis 0
+    /// (the "cone") plus small per-item signal on the other axes — the
+    /// shape ABTT is meant to fix.
+    fn corpus() -> Vec<Vec<f32>> {
+        (0..30)
+            .map(|i| {
+                let t = i as f32;
+                vec![
+                    10.0 + 0.1 * t,
+                    (i % 5) as f32 * 0.2,
+                    (i % 7) as f32 * 0.3,
+                    -((i % 3) as f32) * 0.2,
+                ]
+            })
+            .collect()
+    }
+
+    fn fill(ann: &AnnIndex, data: &[Vec<f32>]) {
+        for (i, v) in data.iter().enumerate() {
+            ann.upsert(&TrackId::from(format!("t{i}")), v).unwrap();
+        }
+    }
+
+    #[test]
+    fn has_whitening_reflects_install() {
+        let ann = AnnIndex::open_in_memory(4, 16).unwrap();
+        assert!(!ann.has_whitening());
+        ann.set_whitening(Some(Arc::new(Whitening::fit(&corpus(), 1).unwrap())))
+            .unwrap();
+        assert!(ann.has_whitening());
+        ann.set_whitening(None).unwrap();
+        assert!(!ann.has_whitening());
+    }
+
+    #[test]
+    fn set_whitening_rejects_dim_mismatch() {
+        let ann = AnnIndex::open_in_memory(3, 16).unwrap();
+        let w = Whitening::fit(&corpus(), 1).unwrap(); // dim 4
+        assert!(matches!(
+            ann.set_whitening(Some(Arc::new(w))),
+            Err(AnnError::DimMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn query_with_raw_vector_tops_its_own_track_under_whitening() {
+        let data = corpus();
+        let ann = AnnIndex::open_in_memory(4, 16).unwrap();
+        ann.set_whitening(Some(Arc::new(Whitening::fit(&data, 1).unwrap())))
+            .unwrap();
+        fill(&ann, &data);
+        // Query with a *raw* vector (the same one stored as raw). Both the
+        // stored vector and the query get whitened identically, so the
+        // matching track tops the list at ~1.0 similarity. This is the
+        // "whiten exactly once on both sides" consistency guarantee.
+        let res = ann.query(&data[7], 3).unwrap();
+        assert_eq!(res[0].track_id, TrackId::from("t7"));
+        assert!(res[0].similarity > 0.99, "sim {}", res[0].similarity);
+    }
+
+    #[test]
+    fn whitening_spreads_similarities_in_a_shared_cone() {
+        let data = corpus();
+        let seed = &data[0];
+
+        let raw = AnnIndex::open_in_memory(4, 16).unwrap();
+        fill(&raw, &data);
+        let raw_sims: Vec<f32> = raw.query(seed, 10).unwrap().iter().map(|r| r.similarity).collect();
+        // Raw vectors share a dominant axis-0 component → all near-parallel.
+        assert!(
+            raw_sims.iter().all(|&s| s > 0.95),
+            "raw corpus not anisotropic enough: {raw_sims:?}"
+        );
+
+        let white = AnnIndex::open_in_memory(4, 16).unwrap();
+        white
+            .set_whitening(Some(Arc::new(Whitening::fit(&data, 1).unwrap())))
+            .unwrap();
+        fill(&white, &data);
+        let white_sims: Vec<f32> = white
+            .query(seed, 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.similarity)
+            .collect();
+        let white_min = white_sims.iter().copied().fold(f32::INFINITY, f32::min);
+        // Removing the shared cone separates the neighbours: the tail of
+        // the top-10 drops well below the raw floor.
+        assert!(
+            white_min < 0.95,
+            "whitening did not spread similarities: {white_sims:?}"
+        );
+    }
+
+    #[test]
+    fn rebuild_from_whitens_when_installed() {
+        // rebuild_from is the boot path; it must whiten too, so a query
+        // with a raw seed still matches its own track.
+        let data = corpus();
+        let ann = AnnIndex::open_in_memory(4, 16).unwrap();
+        ann.set_whitening(Some(Arc::new(Whitening::fit(&data, 1).unwrap())))
+            .unwrap();
+        let pairs: Vec<(TrackId, Vec<f32>)> = data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (TrackId::from(format!("t{i}")), v.clone()))
+            .collect();
+        ann.rebuild_from(pairs.iter().map(|(t, v)| (t, v.as_slice())))
+            .unwrap();
+        let res = ann.query(&data[3], 1).unwrap();
+        assert_eq!(res[0].track_id, TrackId::from("t3"));
+        assert!(res[0].similarity > 0.99);
+    }
 }

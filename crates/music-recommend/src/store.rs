@@ -353,7 +353,7 @@ fn now_ms() -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
-fn vector_to_blob(v: &[f32]) -> Vec<u8> {
+pub(crate) fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for f in v {
         out.extend_from_slice(&f.to_le_bytes());
@@ -361,7 +361,7 @@ fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     out
 }
 
-fn blob_to_vector(b: &[u8]) -> Result<Vec<f32>> {
+pub(crate) fn blob_to_vector(b: &[u8]) -> Result<Vec<f32>> {
     if !b.len().is_multiple_of(4) {
         return Err(Error::CorruptVectorBlob { bytes: b.len() });
     }

@@ -24,6 +24,8 @@ pub mod queue_filter;
 pub mod sessions;
 pub mod store;
 pub mod types;
+pub mod whitening;
+pub mod whitening_store;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
@@ -39,6 +41,8 @@ pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use sessions::{SessionRow, SessionStore};
 pub use store::{EmbeddingStore, MIGRATIONS};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
+pub use whitening::{Whitening, default_k};
+pub use whitening_store::WhiteningStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -56,6 +60,9 @@ pub enum Error {
 
     #[error("invalid status string {0:?}")]
     InvalidStatus(String),
+
+    #[error("whitening: {0}")]
+    Whitening(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

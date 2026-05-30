@@ -27,6 +27,8 @@ use music_recommend::metadata::MetadataStore;
 use music_recommend::projection::ProjectionStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
+use music_recommend::whitening::{Whitening, default_k};
+use music_recommend::whitening_store::WhiteningStore;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -146,6 +148,7 @@ async fn main() -> Result<()> {
     let recommend = boot_recommender(
         &config.oauth.state_db,
         config.recommend.embedding_dim,
+        config.recommend.whitening_enabled,
         &embedder,
     )
     .await?;
@@ -224,6 +227,7 @@ struct RecommenderState {
 async fn boot_recommender(
     state_db: &Path,
     embedding_dim: usize,
+    whitening_enabled: bool,
     embedder: &EmbedderHandle,
 ) -> Result<RecommenderState> {
     let recommend_db_path = state_db.with_extension("recommend.sqlite");
@@ -248,22 +252,45 @@ async fn boot_recommender(
         .last_health()
         .map_or_else(|| ModelVersion::from("default"), |h| h.model_version);
 
+    // All-but-the-Top whitening: load the cached transform for this model,
+    // or fit one from the existing embeddings (post-hoc — no re-embedding).
+    // Installing it on the ANN means stored + queried vectors are de-coned,
+    // fixing CLaMP 3's anisotropy. Installing a transform forces a full ANN
+    // rebuild below, since any on-disk vectors predate it.
+    let mut whitening_installed = false;
+    if whitening_enabled {
+        if let Some(w) = load_or_fit_whitening(&embedding_store, embedding_dim, &model_version).await?
+        {
+            ann.set_whitening(Some(Arc::new(w)))
+                .context("installing whitening transform")?;
+            whitening_installed = true;
+        } else {
+            tracing::info!(
+                model = %model_version,
+                "recommend: whitening enabled but no embeddings yet; deferring fit to first refit"
+            );
+        }
+    }
+
     // Safety net for the historical persist-on-write gap: if SQLite
     // has more `done` rows for this model than the ANN does, our
     // on-disk index is stale (likely because the gateway crashed
     // between an upsert and the next periodic persist). Rebuild from
     // SQLite — it's the source of truth — and persist immediately.
     // The "ann empty" case is the cold-start subset of this; treat
-    // both with one branch.
+    // both with one branch. A freshly-installed whitening transform also
+    // forces a rebuild: the on-disk vectors are raw (or whitened by an
+    // older transform) and must be re-whitened to match.
     let ann_len = ann.len()?;
     let sqlite_done = embedding_store.counts(&model_version).await?.done;
     let ann_len_u64 = u64::try_from(ann_len).unwrap_or(u64::MAX);
-    if ann_len_u64 < sqlite_done {
+    if whitening_installed || ann_len_u64 < sqlite_done {
         tracing::info!(
             model = %model_version,
             ann_len,
             sqlite_done,
-            "recommend: ANN behind SQLite, rebuilding"
+            whitening = whitening_installed,
+            "recommend: rebuilding ANN from SQLite"
         );
         rebuild_ann_from_store(&embedding_store, &ann, &model_version)
             .await
@@ -286,4 +313,47 @@ async fn boot_recommender(
         ann: Arc::new(ann),
         model_version,
     })
+}
+
+/// Load the cached ABTT whitening transform for `model_version`, or fit a
+/// fresh one from the existing `done` embeddings and persist it. Returns
+/// `None` when there are no embeddings yet (cold start) — the caller runs
+/// the ANN un-whitened until a refit (or the next boot) can fit one.
+async fn load_or_fit_whitening(
+    embedding_store: &EmbeddingStore,
+    embedding_dim: usize,
+    model_version: &ModelVersion,
+) -> Result<Option<Whitening>> {
+    let store = WhiteningStore::new(embedding_store.pool().clone());
+    if let Some(w) = store.get(model_version).await.context("loading whitening")? {
+        tracing::info!(model = %model_version, k = w.k(), "recommend: loaded cached whitening");
+        return Ok(Some(w));
+    }
+
+    let corpus = embedding_store.list_done_embeddings(model_version).await?;
+    if corpus.is_empty() {
+        return Ok(None);
+    }
+    let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
+    let k = default_k(embedding_dim);
+    let w = Whitening::fit(&vectors, k)
+        .map_err(|e| anyhow::anyhow!("fitting whitening: {e}"))?;
+    store
+        .upsert(model_version, &w, vectors.len(), now_unix_ms())
+        .await
+        .context("persisting fitted whitening")?;
+    tracing::info!(
+        model = %model_version,
+        n = vectors.len(),
+        k = w.k(),
+        "recommend: fitted + persisted whitening transform"
+    );
+    Ok(Some(w))
+}
+
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }

@@ -14,6 +14,7 @@
 //!   INSERT-OR-IGNORE.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -23,12 +24,13 @@ use axum::{
 };
 use music_core::TrackId;
 use music_recommend::aggregate::sample_indices;
+use music_recommend::ingest::rebuild_ann_from_store;
 use music_recommend::metadata::MetadataStore;
 use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
 use music_recommend::types::ModelVersion;
-use music_recommend::{EmbeddingKey, EmbeddingStore, ann::AnnIndex};
+use music_recommend::{EmbeddingKey, EmbeddingStore, Whitening, ann::AnnIndex, default_k};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
@@ -255,6 +257,87 @@ pub async fn enqueue(
     // an error but also doesn't bump the queue length. The test
     // suite asserts behaviour on `counts`, not on this scalar.
     (StatusCode::ACCEPTED, Json(EnqueueResponse { enqueued })).into_response()
+}
+
+// --- /v1/recommend/refit_whitening -----------------------------------
+//
+// Admin: refit the ABTT whitening transform from the current corpus,
+// persist it, install it on the ANN, and rebuild the index so stored
+// vectors are re-whitened. Use after a large batch of new embeddings, or
+// to (re)enable whitening on a previously un-whitened index. The corpus
+// mean drifts slowly, so this is occasional maintenance, not per-upsert.
+
+#[derive(Debug, Serialize)]
+pub struct RefitWhiteningResponse {
+    pub model_version: String,
+    pub n_samples: usize,
+    pub k: usize,
+    pub dim: usize,
+    pub fitted_at_ms: i64,
+}
+
+#[tracing::instrument(name = "recommend.refit_whitening", skip_all)]
+pub async fn refit_whitening(
+    State(state): State<AppState>,
+) -> Result<Json<RefitWhiteningResponse>, (StatusCode, &'static str)> {
+    let model_version = state.recommend_model_version().clone();
+    let corpus = state
+        .embedding_store()
+        .list_done_embeddings(&model_version)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "listing embeddings failed"))?;
+    if corpus.is_empty() {
+        return Err((StatusCode::CONFLICT, "no embeddings to fit on"));
+    }
+    let n_samples = corpus.len();
+    let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
+    let dim = vectors[0].len();
+    let k = default_k(dim);
+    let whitening = Whitening::fit(&vectors, k)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "fitting whitening failed"))?;
+
+    let fitted_at_ms = now_unix_ms();
+    state
+        .whitening_store()
+        .upsert(&model_version, &whitening, n_samples, fitted_at_ms)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "persisting whitening failed"))?;
+
+    let resp = RefitWhiteningResponse {
+        model_version: model_version.as_str().to_string(),
+        n_samples,
+        k: whitening.k(),
+        dim,
+        fitted_at_ms,
+    };
+
+    // Install the new transform, then rebuild the ANN so every stored
+    // vector is re-whitened to match. Order matters: set_whitening first,
+    // so rebuild_from applies the new transform.
+    state
+        .ann()
+        .set_whitening(Some(Arc::new(whitening)))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "installing whitening failed"))?;
+    rebuild_ann_from_store(state.embedding_store(), state.ann(), &model_version)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "rebuilding ANN failed"))?;
+    // Best-effort persist; the periodic persister will catch it otherwise.
+    let _ = state.ann().persist();
+
+    tracing::info!(
+        model = %model_version,
+        n_samples,
+        k = resp.k,
+        "recommend: refit whitening + rebuilt ANN"
+    );
+    Ok(Json(resp))
+}
+
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 // --- /v1/recommend/from-seeds ----------------------------------------
@@ -1620,7 +1703,14 @@ async fn lookup_seed_vector(
     seed: &TrackId,
     model_version: &ModelVersion,
 ) -> (Option<Vec<f32>>, &'static str) {
-    if let Ok(Some(v)) = ann.get_vector(seed) {
+    // When whitening is active the ANN holds *whitened* vectors; feeding
+    // one back into `query` (which whitens) would double-apply. So pull the
+    // *raw* row from SQLite and let `query` whiten it exactly once. With
+    // whitening off, the ANN vector is identical to the raw row, and the
+    // in-memory fast path saves a SQLite hop.
+    if !ann.has_whitening()
+        && let Ok(Some(v)) = ann.get_vector(seed)
+    {
         return (Some(v), "ann");
     }
     let key = EmbeddingKey::new(seed.clone(), model_version.clone());
