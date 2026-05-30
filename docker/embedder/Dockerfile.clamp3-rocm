@@ -123,6 +123,15 @@ RUN mkdir -p /models && chown embedder:embedder /models
 # Dockerfile.clap-rocm.
 RUN mkdir -p /var/cache/miopen && chown embedder:embedder /var/cache/miopen
 
+# numba (pulled in by umap-learn, which powers /reduce) JIT-compiles its
+# @njit(cache=True) kernels and tries to write the cache next to the
+# read-only site-packages — with no writable HOME it raises
+# "cannot cache function 'rdist': no locator available" at *import* time,
+# crashing `import umap` (and as a RuntimeError it bypasses /reduce's
+# graceful ImportError→503 path). Point numba at a writable baked dir so
+# the projection endpoint works. Same class of fix as MIOpen above.
+RUN mkdir -p /var/cache/numba && chown embedder:embedder /var/cache/numba
+
 USER embedder
 
 # CLAMP3_CHECKPOINT defaults to the canonical upstream saas filename. The
@@ -137,7 +146,8 @@ ENV EMBEDDER_BACKEND=clamp3 \
     MIOPEN_CUSTOM_CACHE_DIR=/var/cache/miopen \
     OMP_NUM_THREADS=4 \
     MKL_NUM_THREADS=4 \
-    NUMBA_NUM_THREADS=4
+    NUMBA_NUM_THREADS=4 \
+    NUMBA_CACHE_DIR=/var/cache/numba
     # NOTE: HSA_OVERRIDE_GFX_VERSION intentionally NOT set — rocm6.4 wheels
     # cover gfx1201 (RDNA4) on RDNA4 (gfx1201). Pass it via compose
     # env if your card needs ISA spoofing.

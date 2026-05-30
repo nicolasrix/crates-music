@@ -142,6 +142,12 @@ RUN mkdir -p ${HF_HOME} \
 # a permission-denied on mkdir.
 RUN mkdir -p /models && chown embedder:embedder /models
 
+# numba (via umap-learn → /reduce) JIT-caches @njit(cache=True) kernels and
+# tries to write next to read-only site-packages; with no writable HOME it
+# raises "cannot cache function 'rdist': no locator available" at import
+# time, crashing `import umap`. Give it a writable baked cache dir.
+RUN mkdir -p /var/cache/numba && chown embedder:embedder /var/cache/numba
+
 USER embedder
 
 # CLAMP3_CHECKPOINT defaults to the canonical upstream saas filename.
@@ -159,7 +165,8 @@ ENV EMBEDDER_BACKEND=clamp3 \
     # have headroom.
     OMP_NUM_THREADS=4 \
     MKL_NUM_THREADS=4 \
-    NUMBA_NUM_THREADS=4
+    NUMBA_NUM_THREADS=4 \
+    NUMBA_CACHE_DIR=/var/cache/numba
 
 EXPOSE 9000
 
