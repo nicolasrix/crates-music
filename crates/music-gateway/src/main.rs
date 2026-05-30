@@ -32,11 +32,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// Default embedding dimension. CLAP's audio + text encoders share a
-/// 512-dim space; we hardcode this here because the ANN index has to
-/// commit to a dim at construction time. If a future model uses a
-/// different dim, this becomes a config option.
-const DEFAULT_EMBEDDING_DIM: usize = 512;
 /// HNSW connectivity. usearch's recommended default for cosine-style
 /// similarity at our scale (~10⁴ vectors).
 const ANN_CONNECTIVITY: usize = 16;
@@ -148,7 +143,12 @@ async fn main() -> Result<()> {
     };
 
     let embedder = boot_probe(config.embedder.as_ref()).await;
-    let recommend = boot_recommender(&config.oauth.state_db, &embedder).await?;
+    let recommend = boot_recommender(
+        &config.oauth.state_db,
+        config.recommend.embedding_dim,
+        &embedder,
+    )
+    .await?;
 
     let fetcher: Arc<dyn AudioFetcher> = Arc::new(
         SubsonicAudioFetcher::new(&config.upstream).context("building Subsonic ingest fetcher")?,
@@ -226,7 +226,11 @@ struct RecommenderState {
 /// in-progress rows, open the ANN, and rebuild the ANN from SQLite
 /// when it's empty (cold start or wiped sidecar). Extracted from
 /// `main` so the entrypoint stays readable.
-async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<RecommenderState> {
+async fn boot_recommender(
+    state_db: &Path,
+    embedding_dim: usize,
+    embedder: &EmbedderHandle,
+) -> Result<RecommenderState> {
     let recommend_db_path = state_db.with_extension("recommend.sqlite");
     let embedding_store = EmbeddingStore::open(&recommend_db_path)
         .await
@@ -239,8 +243,11 @@ async fn boot_recommender(state_db: &Path, embedder: &EmbedderHandle) -> Result<
         tracing::info!(rows = reset, "recommend: reset stuck in_progress rows");
     }
 
+    if embedding_dim == 0 {
+        anyhow::bail!("recommend.embedding_dim must be > 0");
+    }
     let ann_path = state_db.with_extension("ann");
-    let ann = AnnIndex::open(&ann_path, DEFAULT_EMBEDDING_DIM, ANN_CONNECTIVITY)
+    let ann = AnnIndex::open(&ann_path, embedding_dim, ANN_CONNECTIVITY)
         .context("opening ANN index")?;
     let model_version = embedder
         .last_health()
