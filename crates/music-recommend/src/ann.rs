@@ -207,6 +207,19 @@ impl AnnIndex {
         }
     }
 
+    /// Whiten a raw *text* query: centers by the cross-modal text mean
+    /// (when fitted) so a station query lands in the same whitened space
+    /// as the stored audio vectors. Identity when whitening is disabled.
+    fn whiten_text(&self, raw: &[f32]) -> Result<Vec<f32>, AnnError> {
+        let guard = self.whitening.read().map_err(|_| AnnError::Poisoned)?;
+        match guard.as_ref() {
+            Some(w) => w
+                .transform_text(raw)
+                .map_err(|e| AnnError::Whitening(e.to_string())),
+            None => Ok(raw.to_vec()),
+        }
+    }
+
     pub fn len(&self) -> Result<usize, AnnError> {
         let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
         Ok(inner.forward.len())
@@ -300,18 +313,6 @@ impl AnnIndex {
     ///   trends *down* as the index grows; it is not constant. Useful
     ///   for catching "search got 5× slower per vector" regressions
     ///   without chasing absolute-time noise as the catalog evolves.
-    #[tracing::instrument(
-        name = "ann.query",
-        skip_all,
-        fields(
-            k = k,
-            excluded = exclude.len(),
-            returned = tracing::field::Empty,
-            index_size = tracing::field::Empty,
-            search_ns = tracing::field::Empty,
-            ns_per_vector = tracing::field::Empty,
-        ),
-    )]
     pub fn query_excluding(
         &self,
         query: &[f32],
@@ -328,12 +329,62 @@ impl AnnIndex {
             return Ok(Vec::new());
         }
         // Whiten the query into the same space as the stored vectors
-        // (identity when disabled). Raw text/seed vectors arrive here;
-        // a seed already in the index is fetched + whitened upstream by
-        // its raw store row, never via `get_vector`, so it's whitened
-        // exactly once.
+        // (identity when disabled). Raw seed vectors arrive here; a seed
+        // already in the index is fetched + whitened upstream by its raw
+        // store row, never via `get_vector`, so it's whitened exactly once.
         let query = self.whiten(query)?;
-        let query = query.as_slice();
+        self.search_whitened(&query, k, exclude)
+    }
+
+    /// Text-query search (stations). Whitens via the cross-modal text mean
+    /// so a raw text embedding lands in the same whitened space as the
+    /// stored audio vectors — without this, audio-fit whitening collapses
+    /// text queries together. No exclusion list: stations seed from text,
+    /// not a track id.
+    pub fn query_text(&self, query: &[f32], k: usize) -> Result<Vec<AnnQueryResult>, AnnError> {
+        if query.len() != self.dim {
+            return Err(AnnError::DimMismatch {
+                expected: self.dim,
+                got: query.len(),
+            });
+        }
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let query = self.whiten_text(query)?;
+        self.search_whitened(&query, k, &[])
+    }
+
+    /// Core HNSW search over an already-whitened query vector. Shared by
+    /// the audio (`query`/`query_excluding`) and text (`query_text`) paths.
+    ///
+    /// Span fields:
+    /// - `k`, `excluded`, `returned` — request shape and result count.
+    /// - `index_size` — number of vectors currently in the HNSW.
+    /// - `search_ns` — wall-clock ns spent inside `usearch::search`
+    ///   only (excludes validation, lock acquisition, exclusion
+    ///   filtering). This is the cost that scales with catalog size.
+    /// - `ns_per_vector` — `search_ns / index_size`. Catalog-size
+    ///   normalised perf indicator. HNSW is sub-linear, so this
+    ///   trends *down* as the index grows; it is not constant.
+    #[tracing::instrument(
+        name = "ann.query",
+        skip_all,
+        fields(
+            k = k,
+            excluded = exclude.len(),
+            returned = tracing::field::Empty,
+            index_size = tracing::field::Empty,
+            search_ns = tracing::field::Empty,
+            ns_per_vector = tracing::field::Empty,
+        ),
+    )]
+    fn search_whitened(
+        &self,
+        query: &[f32],
+        k: usize,
+        exclude: &[TrackId],
+    ) -> Result<Vec<AnnQueryResult>, AnnError> {
         let inner = self.inner.read().map_err(|_| AnnError::Poisoned)?;
         let index_size = inner.forward.len();
         // Over-fetch by `exclude.len()` so we can drop matches and
@@ -614,6 +665,27 @@ mod tests {
             white_min < 0.95,
             "whitening did not spread similarities: {white_sims:?}"
         );
+    }
+
+    #[test]
+    fn query_text_falls_back_to_audio_path_without_text_mean() {
+        // With no cross-modal text mean fitted, the text query path must
+        // mirror the audio query path exactly (both center by the audio
+        // mean) — so an un-fitted text mean never silently changes results.
+        let data = corpus();
+        let ann = AnnIndex::open_in_memory(4, 16).unwrap();
+        ann.set_whitening(Some(Arc::new(Whitening::fit(&data, 1).unwrap())))
+            .unwrap();
+        fill(&ann, &data);
+        let probe = vec![3.0_f32, 0.5, 0.2, 0.0];
+        let audio: Vec<_> = ann.query(&probe, 5).unwrap().into_iter().map(|r| r.track_id).collect();
+        let text: Vec<_> = ann
+            .query_text(&probe, 5)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect();
+        assert_eq!(audio, text);
     }
 
     #[test]

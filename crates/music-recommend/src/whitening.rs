@@ -56,11 +56,20 @@ pub fn default_k(dim: usize) -> usize {
 /// principal directions to project out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Whitening {
+    /// Audio corpus mean. Subtracted from audio vectors on the way into
+    /// the ANN and from audio (seed) queries.
     mean: Vec<f32>,
     /// `k` unit principal directions, each `dim`-long, in descending
     /// variance order. May be shorter than the requested `k` if the
-    /// corpus is rank-deficient.
+    /// corpus is rank-deficient. Shared by both modalities.
     components: Vec<Vec<f32>>,
+    /// Optional text-modality mean, for the cross-modal correction.
+    /// CLaMP 3 text embeddings sit at an offset from audio (the modality
+    /// gap); centering a text query by `text_mean` instead of the audio
+    /// `mean` — then applying the same `components` — keeps text and audio
+    /// comparable in the whitened space. `None` falls back to the audio
+    /// mean (text queries then collapse — the pre-fix behaviour).
+    text_mean: Option<Vec<f32>>,
     dim: usize,
 }
 
@@ -82,9 +91,24 @@ impl Whitening {
         &self.components
     }
 
+    pub fn text_mean(&self) -> Option<&[f32]> {
+        self.text_mean.as_deref()
+    }
+
+    /// Whether the cross-modal text mean has been fitted. When false,
+    /// `transform_text` falls back to the audio mean.
+    pub fn has_text_mean(&self) -> bool {
+        self.text_mean.is_some()
+    }
+
     /// Reconstruct from stored parts (e.g. loaded from SQLite). Validates
-    /// that every component matches `mean.len()`.
-    pub fn from_parts(mean: Vec<f32>, components: Vec<Vec<f32>>) -> Result<Self> {
+    /// that every component — and `text_mean`, if present — matches
+    /// `mean.len()`.
+    pub fn from_parts(
+        mean: Vec<f32>,
+        components: Vec<Vec<f32>>,
+        text_mean: Option<Vec<f32>>,
+    ) -> Result<Self> {
         let dim = mean.len();
         if dim == 0 {
             return Err(Error::Whitening("mean is empty".into()));
@@ -97,11 +121,34 @@ impl Whitening {
                 )));
             }
         }
+        if let Some(tm) = &text_mean
+            && tm.len() != dim
+        {
+            return Err(Error::Whitening(format!(
+                "text_mean has len {} but mean has dim {dim}",
+                tm.len()
+            )));
+        }
         Ok(Self {
             mean,
             components,
+            text_mean,
             dim,
         })
+    }
+
+    /// Attach (or replace) the cross-modal text mean, returning the
+    /// updated transform. Rejects a dimensionality mismatch.
+    pub fn with_text_mean(mut self, text_mean: Vec<f32>) -> Result<Self> {
+        if text_mean.len() != self.dim {
+            return Err(Error::Whitening(format!(
+                "text_mean has len {} but dim is {}",
+                text_mean.len(),
+                self.dim
+            )));
+        }
+        self.text_mean = Some(text_mean);
+        Ok(self)
     }
 
     /// Fit ABTT over a corpus of equal-length raw vectors. Removes up to
@@ -165,6 +212,7 @@ impl Whitening {
         Ok(Self {
             mean: mean.iter().map(|&x| x as f32).collect(),
             components,
+            text_mean: None,
             dim,
         })
     }
@@ -175,6 +223,23 @@ impl Whitening {
     /// lay entirely in the removed subspace) is returned un-normalized
     /// rather than divided by zero.
     pub fn transform(&self, raw: &[f32]) -> Result<Vec<f32>> {
+        self.transform_with_center(raw, &self.mean)
+    }
+
+    /// Apply the transform to a text query, centering by the cross-modal
+    /// `text_mean` (falling back to the audio mean if it hasn't been
+    /// fitted). Used by the station path so text queries land in the same
+    /// whitened space as the stored audio vectors.
+    pub fn transform_text(&self, raw: &[f32]) -> Result<Vec<f32>> {
+        let center = self.text_mean.as_deref().unwrap_or(&self.mean);
+        self.transform_with_center(raw, center)
+    }
+
+    /// Subtract `center`, project out the principal directions, and
+    /// L2-renormalize. A vector that collapses to ~0 (it lay entirely in
+    /// the removed subspace) is returned un-normalized rather than divided
+    /// by zero.
+    fn transform_with_center(&self, raw: &[f32], center: &[f32]) -> Result<Vec<f32>> {
         if raw.len() != self.dim {
             return Err(Error::Whitening(format!(
                 "transform input has len {} but dim is {}",
@@ -184,7 +249,7 @@ impl Whitening {
         }
         let mut c: Vec<f64> = raw
             .iter()
-            .zip(self.mean.iter())
+            .zip(center.iter())
             .map(|(&x, &m)| x as f64 - m as f64)
             .collect();
         for comp in &self.components {
@@ -390,9 +455,66 @@ mod tests {
 
     #[test]
     fn from_parts_validates_component_shape() {
-        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![vec![1.0, 2.0]]).is_ok());
-        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![vec![1.0]]).is_err());
-        assert!(Whitening::from_parts(vec![], vec![]).is_err());
+        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![vec![1.0, 2.0]], None).is_ok());
+        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![vec![1.0]], None).is_err());
+        assert!(Whitening::from_parts(vec![], vec![], None).is_err());
+        // text_mean dimensionality is validated too.
+        assert!(
+            Whitening::from_parts(vec![1.0, 2.0], vec![], Some(vec![0.1, 0.2])).is_ok()
+        );
+        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![], Some(vec![0.1])).is_err());
+    }
+
+    #[test]
+    fn transform_text_without_text_mean_equals_audio_transform() {
+        let vectors: Vec<Vec<f32>> = (0..30)
+            .map(|i| vec![i as f32, (i * 2) as f32 + 1.0, -(i as f32)])
+            .collect();
+        let w = Whitening::fit(&vectors, 1).unwrap();
+        assert!(!w.has_text_mean());
+        let probe = vec![3.0_f32, 9.0, -1.0];
+        // No text mean fitted → text path mirrors the audio path.
+        assert_eq!(w.transform_text(&probe).unwrap(), w.transform(&probe).unwrap());
+    }
+
+    #[test]
+    fn text_mean_decollapses_offset_queries() {
+        // Model the real modality gap: audio variance lives on axis 0 (so
+        // ABTT removes axis 0), while the text→audio offset lies on axis 2
+        // — a direction with ~no audio variance, so de-coning does NOT
+        // touch it. Centering a text query by the audio mean therefore
+        // leaves that large shared offset dominant and all text queries
+        // collapse together. Centering by the text mean (≈ the offset)
+        // removes it, so the small per-query signal on axis 1 separates
+        // them. This is exactly the live station regression + its fix.
+        let audio: Vec<Vec<f32>> = (0..60)
+            .map(|i| {
+                let t = (i as f32) - 30.0;
+                vec![0.5 * t, 0.01 * (((i % 3) as f32) - 1.0), 0.0, 0.0]
+            })
+            .collect();
+        let w = Whitening::fit(&audio, 1).unwrap();
+
+        // Two text queries: same big axis-2 offset, opposite axis-1 signal.
+        let t1 = vec![0.0_f32, 1.0, 20.0, 0.0];
+        let t2 = vec![0.0_f32, -1.0, 20.0, 0.0];
+
+        // Without text mean: the shared axis-2 offset dominates → collapse.
+        let a1 = w.transform_text(&t1).unwrap();
+        let a2 = w.transform_text(&t2).unwrap();
+        let cos_no_tm: f32 = a1.iter().zip(&a2).map(|(x, y)| x * y).sum();
+
+        // With a text mean ≈ the shared offset, the queries separate.
+        let w = w.with_text_mean(vec![0.0_f32, 0.0, 20.0, 0.0]).unwrap();
+        let b1 = w.transform_text(&t1).unwrap();
+        let b2 = w.transform_text(&t2).unwrap();
+        let cos_tm: f32 = b1.iter().zip(&b2).map(|(x, y)| x * y).sum();
+
+        assert!(cos_no_tm > 0.99, "expected collapse without text mean: {cos_no_tm}");
+        assert!(
+            cos_tm < cos_no_tm - 0.5,
+            "text mean should separate queries: no_tm={cos_no_tm} tm={cos_tm}"
+        );
     }
 
     #[test]

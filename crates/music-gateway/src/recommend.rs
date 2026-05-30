@@ -36,6 +36,7 @@ use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::whitening_text;
 
 const MAX_N: usize = 100;
 /// Hard cap on inputs to /v1/recommend/from-seeds. Refuse rather than
@@ -205,9 +206,13 @@ pub async fn station(
         (StatusCode::BAD_GATEWAY, "embedder error")
     })?;
 
+    // Text path: whiten via the cross-modal text mean so the query lands
+    // in the same whitened space as the stored audio vectors. Falls back
+    // to the audio transform (and to identity) when whitening / text_mean
+    // aren't installed.
     let results = state
         .ann()
-        .query(&embed.vector, n)
+        .query_text(&embed.vector, n)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
     tracing::Span::current().record("results", results.len());
 
@@ -274,6 +279,9 @@ pub struct RefitWhiteningResponse {
     pub k: usize,
     pub dim: usize,
     pub fitted_at_ms: i64,
+    /// Whether the cross-modal text mean was fitted (requires the embedder
+    /// to be reachable). False → text stations fall back to the audio mean.
+    pub has_text_mean: bool,
 }
 
 #[tracing::instrument(name = "recommend.refit_whitening", skip_all)]
@@ -293,8 +301,22 @@ pub async fn refit_whitening(
     let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
     let dim = vectors[0].len();
     let k = default_k(dim);
-    let whitening = Whitening::fit(&vectors, k)
+    let mut whitening = Whitening::fit(&vectors, k)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "fitting whitening failed"))?;
+
+    // Cross-modal text mean (best-effort): center text station queries by
+    // the text-modality mean so they don't collapse against audio. Needs
+    // the embedder to embed a prompt corpus; on failure we keep the
+    // audio-only transform rather than fail the refit.
+    if let Some(client) = state.embedder().client() {
+        match whitening_text::fit_text_mean(client, dim).await {
+            Ok(text_mean) => match whitening.clone().with_text_mean(text_mean) {
+                Ok(updated) => whitening = updated,
+                Err(e) => tracing::warn!(error = %e, "refit: text mean dim mismatch; audio-only"),
+            },
+            Err(e) => tracing::warn!(error = %e, "refit: text-mean fit failed; audio-only"),
+        }
+    }
 
     let fitted_at_ms = now_unix_ms();
     state
@@ -309,6 +331,7 @@ pub async fn refit_whitening(
         k: whitening.k(),
         dim,
         fitted_at_ms,
+        has_text_mean: whitening.has_text_mean(),
     };
 
     // Install the new transform, then rebuild the ANN so every stored

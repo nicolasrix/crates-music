@@ -28,7 +28,8 @@ impl WhiteningStore {
     /// stored yet (cold start — caller should fit + `upsert`).
     pub async fn get(&self, model_version: &ModelVersion) -> Result<Option<Whitening>> {
         let row = sqlx::query(
-            "SELECT dim, k, mean, components FROM embedding_whitening WHERE model_version = ?",
+            "SELECT dim, k, mean, components, text_mean
+             FROM embedding_whitening WHERE model_version = ?",
         )
         .bind(model_version.as_str())
         .fetch_optional(&self.pool)
@@ -42,6 +43,7 @@ impl WhiteningStore {
         let k: i64 = row.get("k");
         let mean_blob: Vec<u8> = row.get("mean");
         let comp_blob: Vec<u8> = row.get("components");
+        let text_mean_blob: Option<Vec<u8>> = row.get("text_mean");
 
         let dim = usize::try_from(dim).map_err(|_| Error::Whitening("negative dim".into()))?;
         let k = usize::try_from(k).map_err(|_| Error::Whitening("negative k".into()))?;
@@ -64,7 +66,9 @@ impl WhiteningStore {
         }
         let components: Vec<Vec<f32>> = flat.chunks_exact(dim).map(<[f32]>::to_vec).collect();
 
-        Ok(Some(Whitening::from_parts(mean, components)?))
+        let text_mean = text_mean_blob.map(|b| blob_to_vector(&b)).transpose()?;
+
+        Ok(Some(Whitening::from_parts(mean, components, text_mean)?))
     }
 
     /// Insert or replace the cached transform for `model_version`. The
@@ -86,18 +90,20 @@ impl WhiteningStore {
         for comp in whitening.components() {
             comp_blob.extend_from_slice(&vector_to_blob(comp));
         }
+        let text_mean_blob: Option<Vec<u8>> = whitening.text_mean().map(vector_to_blob);
 
         sqlx::query(
             "INSERT INTO embedding_whitening
-                 (model_version, dim, k, mean, components, n_samples, fitted_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                 (model_version, dim, k, mean, components, n_samples, fitted_at_ms, text_mean)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(model_version) DO UPDATE SET
                  dim = excluded.dim,
                  k = excluded.k,
                  mean = excluded.mean,
                  components = excluded.components,
                  n_samples = excluded.n_samples,
-                 fitted_at_ms = excluded.fitted_at_ms",
+                 fitted_at_ms = excluded.fitted_at_ms,
+                 text_mean = excluded.text_mean",
         )
         .bind(model_version.as_str())
         .bind(i64::try_from(dim).map_err(|_| Error::Whitening("dim too large".into()))?)
@@ -106,6 +112,7 @@ impl WhiteningStore {
         .bind(comp_blob)
         .bind(i64::try_from(n_samples).map_err(|_| Error::Whitening("n_samples too large".into()))?)
         .bind(fitted_at_ms)
+        .bind(text_mean_blob)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -156,6 +163,28 @@ mod tests {
         // The transform must reproduce exactly — same mean + components.
         let probe = vec![5.0_f32, 11.0, -3.0, 3.0];
         assert_eq!(got.transform(&probe).unwrap(), w.transform(&probe).unwrap());
+    }
+
+    #[tokio::test]
+    async fn text_mean_round_trips() {
+        let store = WhiteningStore::new(pool().await);
+        let mv = ModelVersion::from("clamp3-test");
+        let w = sample_whitening()
+            .with_text_mean(vec![0.5_f32, -0.25, 0.1, 0.0])
+            .unwrap();
+        assert!(w.has_text_mean());
+
+        store.upsert(&mv, &w, 40, 1).await.unwrap();
+        let got = store.get(&mv).await.unwrap().expect("present");
+
+        assert!(got.has_text_mean());
+        assert_eq!(got.text_mean(), w.text_mean());
+        // A text query transforms identically after the round-trip.
+        let probe = vec![1.0_f32, 2.0, 3.0, 4.0];
+        assert_eq!(
+            got.transform_text(&probe).unwrap(),
+            w.transform_text(&probe).unwrap()
+        );
     }
 
     #[tokio::test]

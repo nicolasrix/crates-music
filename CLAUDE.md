@@ -263,8 +263,18 @@ music-specific acoustic similarity. Done so far:
   consumer change is `lookup_seed_vector` returning the raw SQLite row.
   Cached per-model in `embedding_whitening` (migration 0011), fit-or-load
   at boot, gated by `[recommend].whitening_enabled` (default true). Refit
-  via `POST /v1/recommend/refit_whitening`. Audio-only for now; a separate
-  text-mean (cross-modal gap) correction is a tracked follow-up.
+  via `POST /v1/recommend/refit_whitening`.
+- **Cross-modal text mean** (migration 0012, `whitening_text.rs`): ABTT is
+  fit on audio, but CLaMP 3 text embeddings sit at a modality-gap offset —
+  so audio-fit whitening *collapses* text station queries (verified live:
+  thrash vs ballad went 3/10 → 9/10 overlap). Fix: estimate `μ_text` by
+  embedding a fixed prompt corpus through the sidecar, center text queries
+  by it (not the audio mean) before the shared de-coning. `Whitening` holds
+  an optional `text_mean`; `AnnIndex::query_text` (station path) centers by
+  it, `query`/`upsert` use the audio mean. Text-mean only affects queries,
+  so attaching it needs **no ANN rebuild**. Fit lazily at boot when absent
+  + the embedder is up, and on every refit. `/next` (audio→audio) is
+  unaffected and clearly improved (two seeds → 0/10 overlap).
 - Dim is now a per-backend property (not an app constant);
   `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
 - Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +

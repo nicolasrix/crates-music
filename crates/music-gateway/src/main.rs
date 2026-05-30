@@ -27,6 +27,7 @@ use music_recommend::metadata::MetadataStore;
 use music_recommend::projection::ProjectionStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
+use music_gateway::whitening_text;
 use music_recommend::whitening::{Whitening, default_k};
 use music_recommend::whitening_store::WhiteningStore;
 use std::time::Duration;
@@ -259,7 +260,8 @@ async fn boot_recommender(
     // rebuild below, since any on-disk vectors predate it.
     let mut whitening_installed = false;
     if whitening_enabled {
-        if let Some(w) = load_or_fit_whitening(&embedding_store, embedding_dim, &model_version).await?
+        if let Some(w) =
+            load_or_fit_whitening(&embedding_store, embedding_dim, &model_version, embedder).await?
         {
             ann.set_whitening(Some(Arc::new(w)))
                 .context("installing whitening transform")?;
@@ -323,32 +325,74 @@ async fn load_or_fit_whitening(
     embedding_store: &EmbeddingStore,
     embedding_dim: usize,
     model_version: &ModelVersion,
+    embedder: &EmbedderHandle,
 ) -> Result<Option<Whitening>> {
     let store = WhiteningStore::new(embedding_store.pool().clone());
-    if let Some(w) = store.get(model_version).await.context("loading whitening")? {
+
+    // 1. Audio transform: load the cached fit, or fit one from the corpus.
+    let mut whitening = if let Some(w) =
+        store.get(model_version).await.context("loading whitening")?
+    {
         tracing::info!(model = %model_version, k = w.k(), "recommend: loaded cached whitening");
-        return Ok(Some(w));
+        w
+    } else {
+        let corpus = embedding_store.list_done_embeddings(model_version).await?;
+        if corpus.is_empty() {
+            return Ok(None);
+        }
+        let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
+        let k = default_k(embedding_dim);
+        let w = Whitening::fit(&vectors, k).map_err(|e| anyhow::anyhow!("fitting whitening: {e}"))?;
+        store
+            .upsert(model_version, &w, vectors.len(), now_unix_ms())
+            .await
+            .context("persisting fitted whitening")?;
+        tracing::info!(
+            model = %model_version,
+            n = vectors.len(),
+            k = w.k(),
+            "recommend: fitted + persisted whitening transform"
+        );
+        w
+    };
+
+    // 2. Cross-modal text mean: fit lazily if missing and the embedder is
+    //    reachable (it needs to embed a prompt corpus). Without it, station
+    //    text queries fall back to the audio mean and collapse — so this is
+    //    best-effort, retryable via the refit endpoint, never fatal.
+    if !whitening.has_text_mean() {
+        if let Some(client) = embedder.client() {
+            match whitening_text::fit_text_mean(client, embedding_dim).await {
+                Ok(text_mean) => match whitening.clone().with_text_mean(text_mean) {
+                    Ok(updated) => {
+                        let n = embedding_store
+                            .counts(model_version)
+                            .await
+                            .map(|c| usize::try_from(c.done).unwrap_or(0))
+                            .unwrap_or(0);
+                        store
+                            .upsert(model_version, &updated, n, now_unix_ms())
+                            .await
+                            .context("persisting text mean")?;
+                        tracing::info!(model = %model_version, "recommend: fitted + persisted cross-modal text mean");
+                        whitening = updated;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "recommend: text mean dim mismatch; stations stay audio-centered"),
+                },
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "recommend: text-mean fit failed (embedder); stations stay audio-centered until refit"
+                ),
+            }
+        } else {
+            tracing::info!(
+                model = %model_version,
+                "recommend: embedder unavailable; deferring text-mean fit to a refit"
+            );
+        }
     }
 
-    let corpus = embedding_store.list_done_embeddings(model_version).await?;
-    if corpus.is_empty() {
-        return Ok(None);
-    }
-    let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
-    let k = default_k(embedding_dim);
-    let w = Whitening::fit(&vectors, k)
-        .map_err(|e| anyhow::anyhow!("fitting whitening: {e}"))?;
-    store
-        .upsert(model_version, &w, vectors.len(), now_unix_ms())
-        .await
-        .context("persisting fitted whitening")?;
-    tracing::info!(
-        model = %model_version,
-        n = vectors.len(),
-        k = w.k(),
-        "recommend: fitted + persisted whitening transform"
-    );
-    Ok(Some(w))
+    Ok(Some(whitening))
 }
 
 fn now_unix_ms() -> i64 {
