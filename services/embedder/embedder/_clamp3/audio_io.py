@@ -15,10 +15,18 @@ Local modifications:
 - 2026-05-30: Dropped `chunk_audio` (unused by anything we vendor),
   `find_audios` (directory walking belongs to the CLI we replace), and the
   module-level imports they pulled in (`mido`, `argparse`).
+- 2026-05-30: Added an ffmpeg decode fallback. libsndfile (via soundfile)
+  only handles WAV/FLAC/OGG/Opus/(recent)MP3 — it raises "Format not
+  recognised" on AAC/M4A/ALAC/WMA, which Navidrome serves for part of a
+  real library. ffmpeg (already in the image) decodes ~everything, so on a
+  LibsndfileError we shell out to it. ffmpeg also downmixes + resamples in
+  the same pass, so the mono-fold / resampler below no-op on that path.
 """
 
 import io
 import random
+import subprocess
+import tempfile
 
 import numpy as np
 import soundfile as sf
@@ -43,8 +51,9 @@ def load_audio_bytes(
     """Decode an audio file held in `raw_bytes` and resample to target_sr.
 
     Args:
-        raw_bytes (bytes): raw encoded audio (FLAC / WAV / OGG / MP3 etc.) —
-            anything libsndfile via soundfile can read.
+        raw_bytes (bytes): raw encoded audio. libsndfile (FLAC/WAV/OGG/Opus/
+            MP3) is the fast path; anything it rejects (AAC/M4A/ALAC/WMA/...)
+            falls back to ffmpeg.
         target_sr (int): target sample rate. If the source rate differs,
             torchaudio's Resample transform runs on `device`.
         is_mono (bool): fold to mono via channel mean.
@@ -58,11 +67,18 @@ def load_audio_bytes(
         torch.Tensor of shape (1, n_sample). With return_start=True, returns
         (tensor, start_index).
     """
-    data, sample_rate = sf.read(io.BytesIO(raw_bytes), dtype='float32', always_2d=True)
-    # soundfile yields (n_samples, n_channels); torchaudio convention is
-    # (n_channels, n_samples). Transpose to match what the rest of the
-    # pipeline (and upstream MERT_utils.load_audio) expects.
-    waveform = torch.from_numpy(data.T)
+    try:
+        data, sample_rate = sf.read(io.BytesIO(raw_bytes), dtype='float32', always_2d=True)
+        # soundfile yields (n_samples, n_channels); torchaudio convention is
+        # (n_channels, n_samples). Transpose to match what the rest of the
+        # pipeline (and upstream MERT_utils.load_audio) expects.
+        waveform = torch.from_numpy(data.T)
+    except sf.LibsndfileError:
+        # libsndfile can't parse the container (AAC/M4A/ALAC/WMA/...).
+        # ffmpeg decodes it AND gives us mono @ target_sr in one pass, so
+        # the mono-fold and resampler below become no-ops on this path.
+        waveform = _decode_via_ffmpeg(raw_bytes, target_sr, is_mono)
+        sample_rate = target_sr
     if waveform.shape[0] > 1:
         if is_mono:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
@@ -88,6 +104,48 @@ def load_audio_bytes(
     if return_start:
         return waveform, start
     return waveform
+
+
+def _decode_via_ffmpeg(raw_bytes, target_sr, is_mono):
+    """Decode arbitrary audio bytes via ffmpeg, returning a
+    (n_channels, n_samples) float32 torch tensor already at `target_sr`.
+
+    Fallback for formats libsndfile can't read (AAC/M4A/ALAC/WMA/...).
+    ffmpeg ships in the image as a runtime dependency. We write to a temp
+    file rather than piping to stdin so containers with trailing metadata
+    (e.g. an M4A `moov` atom at EOF) stay seekable — a non-seekable pipe
+    makes ffmpeg fail on exactly the formats we're here to rescue.
+
+    ffmpeg downmixes (`-ac`) and resamples (`-ar`) for us, so the caller's
+    mono-fold and torchaudio resampler are no-ops on this path.
+    """
+    channels = 1 if is_mono else 2
+    with tempfile.NamedTemporaryFile(suffix=".audio") as tmp:
+        tmp.write(raw_bytes)
+        tmp.flush()
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-i", tmp.name,
+                    "-f", "f32le", "-acodec", "pcm_f32le",
+                    "-ac", str(channels), "-ar", str(int(target_sr)),
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            # Truly undecodable even by ffmpeg — surface the ffmpeg stderr so
+            # the failure reason in the queue is actionable, not just "500".
+            detail = e.stderr.decode("utf-8", "replace").strip()[-500:]
+            raise RuntimeError(f"ffmpeg decode failed: {detail}") from e
+    # f32le is interleaved; reshape to (n_channels, n_samples). frombuffer is
+    # read-only and .copy() makes it writable (torch warns on / mis-handles
+    # non-writable arrays, and the downstream resampler may mutate in place).
+    audio = np.frombuffer(proc.stdout, dtype=np.float32).reshape(-1, channels).T
+    return torch.from_numpy(np.ascontiguousarray(audio).copy())
 
 
 def crop_audio(
