@@ -36,6 +36,9 @@ class ClapEmbedder:
     """
 
     SAMPLE_RATE = 48000  # CLAP expects 48 kHz mono.
+    # HTSAT-base + RoBERTa projection produces 512-dim joint embeddings.
+    # Hard-coded because the architecture is fixed at construction time.
+    DIM = 512
 
     def __init__(self, checkpoint_path: str, model_version: str | None = None) -> None:
         try:
@@ -69,6 +72,10 @@ class ClapEmbedder:
     @property
     def device(self) -> str:
         return self._device
+
+    @property
+    def dim(self) -> int:
+        return self.DIM
 
     def embed_audio(self, raw_bytes: bytes) -> EmbedResult:
         import soundfile  # type: ignore[import-not-found]

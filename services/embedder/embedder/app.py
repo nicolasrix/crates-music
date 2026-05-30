@@ -1,13 +1,15 @@
 """FastAPI app surface.
 
 Endpoints:
-- GET  /healthz       — liveness + model_loaded probe
-- POST /embed/audio   — raw bytes → 512-dim float vector
-- POST /embed/text    — JSON {text} → 512-dim float vector
+- GET  /healthz       — liveness + model_loaded probe (reports backend dim)
+- POST /embed/audio   — raw bytes → dim-shaped float vector
+- POST /embed/text    — JSON {text} → dim-shaped float vector
 
 The embedder backend is wired via a FastAPI dependency so tests can
 inject a stub. `build_app()` returns a fresh app with a default
-backend selected from the `EMBEDDER_BACKEND` env var.
+backend selected from the `EMBEDDER_BACKEND` env var. Vector dim is
+read from the backend (`emb.dim`) rather than hardcoded so the
+sidecar can host CLAP (512) or CLaMP 3 (768) without code changes.
 """
 
 from __future__ import annotations
@@ -23,8 +25,6 @@ from pydantic import BaseModel, Field
 
 from embedder import reduce as reduce_module
 from embedder.protocol import Embedder
-
-EMBEDDING_DIM: int = 512
 
 # Server-Timing metric names must be HTTP tokens (RFC 7230). Anything
 # outside this set means the backend gave us a bad name; we drop the
@@ -187,7 +187,7 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
             status="ok" if loaded else "loading",
             model_loaded=loaded,
             model_version=emb.model_version,
-            dim=EMBEDDING_DIM,
+            dim=emb.dim,
             device=emb.device,
         )
 
@@ -205,14 +205,14 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="empty body")
         result = await asyncio.to_thread(emb.embed_audio, body)
-        return _build_embed_response(result, emb.model_version)
+        return _build_embed_response(result, emb.model_version, emb.dim)
 
     @app.post("/embed/text")
     async def embed_text(payload: EmbedTextRequest, emb: EmbedderDep, _: BearerDep) -> Response:
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
         result = await asyncio.to_thread(emb.embed_text, payload.text)
-        return _build_embed_response(result, emb.model_version)
+        return _build_embed_response(result, emb.model_version, emb.dim)
 
     @app.post("/reduce", response_model=ReduceResponse)
     async def reduce(payload: ReduceRequest, _: BearerDep) -> ReduceResponse:
@@ -248,16 +248,17 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
     return app
 
 
-def _build_embed_response(result, model_version: str) -> Response:
+def _build_embed_response(result, model_version: str, dim: int) -> Response:
     """Wrap an `EmbedResult` in a JSON response and attach the
     `Server-Timing` header. Pulled out of the handlers so the two
-    endpoints share the same envelope + header logic.
+    endpoints share the same envelope + header logic. `dim` comes from
+    the backend so a CLAP and CLaMP 3 deployment can share this code.
     """
     from fastapi.responses import JSONResponse
 
     payload = EmbedResponse(
         vector=[float(x) for x in result.vector.tolist()],
-        dim=EMBEDDING_DIM,
+        dim=dim,
         model_version=model_version,
     )
     headers: dict[str, str] = {}

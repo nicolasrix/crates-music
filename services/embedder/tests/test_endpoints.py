@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from embedder.app import EMBEDDING_DIM, build_app, get_embedder
-from embedder.stub import StubEmbedder
+from embedder.app import build_app, get_embedder
+from embedder.stub import DEFAULT_DIM as STUB_DIM, StubEmbedder
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def test_healthz_returns_200_when_loaded(app_with_loaded_stub):
     body = r.json()
     assert body["model_loaded"] is True
     assert body["model_version"] == "stub-v1"
-    assert body["dim"] == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
 
 
 def test_healthz_reports_device_for_stub(app_with_loaded_stub):
@@ -76,10 +76,10 @@ def test_embed_audio_returns_vector(app_with_loaded_stub):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["dim"] == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
     assert body["model_version"] == "stub-v1"
     assert isinstance(body["vector"], list)
-    assert len(body["vector"]) == EMBEDDING_DIM
+    assert len(body["vector"]) == STUB_DIM
     assert all(isinstance(x, float) for x in body["vector"])
 
 
@@ -140,8 +140,8 @@ def test_embed_text_returns_vector(app_with_loaded_stub):
     r = client.post("/embed/text", json={"text": "rainy sunday afternoon"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["dim"] == EMBEDDING_DIM
-    assert len(body["vector"]) == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
+    assert len(body["vector"]) == STUB_DIM
 
 
 def test_embed_text_rejects_missing_field(app_with_loaded_stub):
