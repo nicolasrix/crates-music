@@ -3,12 +3,13 @@
 Requires the `clamp3` optional extra:
     uv pip install -e '.[clamp3]'
 
-The backend produces L2-normalized 768-dim float vectors for audio. Text
-embedding is intentionally NOT wired in this PR series — the vendored
-`CLaMP3Model.get_text_features` exists but `/embed/text` raises
-`NotImplementedError` until P6.9 (text-query stations) lands.
+The backend produces L2-normalized 768-dim float vectors for both audio
+and text. They live in CLaMP 3's *shared* joint embedding space, so a
+natural-language station query ("rainy sunday afternoon") and the stored
+audio embeddings are directly comparable by cosine similarity in the same
+content-ANN — no separate text index.
 
-Pipeline (mirrors upstream `preprocessing/audio/extract_mert.py` +
+Audio pipeline (mirrors upstream `preprocessing/audio/extract_mert.py` +
 `code/extract_clamp3.py`):
 
   raw bytes
@@ -20,6 +21,18 @@ Pipeline (mirrors upstream `preprocessing/audio/extract_mert.py` +
     → CLaMP 3 audio encoder (BERT, 12 layers, hidden=768)
     → avg-pool + audio_proj (global feature)                  (768,)
     → L2-normalize for cosine similarity
+
+Text pipeline (mirrors upstream `code/extract_clamp3.py:100-178`, the
+`.txt` branch):
+
+  query string
+    → split into non-empty lines, de-dup, join with the tokenizer's
+      sep token
+    → xlm-roberta-base tokenize                                (n_tokens,)
+    → segment into MAX_TEXT_LENGTH (128)-token windows
+    → CLaMP 3 text encoder per segment → global feature        (n_seg, 768)
+    → token-count-weighted mean over segments                  (768,)
+    → L2-normalize (same space as embed_audio)
 """
 
 from __future__ import annotations
@@ -67,7 +80,7 @@ class Clamp3Embedder:
             ) from e
 
         import torch
-        from transformers import BertConfig
+        from transformers import AutoTokenizer, BertConfig
 
         from embedder._clamp3 import CLaMP3Model, HuBERTFeature
         from embedder._clamp3.config import (
@@ -76,6 +89,7 @@ class Clamp3Embedder:
             CLAMP3_HIDDEN_SIZE,
             M3_HIDDEN_SIZE,
             MAX_AUDIO_LENGTH,
+            MAX_TEXT_LENGTH,
             PATCH_LENGTH,
             PATCH_NUM_LAYERS,
             TEXT_MODEL_NAME,
@@ -139,6 +153,14 @@ class Clamp3Embedder:
         mert = mert.to(self._device)
         mert.eval()
         self._mert = mert
+
+        # Text branch: xlm-roberta-base tokenizer feeds CLaMP 3's text
+        # encoder. Loaded eagerly (same fail-fast contract as the model);
+        # the clamp3 Dockerfiles prebake this into the HF cache so there's
+        # no network hit at construction in production.
+        logger.info("loading text tokenizer %s", TEXT_MODEL_NAME)
+        self._tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_NAME)
+        self._max_text_length = MAX_TEXT_LENGTH
 
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
@@ -263,13 +285,96 @@ class Clamp3Embedder:
             return EmbedResult(vector=arr, stages_ms=stages)
 
     def embed_text(self, text: str) -> EmbedResult:
-        raise NotImplementedError(
-            "CLaMP 3 text encoding is part of the same PR series but not "
-            "wired yet (see migration plan P6.9 — text-query stations). "
-            "The text encoder is vendored under "
-            "`embedder._clamp3.model.CLaMP3Model.get_text_features` "
-            "and will be exposed when text-query stations are enabled."
-        )
+        import torch
+
+        with self._lock:
+            stages: dict[str, float] = {}
+
+            t0 = time.perf_counter()
+            item = _join_text_lines(text, self._tokenizer.sep_token)
+            # xlm-roberta wraps the string in <s> … </s> automatically;
+            # we feed those special tokens through unchanged, exactly as
+            # upstream's tokenizer(item) does.
+            input_ids = self._tokenizer(item, return_tensors="pt")["input_ids"].squeeze(0)
+            stages["tokenize"] = (time.perf_counter() - t0) * 1000.0
+
+            with torch.no_grad():
+                t0 = time.perf_counter()
+                vec = self._encode_text_global(input_ids)
+                norm = vec.norm()
+                if norm > 0:
+                    vec = vec / norm
+                arr = vec.detach().cpu().numpy().astype(np.float32)
+                stages["clamp3"] = (time.perf_counter() - t0) * 1000.0
+
+            return EmbedResult(vector=arr, stages_ms=stages)
+
+    def _encode_text_global(self, input_ids):
+        """Token ids → a single global text feature (DIM,).
+
+        Mirrors `extract_clamp3.py`'s `.txt` + `get_global=True` path:
+        slice the token sequence into MAX_TEXT_LENGTH windows (the last
+        window is the trailing slice, so it stays full-width when the
+        text overruns a single window), encode each, then take a mean
+        weighted by each window's real-token count. For a typical
+        ≤500-char station prompt this is a single window and the weight
+        cancels — the multi-window branch is the safety path for long
+        prompts, kept faithful so embeddings match the offline extractor.
+        """
+        import torch
+
+        max_len = self._max_text_length
+        pad_id = self._tokenizer.pad_token_id
+        n = int(input_ids.size(0))
+
+        segments = [input_ids[i : i + max_len] for i in range(0, n, max_len)]
+        # Last segment is the trailing window (matches upstream
+        # `segment_list[-1] = input_data[-max_input_length:]`).
+        segments[-1] = input_ids[-max_len:]
+
+        features = []
+        for seg in segments:
+            seg_len = int(seg.size(0))
+            mask = torch.cat(
+                [torch.ones(seg_len), torch.zeros(max_len - seg_len)], dim=0
+            )
+            pad = torch.ones(max_len - seg_len, dtype=torch.long) * pad_id
+            seg = torch.cat([seg, pad], dim=0)
+            g = self._model.get_text_features(
+                text_inputs=seg.unsqueeze(0).to(self._device),
+                text_masks=mask.unsqueeze(0).to(self._device),
+                get_global=True,
+            )  # (1, DIM)
+            features.append(g)
+
+        full = n // max_len
+        remain = n % max_len
+        if remain == 0:
+            weights = [max_len] * full
+        else:
+            weights = [max_len] * full + [remain]
+        weight_t = torch.tensor(
+            weights, device=self._device, dtype=torch.float32
+        ).view(-1, 1)
+
+        stacked = torch.cat(features, dim=0)  # (n_seg, DIM)
+        return (stacked * weight_t).sum(dim=0) / weight_t.sum()
+
+
+def _join_text_lines(text: str, sep_token: str) -> str:
+    """Clean a query string the way upstream's `.txt` branch does.
+
+    Upstream (`extract_clamp3.py:106-110`) splits on newlines, drops
+    empties, de-dups, and joins the lines with the tokenizer's sep token.
+    We keep that shape but de-dup *order-preservingly* (`dict.fromkeys`)
+    instead of `list(set(...))`: a station query is a hot path, and
+    `set` iteration order is per-process randomized for str, which would
+    make the same multi-line query embed differently across embedder
+    restarts. For a single-line prompt this is a no-op.
+    """
+    lines = [line for line in text.split("\n") if len(line) > 0]
+    lines = list(dict.fromkeys(lines))
+    return sep_token.join(lines)
 
 
 def _derive_version(checkpoint_path: str) -> str:

@@ -228,8 +228,11 @@ web has the optimistic-update sync provider. Single-linearizer model
   + `.ann.keys` sidecar.
 
 **Deferred from P6:** behavioural index + nightly track2vec retrain
-(P6.8), text-query stations via CLAP's text encoder (P6.9). The event
-log is in place to capture signal for P6.8 when it lands.
+(P6.8). The event log is in place to capture signal for P6.8 when it
+lands. **P6.9 (text-query stations) now done on the CLaMP 3 branch** —
+`embed_text` is implemented in `Clamp3Embedder` and the gateway's
+`GET /v1/recommend/station?text=…` was already wired; see the CLaMP 3
+migration notes below.
 
 **CLaMP 3 migration — in flight (`feat/clamp3-migration`).** Swapping
 the content embedder from LAION CLAP (512-dim) to
@@ -244,7 +247,10 @@ music-specific acoustic similarity. Done so far:
   frontend → mean-over-13-layers → BOS/EOS markers → CLaMP 3 audio
   encoder → L2-norm, producing 768-dim vectors. Selected via
   `EMBEDDER_BACKEND=clamp3` (`CLAMP3_CHECKPOINT` + `MERT_FOLDER`), behind
-  the new `[clamp3]` extra. `embed_text` deliberately raises until P6.9.
+  the new `[clamp3]` extra. `embed_text` is wired too: xlm-roberta-base
+  tokenize → MAX_TEXT_LENGTH-windowed CLaMP 3 text encoder →
+  token-count-weighted mean → L2-norm, into the *same* 768-dim joint
+  space as audio. Drives `GET /v1/recommend/station?text=…` (P6.9).
 - Dim is now a per-backend property (not an app constant);
   `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
 - Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +

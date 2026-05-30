@@ -9,7 +9,7 @@ so the module imports fine here and we can exercise:
   - `_derive_version` (pure string logic),
   - `_detect_device` (light torch fake),
   - the "extra not installed" failure path,
-  - `embed_text`'s deliberate NotImplementedError.
+  - `_join_text_lines` (pure text-query preprocessing).
 
 Real inference is verified by the end-to-end smoke run + the
 `test_benchmarks_clap.py`-style opt-in suite, not by unit tests.
@@ -22,7 +22,12 @@ import types
 
 import pytest
 
-from embedder.clamp3_backend import Clamp3Embedder, _derive_version, _detect_device
+from embedder.clamp3_backend import (
+    Clamp3Embedder,
+    _derive_version,
+    _detect_device,
+    _join_text_lines,
+)
 
 
 # --- wire contract ---------------------------------------------------------
@@ -114,13 +119,35 @@ def test_init_raises_clear_error_without_clamp3_extra(
         Clamp3Embedder(checkpoint_path="/fake/ckpt.pth", mert_folder="/fake/mert")
 
 
-# --- embed_text ------------------------------------------------------------
+# --- _join_text_lines (text-query preprocessing) ---------------------------
+#
+# This mirrors upstream's `.txt` cleaning but de-dups order-preservingly
+# instead of via `set()`. The determinism matters: it's a query hot path,
+# and a non-deterministic join would embed the same prompt differently
+# across embedder restarts, silently degrading station results.
+
+SEP = "</s>"  # xlm-roberta-base sep token.
 
 
-def test_embed_text_not_implemented() -> None:
-    # Text encoding is vendored but deliberately not wired until P6.9
-    # (text-query stations). It must fail loudly, not return garbage.
-    # Build a bare instance so we don't trigger the heavy __init__.
-    emb = object.__new__(Clamp3Embedder)
-    with pytest.raises(NotImplementedError, match="text"):
-        emb.embed_text("rainy sunday afternoon")
+def test_join_text_lines_single_phrase_is_passthrough() -> None:
+    # The overwhelmingly common case: one natural-language line. Cleaning
+    # must not mangle it.
+    assert _join_text_lines("rainy sunday afternoon", SEP) == "rainy sunday afternoon"
+
+
+def test_join_text_lines_drops_empty_lines() -> None:
+    assert _join_text_lines("a\n\n\nb", SEP) == f"a{SEP}b"
+
+
+def test_join_text_lines_dedups_preserving_order() -> None:
+    # "b" appears twice; keep first occurrence, drop the later dup, and
+    # preserve the original order (not set() order).
+    assert _join_text_lines("b\na\nb\nc", SEP) == f"b{SEP}a{SEP}c"
+
+
+def test_join_text_lines_empty_input_is_empty() -> None:
+    # All-whitespace/empty collapses to "" — the gateway already rejects
+    # empty station queries before the round-trip, so this is just a
+    # don't-crash guard.
+    assert _join_text_lines("", SEP) == ""
+    assert _join_text_lines("\n\n", SEP) == ""
