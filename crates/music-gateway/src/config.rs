@@ -15,6 +15,10 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Recommender knobs that have to be known at boot — chiefly the ANN
+    /// vector dim, which the ANN index commits to at open time.
+    #[serde(default)]
+    pub recommend: RecommendConfig,
     /// Optional Python embedder sidecar. Absent / unreachable = degraded mode.
     #[serde(default)]
     pub embedder: Option<EmbedderConfigSection>,
@@ -105,6 +109,31 @@ pub struct EmbedderConfigSection {
 
 fn default_embedder_timeout_secs() -> u64 {
     30
+}
+
+/// Recommender configuration. The embedding dim has to be fixed at boot
+/// because the ANN index commits to its dim on open — a mismatch between
+/// the config and the on-disk ANN file will fail loudly at startup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecommendConfig {
+    /// Shared dim of the audio + text embedding space. Must match what
+    /// the embedder sidecar produces. LAION-CLAP is 512; CLaMP 3 is 768.
+    /// Changing this requires deleting the ANN sidecar so it can be
+    /// rebuilt from SQLite at the new dim.
+    #[serde(default = "default_embedding_dim")]
+    pub embedding_dim: usize,
+}
+
+impl Default for RecommendConfig {
+    fn default() -> Self {
+        Self {
+            embedding_dim: default_embedding_dim(),
+        }
+    }
+}
+
+fn default_embedding_dim() -> usize {
+    512
 }
 
 impl Default for OauthConfig {

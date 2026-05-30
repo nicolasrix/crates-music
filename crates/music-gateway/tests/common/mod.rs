@@ -61,6 +61,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         },
         cache: CacheConfig::default(),
         oauth: OauthConfig::default(),
+        recommend: Default::default(),
         embedder: None,
     }
 }
