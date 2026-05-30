@@ -18,11 +18,10 @@
 //! snapshots without overwriting older ones. After each run we prune
 //! to `KEEP_AUTO_RUNS` to bound disk growth.
 
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use music_recommend::embedder::{EmbedderClient, EmbedderError, ReduceParams};
-use music_recommend::projection::ProjectionStore;
+use music_recommend::projection::{Projection2D, ProjectionStore};
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 use tokio::task::JoinHandle;
@@ -60,19 +59,11 @@ pub fn spawn_auto_projection_task(
     embedder: Option<EmbedderClient>,
     embedding_store: EmbeddingStore,
     projection_store: ProjectionStore,
-    recommend_db_path: PathBuf,
     model_version: ModelVersion,
 ) -> Option<JoinHandle<()>> {
     let embedder = embedder?;
     Some(tokio::spawn(async move {
-        run_loop(
-            embedder,
-            embedding_store,
-            projection_store,
-            recommend_db_path,
-            model_version,
-        )
-        .await;
+        run_loop(embedder, embedding_store, projection_store, model_version).await;
     }))
 }
 
@@ -83,7 +74,6 @@ async fn run_loop(
     embedder: EmbedderClient,
     embedding_store: EmbeddingStore,
     projection_store: ProjectionStore,
-    recommend_db_path: PathBuf,
     model_version: ModelVersion,
 ) {
     // Seed `last_reduced_count` from the newest existing `auto-*` so
@@ -122,11 +112,38 @@ async fn run_loop(
                 let ts = now_unix_ms();
                 let pv_2d = format!("auto-{ts}");
                 let pv_3d = format!("auto-{ts}-d3");
+
+                // Read the embedding matrix ONCE, up front, and feed the
+                // same snapshot to both the 2D and 3D runs. Reading per-
+                // run would (a) re-fetch + re-decode the whole matrix
+                // twice and (b) let a mid-run ingest give the 3D sibling
+                // a larger point set than its 2D twin — they share a
+                // timestamp and are meant to describe the same snapshot.
+                let embeddings = match embedding_store.list_done_embeddings(&model_version).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "auto-projection: reading embeddings failed");
+                        continue;
+                    }
+                };
+                if embeddings.is_empty() {
+                    tracing::warn!("auto-projection: no done embeddings to project");
+                    continue;
+                }
+                let dim = embeddings[0].dim();
+                let track_ids: Vec<String> = embeddings
+                    .iter()
+                    .map(|e| e.key.track_id.as_str().to_string())
+                    .collect();
+                // Consume into owned vectors — no second copy of the matrix.
+                let vectors: Vec<Vec<f32>> = embeddings.into_iter().map(|e| e.vector).collect();
+
                 tracing::info!(
                     model = %model_version,
                     proj_version_2d = pv_2d,
                     proj_version_3d = pv_3d,
                     done_count = current,
+                    points = track_ids.len(),
                     new_since_last = current - state.last_reduced_count,
                     "auto-projection: triggering reduce"
                 );
@@ -135,10 +152,28 @@ async fn run_loop(
                 // failure (3D errored, 2D landed) retries on the next
                 // quiet window. The wasted second 2D run is bounded —
                 // it only repeats while embeddings keep landing.
-                let ok_2d =
-                    run_one_reduce(&embedder, &recommend_db_path, &model_version, &pv_2d, 2).await;
-                let ok_3d =
-                    run_one_reduce(&embedder, &recommend_db_path, &model_version, &pv_3d, 3).await;
+                let ok_2d = run_one_reduce(
+                    &embedder,
+                    &projection_store,
+                    &model_version,
+                    &track_ids,
+                    &vectors,
+                    dim,
+                    &pv_2d,
+                    2,
+                )
+                .await;
+                let ok_3d = run_one_reduce(
+                    &embedder,
+                    &projection_store,
+                    &model_version,
+                    &track_ids,
+                    &vectors,
+                    dim,
+                    &pv_3d,
+                    3,
+                )
+                .await;
                 if ok_2d && ok_3d {
                     state.last_reduced_count = current;
                     if let Err(e) = projection_store
@@ -158,46 +193,78 @@ async fn run_loop(
     }
 }
 
-/// One reduce call. Returns true on success, false on any failure
-/// (logged at warn level). Extracted so 2D and 3D share the same
-/// error-routing; the outer loop just decides whether both succeeded.
+/// One reduce call, end to end: ship the (already-read) embedding matrix
+/// to the embedder for UMAP+PCA → persist the returned coordinates under
+/// `proj_version`. Returns true on success, false on any failure (logged
+/// at warn level). Extracted so the 2D and 3D runs share the same
+/// error-routing *and* the same in-memory matrix; the outer loop reads
+/// the matrix once and decides whether both succeeded.
+///
+/// Vectors-over-the-wire: the gateway owns both the read (it has the
+/// recommend DB) and the write (projections are derived data it
+/// persists). The embedder is stateless compute in the middle — so this
+/// works regardless of whether the embedder is co-located or on a
+/// separate GPU host.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_reduce(
     embedder: &EmbedderClient,
-    db_path: &PathBuf,
+    projection_store: &ProjectionStore,
     model_version: &ModelVersion,
+    track_ids: &[String],
+    vectors: &[Vec<f32>],
+    dim: usize,
     proj_version: &str,
     n_components: u8,
 ) -> bool {
-    match embedder
-        .reduce(&ReduceParams {
-            db_path: db_path.clone(),
-            model_version: model_version.as_str().to_string(),
-            proj_version: Some(proj_version.to_string()),
-            n_neighbors: 15,
-            min_dist: 0.1,
-            random_state: 42,
-            n_components,
-        })
-        .await
-    {
-        Ok(out) => {
-            tracing::info!(
-                proj_version = out.proj_version,
-                written = out.written,
-                n_components,
-                "auto-projection: reduce complete"
-            );
-            true
-        }
+    let params = ReduceParams {
+        n_components,
+        ..ReduceParams::default()
+    };
+    let points = match embedder.reduce(track_ids, vectors, dim, &params).await {
+        Ok(p) => p,
         Err(EmbedderError::ModelNotLoaded) => {
             tracing::warn!(
                 n_components,
                 "auto-projection: embedder reports reduce extra unavailable"
             );
-            false
+            return false;
         }
         Err(e) => {
             tracing::warn!(error = %e, n_components, "auto-projection: reduce call failed");
+            return false;
+        }
+    };
+
+    let projections: Vec<Projection2D> = points
+        .into_iter()
+        .map(|p| Projection2D {
+            track_id: p.track_id,
+            x: p.x,
+            y: p.y,
+            pc1: p.pc1,
+            pc2: p.pc2,
+            pc3: p.pc3,
+            pc4: p.pc4,
+            z: p.z,
+        })
+        .collect();
+
+    let created_at_ms = i64::try_from(now_unix_ms()).unwrap_or(i64::MAX);
+    match projection_store
+        .upsert_projections(model_version, proj_version, &projections, created_at_ms)
+        .await
+    {
+        Ok(written) => {
+            tracing::info!(
+                proj_version,
+                written,
+                n_components,
+                "auto-projection: reduce complete"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, n_components, "auto-projection: writing projections failed");
             false
         }
     }

@@ -184,7 +184,6 @@ async fn main() -> Result<()> {
         embedder.client().cloned(),
         recommend.embedding_store.clone(),
         ProjectionStore::new(recommend.embedding_store.pool().clone()),
-        recommend.recommend_db_path.clone(),
         recommend.model_version.clone(),
     );
 
@@ -216,10 +215,6 @@ struct RecommenderState {
     metadata_store: MetadataStore,
     ann: Arc<AnnIndex>,
     model_version: ModelVersion,
-    /// Filesystem path of the recommend SQLite — needed by the
-    /// auto-projection task to pass into the embedder sidecar's
-    /// /reduce endpoint (same-host mount).
-    recommend_db_path: PathBuf,
 }
 
 /// Boot the recommender: open the embedding DB, recover crashed
@@ -285,24 +280,10 @@ async fn boot_recommender(
     let metadata_count = metadata_store.count().await?;
     tracing::info!(rows = metadata_count, "recommend: metadata cache loaded");
 
-    // Canonicalize for cross-process consumers: the embedder sidecar
-    // runs from its own cwd (`services/embedder/`), so a relative path
-    // taken from `config.oauth.state_db` would resolve in the wrong
-    // directory on the sidecar side. The file definitely exists by now
-    // — `EmbeddingStore::open` created/opened it above — so
-    // `canonicalize` won't fail on a missing target.
-    let recommend_db_path = recommend_db_path.canonicalize().with_context(|| {
-        format!(
-            "canonicalizing recommend DB path {}",
-            recommend_db_path.display()
-        )
-    })?;
-
     Ok(RecommenderState {
         embedding_store,
         metadata_store,
         ann: Arc::new(ann),
         model_version,
-        recommend_db_path,
     })
 }

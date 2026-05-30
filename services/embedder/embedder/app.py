@@ -15,11 +15,12 @@ sidecar can host CLAP (512) or CLaMP 3 (768) without code changes.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
-from pathlib import Path
 from typing import Annotated, Mapping
 
+import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -78,28 +79,46 @@ class EmbedResponse(BaseModel):
 
 
 class ReduceRequest(BaseModel):
-    """Arguments mirror `embedder.reduce.run` exactly. The gateway is
-    the only intended caller; it owns the recommend SQLite file and
-    passes its filesystem path so the embedder can open the same DB
-    directly (single-host deployment)."""
+    """Vectors-over-the-wire reduction request.
 
-    db_path: str = Field(
-        ...,
-        description="Absolute path to the recommend SQLite file. The "
-        "embedder opens it read+write; the gateway is expected to be "
-        "running on the same host.",
+    The embedder no longer opens the gateway's SQLite file (that assumed
+    a shared volume, which breaks when the embedder runs on a separate
+    GPU host). Instead the gateway reads its own recommend DB, packs the
+    `(N, dim)` embedding matrix as base64 row-major little-endian f32 —
+    the exact byte layout of the `vector` blobs — and ships it here. The
+    embedder computes coordinates and returns them; the gateway persists
+    the projection rows itself.
+    """
+
+    track_ids: list[str] = Field(
+        ..., description="One id per matrix row, defining row order."
     )
-    model_version: str
-    proj_version: str | None = None
+    dim: int = Field(..., gt=0, description="Embedding dimensionality D.")
+    vectors_b64: str = Field(
+        ...,
+        description="base64 of N*D little-endian float32, row-major "
+        "(np.frombuffer(dtype='<f4')).",
+    )
     n_neighbors: int = reduce_module.DEFAULT_N_NEIGHBORS
     min_dist: float = reduce_module.DEFAULT_MIN_DIST
     random_state: int = reduce_module.DEFAULT_RANDOM_STATE
     n_components: int = 2
+    metric: str = reduce_module.DEFAULT_METRIC
+
+
+class ReducePoint(BaseModel):
+    track_id: str
+    x: float
+    y: float
+    z: float | None = None
+    pc1: float | None = None
+    pc2: float | None = None
+    pc3: float | None = None
+    pc4: float | None = None
 
 
 class ReduceResponse(BaseModel):
-    proj_version: str
-    written: int
+    points: list[ReducePoint]
 
 
 # --- backend selection ------------------------------------------------------
@@ -233,23 +252,33 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
 
     @app.post("/reduce", response_model=ReduceResponse)
     async def reduce(payload: ReduceRequest, _: BearerDep) -> ReduceResponse:
-        # The reducer doesn't need the CLAP model — it reads stored
-        # embeddings from SQLite. Intentionally no `emb.loaded` guard.
-        db_path = Path(payload.db_path)
-        if not db_path.exists():
+        # Pure compute: decode the matrix, run UMAP+PCA, return coords.
+        # No model needed (this isn't inference) and no filesystem access
+        # (the gateway owns reading vectors and persisting projections),
+        # so intentionally no `emb.loaded` guard.
+        n = len(payload.track_ids)
+        raw = base64.b64decode(payload.vectors_b64)
+        expected = n * payload.dim * 4
+        if len(raw) != expected:
             raise HTTPException(
                 status_code=400,
-                detail=f"db_path does not exist: {db_path}",
+                detail=(
+                    f"vectors_b64 decodes to {len(raw)} bytes, expected "
+                    f"{expected} (= {n} track_ids * {payload.dim} dim * 4)"
+                ),
             )
+        # Row-major little-endian f32 — the gateway packs the `vector`
+        # blobs verbatim. `.reshape` on a zero-row matrix is well-defined.
+        matrix = np.frombuffer(raw, dtype="<f4").reshape(n, payload.dim)
         try:
-            pv, written = await asyncio.to_thread(
-                reduce_module.run,
-                db_path=db_path,
-                model_version=payload.model_version,
+            projections = await asyncio.to_thread(
+                reduce_module.project_matrix,
+                payload.track_ids,
+                matrix,
                 n_neighbors=payload.n_neighbors,
                 min_dist=payload.min_dist,
                 random_state=payload.random_state,
-                proj_version=payload.proj_version,
+                metric=payload.metric,
                 n_components=payload.n_components,
             )
         except ImportError as e:
@@ -260,7 +289,27 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
                 status_code=503,
                 detail=f"reduce extra not installed (umap/sklearn): {e}",
             ) from e
-        return ReduceResponse(proj_version=pv, written=written)
+        except ValueError as e:
+            # Bad knobs (n_components ∉ {2,3}, an unknown UMAP `metric`,
+            # n_neighbors ≥ N) raise ValueError from the reducer. That's
+            # a caller bug, not a server fault — surface a 400 rather
+            # than an opaque 500.
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return ReduceResponse(
+            points=[
+                ReducePoint(
+                    track_id=p.track_id,
+                    x=p.x,
+                    y=p.y,
+                    z=p.z,
+                    pc1=p.pc1,
+                    pc2=p.pc2,
+                    pc3=p.pc3,
+                    pc4=p.pc4,
+                )
+                for p in projections
+            ]
+        )
 
     return app
 

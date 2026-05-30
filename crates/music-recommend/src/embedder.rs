@@ -14,12 +14,12 @@
 //! `ModelNotLoaded` error variant so callers can decide:
 //! "retry later, sidecar is alive" (503) vs "this is broken" (5xx).
 
-use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::Engine;
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::field;
 use url::Url;
 
@@ -114,24 +114,63 @@ pub struct EmbedResult {
     pub model_version: ModelVersion,
 }
 
-/// Arguments for the POST /reduce sidecar endpoint. Mirror
-/// `embedder.reduce.run()` 1:1 — adding a knob means: add a field
-/// here, on the pydantic `ReduceRequest`, and on `reduce.run`.
-#[derive(Clone, Debug, Serialize)]
+/// UMAP+PCA knobs for the POST /reduce sidecar endpoint.
+///
+/// As of the vectors-over-the-wire protocol, the embedder no longer
+/// opens the gateway's SQLite file — it receives the embedding matrix
+/// in the request body and returns coordinates. So this struct carries
+/// *only* the algorithm parameters; the gateway owns reading the
+/// vectors and persisting the projection rows. The `proj_version` and
+/// `model_version` that used to live here are now the gateway's
+/// concern (it writes the rows), not the embedder's.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReduceParams {
-    pub db_path: PathBuf,
-    pub model_version: String,
-    pub proj_version: Option<String>,
     pub n_neighbors: u32,
     pub min_dist: f64,
     pub random_state: u64,
     pub n_components: u8,
+    /// Distance metric for UMAP. `"cosine"` matches the geometry the
+    /// embeddings are L2-normalized into.
+    pub metric: String,
 }
 
+impl Default for ReduceParams {
+    fn default() -> Self {
+        Self {
+            n_neighbors: 15,
+            min_dist: 0.1,
+            random_state: 42,
+            n_components: 2,
+            metric: "cosine".to_string(),
+        }
+    }
+}
+
+/// One reduced point returned by the embedder: 2-D (or 3-D) coordinates
+/// plus the PCA channels, keyed by `track_id` so the caller matches rows
+/// back to embeddings without depending on response order. `z` is
+/// populated only for `n_components == 3` runs; `pc*` are null past the
+/// dataset's natural rank (N < 4 or D < 4).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct ReduceResult {
-    pub proj_version: String,
-    pub written: u64,
+pub struct ReducedPoint {
+    pub track_id: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default)]
+    pub z: Option<f64>,
+    #[serde(default)]
+    pub pc1: Option<f64>,
+    #[serde(default)]
+    pub pc2: Option<f64>,
+    #[serde(default)]
+    pub pc3: Option<f64>,
+    #[serde(default)]
+    pub pc4: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct ReduceResponseBody {
+    points: Vec<ReducedPoint>,
 }
 
 impl EmbedderClient {
@@ -211,22 +250,52 @@ impl EmbedderClient {
         Self::parse_embed_response(resp).await
     }
 
-    /// POST /reduce — trigger UMAP+PCA on the embedder side. The sidecar
-    /// opens `params.db_path` directly and writes projection rows under
-    /// `proj_version`. Same 503 = "extra missing, retry later" / 5xx =
-    /// "broken" convention as the embed endpoints, so callers can reuse
-    /// the existing error-routing logic.
+    /// POST /reduce — UMAP+PCA on the embedder side, vectors over the
+    /// wire. The caller ships `track_ids` plus the `(N, dim)` embedding
+    /// matrix; the embedder computes coordinates and returns one
+    /// [`ReducedPoint`] per track. The embedder does **not** touch any
+    /// SQLite file — persisting the projection rows is the caller's job
+    /// (it owns the recommend DB). This decouples reduction from the
+    /// deployment topology: it works whether the embedder is co-located
+    /// with the gateway or running on a separate GPU box.
+    ///
+    /// `vectors` are packed row-major as little-endian f32 and base64'd —
+    /// the exact byte layout of the `vector` blobs in `track_embeddings`,
+    /// so the Python side decodes with `np.frombuffer(dtype='<f4')`.
+    ///
+    /// Same 503 = "extra missing, retry later" / 5xx = "broken"
+    /// convention as the embed endpoints.
     #[tracing::instrument(
         name = "embedder.reduce",
-        skip(self, params),
-        fields(
-            model_version = %params.model_version,
-            proj_version = params.proj_version.as_deref().unwrap_or("(auto)"),
-        )
+        skip(self, track_ids, vectors, params),
+        fields(points = track_ids.len(), dim = dim, n_components = params.n_components)
     )]
-    pub async fn reduce(&self, params: &ReduceParams) -> Result<ReduceResult, EmbedderError> {
+    pub async fn reduce(
+        &self,
+        track_ids: &[String],
+        vectors: &[Vec<f32>],
+        dim: usize,
+        params: &ReduceParams,
+    ) -> Result<Vec<ReducedPoint>, EmbedderError> {
+        let mut bytes = Vec::with_capacity(vectors.len().saturating_mul(dim).saturating_mul(4));
+        for v in vectors {
+            for f in v {
+                bytes.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let vectors_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let body = serde_json::json!({
+            "track_ids": track_ids,
+            "dim": dim,
+            "vectors_b64": vectors_b64,
+            "n_neighbors": params.n_neighbors,
+            "min_dist": params.min_dist,
+            "random_state": params.random_state,
+            "n_components": params.n_components,
+            "metric": params.metric,
+        });
         let url = join(&self.base, "/reduce");
-        let resp = self.http.post(url).json(params).send().await?;
+        let resp = self.http.post(url).json(&body).send().await?;
         let status = resp.status();
         if status == StatusCode::SERVICE_UNAVAILABLE {
             return Err(EmbedderError::ModelNotLoaded);
@@ -234,8 +303,8 @@ impl EmbedderClient {
         if !status.is_success() {
             return Err(server_error(resp).await);
         }
-        let body: ReduceResult = parse_json(resp).await?;
-        Ok(body)
+        let body: ReduceResponseBody = parse_json(resp).await?;
+        Ok(body.points)
     }
 
     async fn parse_embed_response(resp: reqwest::Response) -> Result<EmbedResult, EmbedderError> {

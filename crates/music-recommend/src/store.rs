@@ -249,6 +249,48 @@ impl EmbeddingStore {
         }))
     }
 
+    /// All `done` embeddings for `model_version`, ordered by `track_id`
+    /// for stable iteration. Used by the auto-projection task, which
+    /// ships the whole matrix to the embedder for reduction. Returns an
+    /// empty vec when nothing is ready (caller decides what that means).
+    ///
+    /// A corrupt or dim-mismatched row is a hard error rather than a
+    /// silent skip — a bad vector in the projection input would distort
+    /// the whole layout, so fail loudly and let the caller log it.
+    pub async fn list_done_embeddings(
+        &self,
+        model_version: &ModelVersion,
+    ) -> Result<Vec<Embedding>> {
+        let rows = sqlx::query(
+            "SELECT track_id, dim, vector FROM track_embeddings
+              WHERE model_version = ? AND status = 'done' AND vector IS NOT NULL
+              ORDER BY track_id",
+        )
+        .bind(model_version.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let track_id: String = row.get("track_id");
+            let dim: i64 = row.get("dim");
+            let blob: Vec<u8> = row.get("vector");
+            let vector = blob_to_vector(&blob)?;
+            let dim_usize = usize::try_from(dim).expect("dim fits in usize");
+            if vector.len() != dim_usize {
+                return Err(Error::DimMismatch {
+                    stored: dim_usize,
+                    got: vector.len(),
+                });
+            }
+            out.push(Embedding {
+                key: EmbeddingKey::new(track_id, model_version.clone()),
+                vector,
+            });
+        }
+        Ok(out)
+    }
+
     /// Status of a `(track_id, model_version)` row, or `None` if no row.
     pub async fn status(&self, key: &EmbeddingKey) -> Result<Option<IngestStatus>> {
         let row = sqlx::query(

@@ -1,19 +1,20 @@
-//! 2D UMAP-projected embeddings, persisted by `embedder.reduce`.
+//! 2D/3D UMAP-projected embeddings.
 //!
-//! This store is a read-side companion to the Python reducer in
-//! `services/embedder/embedder/reduce.py`. The Python side writes;
-//! the gateway reads. We intentionally don't expose a write API in
-//! Rust — projections are *derived* data, recomputable by re-running
-//! the reducer, and keeping writes single-language avoids the
-//! cross-language coordination headache (e.g. concurrent UMAP runs
-//! racing on the same `(track_id, model_version, proj_version)` PK).
+//! Originally read-only: the Python reducer opened the SQLite file
+//! directly and wrote the rows. That broke in split-host deployments —
+//! a remote GPU embedder can't see the gateway's filesystem — so
+//! `/reduce` moved to a vectors-over-the-wire protocol: the embedder is
+//! now pure compute (matrix in, coordinates out) and the **gateway**
+//! writes the rows here via [`ProjectionStore::upsert_projections`].
+//! Projections remain *derived* data, recomputable by re-running the
+//! reducer; the write path is idempotent on the
+//! `(track_id, model_version, proj_version)` PK.
 //!
-//! Two reads matter:
+//! Reads:
 //! - `list_by_proj_version(...)` — the diagnostics page hot path;
 //!   pulls all `(track_id, x, y)` points for the requested projection.
 //! - `proj_versions_for_model(model_version)` — small enumeration so
-//!   the diagnostics UI can offer a dropdown without round-tripping
-//!   through the Python side.
+//!   the diagnostics UI can offer a dropdown.
 
 use sqlx::{Row, SqlitePool};
 
@@ -154,6 +155,64 @@ impl ProjectionStore {
         }
         tx.commit().await?;
         Ok(to_delete.len())
+    }
+
+    /// Upsert projection `points` for `(model_version, proj_version)`,
+    /// stamping every row with `created_at_ms`. Returns the number of
+    /// rows written.
+    ///
+    /// The gateway-side write path for the vectors-over-the-wire
+    /// `/reduce`: the embedder returns coordinates, the gateway persists
+    /// them here. Idempotent on the `(track_id, model_version,
+    /// proj_version)` PK — rerunning a projection replaces its coords
+    /// rather than erroring — mirroring the upsert the Python
+    /// `reduce.write_projections_to_sqlite` used to perform. Wrapped in
+    /// a single transaction so a partial write can't leave a projection
+    /// half-populated (and to avoid SQLite's per-INSERT autocommit cost
+    /// at thousands of rows).
+    pub async fn upsert_projections(
+        &self,
+        model_version: &ModelVersion,
+        proj_version: &str,
+        points: &[Projection2D],
+        created_at_ms: i64,
+    ) -> Result<u64> {
+        if points.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        for p in points {
+            sqlx::query(
+                "INSERT INTO embedding_projection_2d
+                     (track_id, model_version, proj_version, x, y, created_at_ms,
+                      pc1, pc2, pc3, pc4, z)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(track_id, model_version, proj_version) DO UPDATE SET
+                     x = excluded.x,
+                     y = excluded.y,
+                     created_at_ms = excluded.created_at_ms,
+                     pc1 = excluded.pc1,
+                     pc2 = excluded.pc2,
+                     pc3 = excluded.pc3,
+                     pc4 = excluded.pc4,
+                     z = excluded.z",
+            )
+            .bind(&p.track_id)
+            .bind(model_version.as_str())
+            .bind(proj_version)
+            .bind(p.x)
+            .bind(p.y)
+            .bind(created_at_ms)
+            .bind(p.pc1)
+            .bind(p.pc2)
+            .bind(p.pc3)
+            .bind(p.pc4)
+            .bind(p.z)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(points.len() as u64)
     }
 
     /// Distinct `proj_version` values known for the given
@@ -423,5 +482,91 @@ mod tests {
         assert_eq!(got[1].proj_version, "pv1");
         assert_eq!(got[1].point_count, 2);
         assert_eq!(got[1].created_at_ms, 200);
+    }
+
+    #[tokio::test]
+    async fn upsert_projections_writes_all_channels() {
+        let (s, _) = store().await;
+        let mv1 = mv("m1");
+        let points = vec![
+            Projection2D {
+                track_id: "t1".into(),
+                x: 1.0,
+                y: 2.0,
+                pc1: Some(0.1),
+                pc2: Some(0.2),
+                pc3: None,
+                pc4: None,
+                z: None,
+            },
+            Projection2D {
+                track_id: "t2".into(),
+                x: 3.0,
+                y: 4.0,
+                pc1: None,
+                pc2: None,
+                pc3: None,
+                pc4: None,
+                z: Some(9.0),
+            },
+        ];
+        let n = s
+            .upsert_projections(&mv1, "pv1", &points, 1000)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        let got = s.list_by_proj_version("pv1", &mv1).await.unwrap();
+        assert_eq!(got, points); // round-trips x/y/pc*/z exactly, ordered by track_id
+    }
+
+    #[tokio::test]
+    #[allow(clippy::float_cmp)] // exact literal coords from the test fixture
+    async fn upsert_projections_is_idempotent_on_pk() {
+        // Rerunning a projection replaces coords under the same
+        // (track_id, model_version, proj_version) PK rather than
+        // duplicating — and a now-null channel overwrites a prior value.
+        let (s, _) = store().await;
+        let mv1 = mv("m1");
+        let first = vec![Projection2D {
+            track_id: "t1".into(),
+            x: 1.0,
+            y: 2.0,
+            pc1: Some(0.5),
+            pc2: None,
+            pc3: None,
+            pc4: None,
+            z: None,
+        }];
+        s.upsert_projections(&mv1, "pv1", &first, 1000)
+            .await
+            .unwrap();
+        let second = vec![Projection2D {
+            track_id: "t1".into(),
+            x: 100.0,
+            y: 200.0,
+            pc1: None,
+            pc2: None,
+            pc3: None,
+            pc4: None,
+            z: None,
+        }];
+        s.upsert_projections(&mv1, "pv1", &second, 2000)
+            .await
+            .unwrap();
+        let got = s.list_by_proj_version("pv1", &mv1).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].x, 100.0);
+        assert_eq!(got[0].pc1, None);
+    }
+
+    #[tokio::test]
+    async fn upsert_projections_empty_is_noop() {
+        let (s, _) = store().await;
+        let n = s
+            .upsert_projections(&mv("m1"), "pv1", &[], 1)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(s.proj_versions_for_model(&mv("m1")).await.unwrap().is_empty());
     }
 }
