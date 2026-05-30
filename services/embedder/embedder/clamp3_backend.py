@@ -162,6 +162,30 @@ class Clamp3Embedder:
         self._tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_NAME)
         self._max_text_length = MAX_TEXT_LENGTH
 
+        # Fail loud on a degenerate tokenizer. xlm-roberta-base is a
+        # SentencePiece model; if `sentencepiece` is missing or the vocab
+        # files weren't baked into the (offline) HF cache, transformers
+        # silently loads a 5-token vocab where every word maps to <unk> —
+        # so "death metal" and "smooth jazz" embed identically and every
+        # station query collapses. Audio is unaffected (no tokenizer), so
+        # this hides unless explicitly checked. See the Dockerfile prebake
+        # and the [clamp3] `sentencepiece` dependency.
+        if self._tokenizer.vocab_size < 1000:
+            raise RuntimeError(
+                f"text tokenizer {TEXT_MODEL_NAME} loaded a degenerate vocab "
+                f"(size={self._tokenizer.vocab_size}); the SentencePiece vocab "
+                "is missing. Ensure `sentencepiece` is installed and the "
+                "tokenizer files are in the HF cache."
+            )
+        if self._tokenizer("death metal")["input_ids"] == self._tokenizer(
+            "smooth jazz"
+        )["input_ids"]:
+            raise RuntimeError(
+                f"text tokenizer {TEXT_MODEL_NAME} maps distinct text to "
+                "identical token ids — vocab not loaded (all <unk>). "
+                "embed_text would return identical vectors for every query."
+            )
+
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
         # Serialize forward passes so the device's CUDA/HIP stream isn't

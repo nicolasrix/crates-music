@@ -43,6 +43,11 @@ clamp3 = [
     # from transformers. Pinned >=4.40 to match upstream CLaMP 3's tested
     # version (Hubert + Wav2Vec2FeatureExtractor APIs are stable from there).
     "transformers>=4.40",
+    # xlm-roberta-base (the CLaMP 3 text branch) is a SentencePiece tokenizer.
+    # Without this package transformers silently falls back to a 5-token vocab
+    # (every word → <unk>), which collapses every text/station query to an
+    # identical embedding. MUST be present for embed_text to mean anything.
+    "sentencepiece>=0.2",
     # nnAudio backs the vendored MusicHubertModel's spectrogram frontend; it
     # is imported unconditionally via `embedder._clamp3.__init__`.
     "nnAudio>=0.3",

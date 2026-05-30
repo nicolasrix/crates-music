@@ -73,6 +73,7 @@ RUN pip install --no-cache-dir \
 #     503s with "reduce extra not installed". Pulls numba/scipy/sklearn.
 RUN pip install --no-cache-dir \
         'transformers>=4.40' \
+        'sentencepiece>=0.2' \
         'nnAudio>=0.3' \
         'soundfile>=0.12' \
         'umap-learn>=0.5'
@@ -131,10 +132,17 @@ ENV HF_HOME=/opt/huggingface \
     TRANSFORMERS_OFFLINE=1
 RUN mkdir -p ${HF_HOME} \
  && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python -c \
-        "from transformers import AutoModel; \
+        "from transformers import AutoModel, AutoTokenizer; \
          AutoModel.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
          from embedder._clamp3.musichubert_model import MusicHubertModel; \
          MusicHubertModel.from_pretrained('m-a-p/MERT-v1-95M')" \
+ && python -c \
+        "from transformers import AutoTokenizer; \
+         t=AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         assert t('death metal')['input_ids']!=t('smooth jazz')['input_ids'], \
+           'tokenizer vocab not baked: distinct text tokenizes identically'; \
+         assert t.vocab_size>1000, f'tokenizer vocab too small: {t.vocab_size}'" \
  && chmod -R a+rX ${HF_HOME}
 
 # /models is the expected bind-mount target for the saas checkpoint. We
