@@ -28,6 +28,26 @@ clap = [
     "librosa>=0.10",
     "soundfile>=0.12",
 ]
+# Real CLaMP 3 backend — MERT-v1-95M frontend + CLaMP 3 audio encoder over
+# the vendored `embedder._clamp3` package. Same ROCm wheel routing as `clap`
+# (the [tool.uv.sources] overrides below are package-level, so torch /
+# torchaudio resolve from the ROCm index for this extra too). Kept optional
+# so the dev/test loop — which uses the stub backend — never pulls torch.
+clamp3 = [
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    # See the clap extra: direct-listed so the rocm-index override fires;
+    # Linux-gated so non-Linux dev installs get CPU torch.
+    "pytorch-triton-rocm; sys_platform == 'linux'",
+    # MERT (HuBERT-style) + the CLaMP 3 / MusicHuBERT model classes all come
+    # from transformers. Pinned >=4.40 to match upstream CLaMP 3's tested
+    # version (Hubert + Wav2Vec2FeatureExtractor APIs are stable from there).
+    "transformers>=4.40",
+    # nnAudio backs the vendored MusicHubertModel's spectrogram frontend; it
+    # is imported unconditionally via `embedder._clamp3.__init__`.
+    "nnAudio>=0.3",
+    "soundfile>=0.12",
+]
 dev = [
     "pytest>=8.3",
     "pytest-benchmark>=4.0",

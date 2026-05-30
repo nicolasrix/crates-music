@@ -108,20 +108,37 @@ class ReduceResponse(BaseModel):
 def _default_embedder() -> Embedder:
     """Construct the default backend per the EMBEDDER_BACKEND env var.
 
-    `stub` (default) is loaded; suitable for dev. `clap` requires the
-    `clap` optional extra and a CLAP_CHECKPOINT path.
+    - `stub` (default): no model load, suitable for dev. Optional
+      `EMBEDDER_STUB_DIM` overrides the vector dim (default 512) so the
+      stub can stand in for either backend's wire shape during dev.
+    - `clap`: LAION CLAP via the `clap` extra. Requires `CLAP_CHECKPOINT`.
+    - `clamp3`: CLaMP 3 via the `clamp3` extra and the vendored
+      `embedder._clamp3` package. Requires `CLAMP3_CHECKPOINT` (path to
+      the unified saas `.pth`) and `MERT_FOLDER` (path to a local copy
+      of `m-a-p/MERT-v1-95M`, or the HF hub id if you want the model
+      to download on first run — discouraged for prod because the
+      container's unprivileged user has no writable HF cache).
     """
     backend = os.environ.get("EMBEDDER_BACKEND", "stub").lower()
     if backend == "stub":
-        from embedder.stub import StubEmbedder
+        from embedder.stub import DEFAULT_DIM, StubEmbedder
 
-        return StubEmbedder(model_version="stub-v1", loaded=True)
+        dim_override = os.environ.get("EMBEDDER_STUB_DIM")
+        dim = int(dim_override) if dim_override else DEFAULT_DIM
+        return StubEmbedder(model_version="stub-v1", loaded=True, dim=dim)
     if backend == "clap":
         # Lazy import: only pull torch / laion-clap when actually requested.
         from embedder.clap_backend import ClapEmbedder
 
         ckpt = os.environ["CLAP_CHECKPOINT"]
         return ClapEmbedder(checkpoint_path=ckpt)
+    if backend == "clamp3":
+        # Lazy import: only pull torch / transformers when requested.
+        from embedder.clamp3_backend import Clamp3Embedder
+
+        ckpt = os.environ["CLAMP3_CHECKPOINT"]
+        mert = os.environ["MERT_FOLDER"]
+        return Clamp3Embedder(checkpoint_path=ckpt, mert_folder=mert)
     raise RuntimeError(f"unknown EMBEDDER_BACKEND={backend!r}")
 
 
