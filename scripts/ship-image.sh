@@ -31,8 +31,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.clamp3.yml up -d
 #
 # NOTE: this ships *code*, not the CLaMP 3 saas checkpoint. That .pth is
-# bind-mounted at runtime (CLAMP3_MODELS_DIR) and must be staged on the
-# remote separately — it is deliberately not baked into the image.
+# bind-mounted at runtime from $CRATES_CONFIG_DIR/models on the remote and
+# must be staged there separately (e.g. rsync) — it is deliberately not
+# baked into the image.
 set -euo pipefail
 
 IMAGE="${1:?usage: ship-image.sh <image[:tag]> [ssh-host]}"
