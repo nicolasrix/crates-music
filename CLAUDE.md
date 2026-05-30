@@ -275,6 +275,30 @@ music-specific acoustic similarity. Done so far:
   so attaching it needs **no ANN rebuild**. Fit lazily at boot when absent
   + the embedder is up, and on every refit. `/next` (audio→audio) is
   unaffected and clearly improved (two seeds → 0/10 overlap).
+- **Station collapse was actually a tokenizer bug, not geometry (fixed
+  2026-05-31, `e0e2955`).** The whitening/text-mean work above improved
+  but never resolved station collapse (thrash vs ballad stuck at 7-9/10,
+  some pairs 10/10 identical) because the real cause was upstream: the
+  embedder image's **xlm-roberta-base tokenizer loaded a degenerate
+  5-token vocab** (specials only) — every word tokenized to `<unk>`, so
+  "death metal" and "smooth jazz" produced identical token streams and
+  identical embeddings. Two packaging gaps: `sentencepiece` missing from
+  the `[clamp3]` extra *and* the explicit `RUN pip install` layers (those
+  images use `pip install --no-deps .`, so the extra alone never lands),
+  and the Dockerfile HF prebake fetched `AutoModel` but never
+  `AutoTokenizer` (runtime is `TRANSFORMERS_OFFLINE=1`). Fix adds
+  sentencepiece to both, prebakes the tokenizer, a build-time assert, and
+  a fail-loud runtime guard in `Clamp3Embedder.__init__`. Audio was never
+  affected (no tokenizer) — only text stations. Verified live after an
+  embedder rebuild + `text_mean` refit (no track re-embedding, text is
+  query-time): every collapsing pair → 0/10 overlap, results genre-coherent
+  (e.g. "smooth jazz" → Jazz×5/Funk×2; "boom bap hip hop" → Rap/Hip-Hop
+  ×8), `/next` unchanged. NB: with the tokenizer fixed, station collapse
+  disappears even with **no** whitening on the text path; the audio-fit
+  ABTT de-coning applied to text is marginally *worse* than not de-coning
+  (offline genre purity 0.44 vs ~0.57) — a possible follow-up to route the
+  station query path around de-coning. The audio whitening that drives
+  `/next` stays as-is.
 - Dim is now a per-backend property (not an app constant);
   `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
 - Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +
