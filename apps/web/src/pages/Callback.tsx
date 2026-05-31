@@ -9,11 +9,12 @@ export function Callback() {
     ranRef.current = true;
     const params = new URLSearchParams(location.search);
     const code = params.get("code");
+    const state = params.get("state");
     if (!code) {
       setError("missing ?code in OAuth callback");
       return;
     }
-    completeLogin(code)
+    completeLogin(code, state)
       .then(() => location.assign("/"))
       .catch((e: unknown) => setError(String(e)));
   }, []);

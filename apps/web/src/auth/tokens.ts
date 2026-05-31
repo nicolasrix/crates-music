@@ -7,6 +7,7 @@ const ACCESS_KEY = "gw_access_token";
 const ACCESS_EXPIRES_KEY = "gw_access_expires_at";
 const REFRESH_KEY = "gw_refresh_token";
 const VERIFIER_KEY = "gw_pkce_verifier";
+const STATE_KEY = "gw_oauth_state";
 
 export interface TokenPair {
   accessToken: string;
@@ -44,5 +45,20 @@ export function stashVerifier(v: string) {
 export function popVerifier(): string | null {
   const v = sessionStorage.getItem(VERIFIER_KEY);
   if (v) sessionStorage.removeItem(VERIFIER_KEY);
+  return v;
+}
+
+// The OAuth `state` value lives alongside the verifier (sessionStorage,
+// tab-scoped). The callback compares the returned `state` against this
+// to defend against login CSRF — an attacker-seeded callback won't carry
+// the value this tab generated.
+
+export function stashState(s: string) {
+  sessionStorage.setItem(STATE_KEY, s);
+}
+
+export function popState(): string | null {
+  const v = sessionStorage.getItem(STATE_KEY);
+  if (v) sessionStorage.removeItem(STATE_KEY);
   return v;
 }
