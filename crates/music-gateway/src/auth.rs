@@ -62,7 +62,12 @@ fn extract_bearer(request: &Request) -> Option<String> {
     }
     let query = request.uri().query()?;
     for kv in query.split('&') {
-        let (k, v) = kv.split_once('=')?;
+        // Skip bare flags (`?autoplay`) rather than `?`-bailing the whole
+        // function — a valueless param before `access_token` must not mask
+        // a valid token.
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
         if k == "access_token" {
             // The token is base64url ([A-Za-z0-9_-]) so percent-decoding
             // is identity, but be permissive in case a client encoded
@@ -119,4 +124,45 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+
+    fn req(uri: &str) -> Request {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn extracts_token_from_bearer_header() {
+        let mut r = req("/v1/anything");
+        r.headers_mut()
+            .insert(AUTHORIZATION, "Bearer abc123".parse().unwrap());
+        assert_eq!(extract_bearer(&r).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn extracts_token_from_query_param() {
+        assert_eq!(
+            extract_bearer(&req("/v1/stream?access_token=abc123")).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn bare_flag_before_token_does_not_mask_it() {
+        // Regression: a valueless query param used to `?`-bail the whole
+        // function, dropping a valid access_token after it.
+        assert_eq!(
+            extract_bearer(&req("/v1/stream?autoplay&access_token=abc123")).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn no_token_returns_none() {
+        assert_eq!(extract_bearer(&req("/v1/stream?autoplay&foo")), None);
+    }
 }
