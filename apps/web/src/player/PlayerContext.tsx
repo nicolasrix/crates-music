@@ -7,12 +7,23 @@
 // SetPlaying(false) at the end of the queue). The eventual broadcast
 // flips local state and this effect picks up the change.
 
-import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { coverArtUrl, scrobble, streamUrl } from "../api/client";
+import { postEvents } from "../api/events";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 import { evaluateScrobble, type ScrobbleState } from "./scrobble";
+import { evaluateSkip } from "./skip";
 
 interface PlayerCtx {
   /** The currently-playing item's metadata, if known. */
@@ -166,6 +177,35 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => audio.removeEventListener("timeupdate", onTimeUpdate);
   }, [currentTrackId]);
 
+  // Skip signal for the recommender. A *manual* track change (next/prev,
+  // picking another track, media-key next/prev) abandons the outgoing
+  // track; we report how far the user got so the gateway can fold it into
+  // per-track preference affinity (early skip = strong "not now", late skip
+  // = near-zero penalty). Called synchronously at each gesture site so it
+  // reads the audio element while it still holds the *outgoing* track —
+  // primePlayback clobbers `src` synchronously, so an effect-cleanup read
+  // would see the new track instead. The natural end-of-track auto-advance
+  // does not route through these gestures, so it's correctly excluded.
+  // evaluateSkip (skip.ts) is the pure gate; fire-and-forget on the POST.
+  const maybeEmitSkip = useCallback((trackId: string | undefined) => {
+    const audio = audioRef.current;
+    if (!audio || !trackId) return;
+    const decision = evaluateSkip({
+      trackDurationMs: Number.isFinite(audio.duration) ? audio.duration * 1000 : 0,
+      playedMs: audio.currentTime * 1000,
+      endedNaturally: audio.ended,
+    });
+    if (!decision.emit) return;
+    void postEvents([
+      {
+        event_type: "skip",
+        track_id: trackId,
+        occurred_at: Date.now(),
+        metadata: { played_ms: decision.playedMs },
+      },
+    ]).catch(() => {});
+  }, []);
+
   // Reflect the play/pause flag.
   useEffect(() => {
     const audio = audioRef.current;
@@ -249,13 +289,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const ms = navigator.mediaSession;
     const i = now_playing_index;
     const total = queue.items.length;
+    const leaving = i !== null ? queue.items[i]?.track_id : undefined;
     ms.setActionHandler("play", () => submit({ type: "set_playing", is_playing: true }));
     ms.setActionHandler("pause", () => submit({ type: "set_playing", is_playing: false }));
     ms.setActionHandler("nexttrack", () => {
-      if (i !== null && i + 1 < total) submit({ type: "set_now_playing", index: i + 1 });
+      if (i !== null && i + 1 < total) {
+        maybeEmitSkip(leaving);
+        submit({ type: "set_now_playing", index: i + 1 });
+      }
     });
     ms.setActionHandler("previoustrack", () => {
-      if (i !== null && i > 0) submit({ type: "set_now_playing", index: i - 1 });
+      if (i !== null && i > 0) {
+        maybeEmitSkip(leaving);
+        submit({ type: "set_now_playing", index: i - 1 });
+      }
     });
     ms.setActionHandler("seekto", (details) => {
       const a = audioRef.current;
@@ -269,7 +316,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       ms.setActionHandler("previoustrack", null);
       ms.setActionHandler("seekto", null);
     };
-  }, [now_playing_index, queue.items.length, submit]);
+  }, [now_playing_index, queue.items, submit, maybeEmitSkip]);
 
   // Auto-advance on end. Submitting an op rather than mutating local
   // state keeps the gateway authoritative.
@@ -302,17 +349,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       togglePlay: () => submit({ type: "set_playing", is_playing: !is_playing }),
       next: () => {
         if (i !== null && i + 1 < queue.items.length) {
+          maybeEmitSkip(currentTrackId);
           submit({ type: "set_now_playing", index: i + 1 });
         }
       },
       prev: () => {
         if (i !== null && i > 0) {
+          maybeEmitSkip(currentTrackId);
           submit({ type: "set_now_playing", index: i - 1 });
         }
       },
       primePlayback: (track) => {
         const a = audioRef.current;
         if (!a) return;
+        // Picking a different track abandons the current one — report the
+        // skip *before* clobbering src below (which resets currentTime).
+        // Restarting the same track is not a skip.
+        if (currentTrackId && currentTrackId !== track.id) maybeEmitSkip(currentTrackId);
         // Set src and play() *now*, while still inside the click handler's
         // synchronous user-gesture window. The track-change effect would
         // otherwise duplicate this work later (when set_now_playing's
@@ -323,7 +376,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         void a.play().catch(() => {});
       },
     };
-  }, [nowPlaying, is_playing, queue.items.length, now_playing_index, submit, audio]);
+  }, [
+    nowPlaying,
+    is_playing,
+    queue.items.length,
+    now_playing_index,
+    submit,
+    audio,
+    currentTrackId,
+    maybeEmitSkip,
+  ]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
