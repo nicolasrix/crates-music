@@ -180,8 +180,30 @@ pub fn build_router(state: AppState) -> Router {
     };
 
     with_fallback
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(http_trace_span))
         .with_state(state)
+}
+
+/// Span for an inbound HTTP request, replacing tower-http's
+/// `DefaultMakeSpan`.
+///
+/// Records the request **path only** — never the full URI. Access
+/// tokens can ride in `?access_token=` (RFC 6750 §2.3, needed for
+/// `<audio>`/`<img>` URLs that can't set an `Authorization` header), and
+/// the default span records the whole URI, query string included. That
+/// value flows into the diagnostics trace store (the layer in
+/// `diagnostics` persists every span's fields), so the full URI would
+/// leak bearer tokens into SQLite. Stripping to the path closes that.
+///
+/// Kept at DEBUG to match tower-http's default span level, so trace-store
+/// volume is unchanged at the default `info` filter.
+pub fn http_trace_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        path = %request.uri().path(),
+        version = ?request.version(),
+    )
 }
 
 async fn not_found() -> StatusCode {
