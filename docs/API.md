@@ -174,7 +174,7 @@ difference is how they pick the *query vector*.
 | `GET /v1/recommend/next` | Embedding of a single track id. 404 if not embedded. |
 | `POST /v1/recommend/from-any` | Embedding of the first indexed track in a candidate list (album-start case). |
 | `POST /v1/recommend/from-seeds` | Multi-seed Σ-similarity fan-out (playlist case). |
-| `GET /v1/recommend/station` | CLAP **text** embedding of a natural-language prompt. |
+| `GET /v1/recommend/station` | **text** embedding of a natural-language prompt via the embedder's text encoder. |
 
 The track-seeded variants accept an optional `queue_context` for
 server-side diversity filtering and an optional `session_id` for
@@ -209,6 +209,10 @@ the endpoint 404s in that mode — the field is reserved for a future
 tag-only fallback.
 
 `similarity` is cosine similarity in `[-1, 1]`. Higher = more similar.
+
+`model_version` is dynamic and reflects the deployed backend. The
+`clap-music_...` strings throughout these examples are CLAP-era; a
+CLaMP 3 deployment reports a `weights_clamp3_saas_...` version.
 
 #### `POST /v1/recommend/from-any`
 
@@ -327,9 +331,19 @@ Same shape as `similar_albums` but aggregates by `artist_id` instead.
 #### `GET /v1/recommend/station`
 
 Natural-language "playlist from a prompt." The gateway sends the
-prompt to the embedder's `/embed/text` endpoint (CLAP text encoder),
-then runs the resulting 512-dim vector through the same content ANN
-that powers `/v1/recommend/next`.
+prompt to the embedder's `/embed/text` endpoint (the backend's text
+encoder), then runs the resulting vector through the same content ANN
+that powers `/v1/recommend/next`. The vector dimension is
+backend-dependent (512 for CLAP, 768 for CLaMP 3), not a hardcoded
+512.
+
+When `[recommend].whitening_enabled = true` (the default), text-query
+stations are centered by the cross-modal text mean before the shared
+All-but-the-Top de-coning. This corrects the embedding anisotropy
+that would otherwise collapse unrelated text queries toward each
+other (e.g. "death metal" and "smooth jazz" returning near-identical
+results). The text mean is refreshed via
+`POST /v1/recommend/refit_whitening`.
 
 | Query param | Required | Default | Description |
 |---|---|---|---|
@@ -346,6 +360,10 @@ Response:
   ]
 }
 ```
+
+`model_version` is backend-dependent — the example above is the CLAP
+string; a CLaMP 3 deployment reports a `weights_clamp3_saas_...`
+version instead.
 
 - 400 if `text` is empty or `n == 0`.
 - 400 if `text` exceeds 500 chars.
@@ -445,6 +463,34 @@ re-render without a follow-up GET:
 - Session attribution is trusted: a hostile client could spam votes
   under rotating session ids. Single-tenant — not a security concern
   today.
+
+#### `POST /v1/recommend/refit_whitening`
+
+Admin endpoint. Empty request body. Refits the All-but-the-Top
+whitening transform from the current embedded corpus, persists it,
+installs it on the ANN, and rebuilds the index so stored vectors are
+re-whitened. Best-effort: also fits the cross-modal text mean if the
+embedder is reachable, so text-station queries are centered by the
+text-modality mean rather than the audio mean. Use after a large
+batch of new embeddings, or to (re)enable whitening.
+
+Response (200):
+```json
+{
+  "model_version": "weights_clamp3_saas_...",
+  "n_samples": 7349,
+  "k": 7,
+  "dim": 768,
+  "fitted_at_ms": 1780174710400,
+  "has_text_mean": true
+}
+```
+
+- `has_text_mean` is `false` when the embedder was unreachable during
+  the refit — text stations then fall back to centering by the audio
+  mean.
+- 409 Conflict if there are no embeddings to fit on.
+- 500 if listing / fitting / persisting fails.
 
 ### Event log
 
@@ -811,6 +857,7 @@ OpenSubsonic extensions: <https://opensubsonic.netlify.app/>.
 | 401 | Missing or invalid auth token. |
 | 403 | Auth valid but not authorized. (Rare today; single-user.) |
 | 404 | Resource not found, including "seed track not embedded yet" on recommend endpoints. |
+| 409 | Conflict — e.g. `refit_whitening` with no embeddings to fit on. |
 | 410 | `/oauth/setup` after master password is set. |
 | 413 | Batch too large (events, client_events). |
 | 422 | RUM `client_events` payload schema mismatch. |

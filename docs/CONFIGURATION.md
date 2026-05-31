@@ -81,8 +81,8 @@ redirect_uris = [
 
 ### `[embedder]` (optional)
 
-Python sidecar for CLAP audio + text embeddings. If absent, the
-gateway runs in degraded mode: track-seeded recommend endpoints 404,
+Python sidecar for audio + text embeddings (CLAP or CLaMP 3). If
+absent, the gateway runs in degraded mode: track-seeded recommend endpoints 404,
 the text-query station endpoint 503s. (A tag-only fallback is
 reserved for the future — see
 [components/music-recommend.md](./components/music-recommend.md).)
@@ -93,7 +93,23 @@ logged and the gateway proceeds without embedder support.
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `url` | string | yes | — | Sidecar base URL, e.g. `http://localhost:9000`. |
-| `timeout_seconds` | u64 | no | `30` | Per-request timeout. CPU-only CLAP inference on a 120 s clip can take 10+ s, so don't go too aggressive. |
+| `timeout_seconds` | u64 | no | `30` | Per-request timeout. CPU-only inference on a 120 s clip can take 10+ s (true for both CLAP and CLaMP 3), so don't go too aggressive. |
+
+### `[recommend]` (optional)
+
+Recommender tuning. Defaults are sized for the LAION CLAP backend;
+override when running CLaMP 3.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `embedding_dim` | usize | no | `512` | Must match the embedder backend's output dim. CLAP = 512, CLaMP 3 = 768. The ANN sidecar is not migratable across a dim change — wipe `gateway-state.ann` + `.ann.keys` when changing it. |
+| `whitening_enabled` | bool | no | `true` | All-but-the-Top whitening of the content ANN. De-cones the anisotropic CLaMP 3 vectors and enables cross-modal text-station centering. |
+
+```toml
+[recommend]
+embedding_dim     = 768   # CLaMP 3; default 512 (CLAP)
+whitening_enabled = true
+```
 
 ## CLI config (`~/.config/crates-music/config.toml`)
 
@@ -128,23 +144,33 @@ Cache directory follows the same XDG layout under
 |---|---|---|
 | `MUSIC_GATEWAY_CONFIG` | — | Path to `gateway.toml`. Overridden by `--config` flag. |
 | `RUST_LOG` | `info` | Tracing filter. `RUST_LOG=music_gateway=debug,sqlx=warn` is a good debug starting point. |
+| `RECOMMEND_EMBEDDING_DIM` | — | Consumed by `docker/gateway/gen_config.py` to emit the `[recommend] embedding_dim` section. Unset → no section → gateway defaults to 512. Set `768` for CLaMP 3. |
 
 ### Embedder
 
 | Variable | Default | Description |
 |---|---|---|
-| `EMBEDDER_BACKEND` | `stub` | `stub` for deterministic hash vectors (no GPU); `clap` for the real LAION CLAP backend. Any other value → service refuses to start. |
+| `EMBEDDER_BACKEND` | `stub` | `stub` for deterministic hash vectors (no GPU); `clap` for the real LAION CLAP backend; `clamp3` for the CLaMP 3 backend. Any other value → service refuses to start. |
 | `CLAP_CHECKPOINT` | — | Required when `EMBEDDER_BACKEND=clap`. Path to a `.pt` checkpoint file. |
+| `CLAMP3_CHECKPOINT` | — | Required when `EMBEDDER_BACKEND=clamp3`. Path to the CLaMP 3 unified saas `.pth` checkpoint. |
+| `MERT_FOLDER` | — | Required when `EMBEDDER_BACKEND=clamp3`. Path to a local `m-a-p/MERT-v1-95M` copy (the audio frontend). May also be the HF hub id, but that's discouraged in prod since the container user has no writable HF cache. |
+| `EMBEDDER_STUB_DIM` | `512` | Optional. Overrides the stub backend's wire dimension (e.g. set `768` so the stub mimics CLaMP 3's output shape in dev). |
+| `EMBEDDER_BEARER_TOKEN` | — | Optional shared secret for split-host deploys (gateway and embedder on different machines). When set, `/embed/*` and `/reduce` require `Authorization: Bearer <token>`; `/healthz` is exempt. Empty string = unset. |
 | `HIP_VISIBLE_DEVICES` | — | AMD ROCm: pin to a specific GPU index (e.g. `0`). Recommended on hosts with both a discrete and integrated GPU — without pinning, torch may pick the iGPU. |
 | `CUDA_VISIBLE_DEVICES` | — | NVIDIA equivalent of `HIP_VISIBLE_DEVICES`. |
 | `HSA_OVERRIDE_GFX_VERSION` | — | AMD ROCm fallback: e.g. `11.0.0` to make a newer card identify as RDNA3. Only needed when the installed ROCm version pre-dates native support for the card. |
 
-The embedding dimension is fixed at 512 (constant `EMBEDDING_DIM` in
-`embedder/app.py`); both the CLAP audio + text encoders and the stub
-backend produce 512-dim vectors.
+The embedding dimension is a per-backend property, read from the
+backend at startup (`emb.dim`), not a fixed constant: CLAP produces
+512-dim vectors, CLaMP 3 produces 768-dim, and the stub defaults to
+512 (overridable via `EMBEDDER_STUB_DIM`). The gateway's
+`[recommend].embedding_dim` must match whatever the configured backend
+emits.
 
-Device selection for the CLAP backend is whatever
-`laion_clap.CLAP_Module` picks up at load time. The current device is
+Device selection is whatever the backend's framework picks up at load
+time — `laion_clap.CLAP_Module` for CLAP, torch/transformers for
+CLaMP 3 — honouring `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES`. The
+current device is
 reported on `/healthz` as `device: "cpu" | "cuda"`; the gateway boot
 log echoes it as `embedder: ready ... device="cuda"`. ROCm-built
 torch reports HIP devices as `"cuda"`, so `device="cuda"` with an AMD

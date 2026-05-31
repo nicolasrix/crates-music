@@ -157,7 +157,18 @@ cd services/embedder
 uv sync                                    # or: pip install -e .[dev]
 uv run uvicorn embedder.app:app --port 9000
 
-# Or the real CLAP backend — requires PyTorch + ROCm/CUDA + a checkpoint:
+# Or the real CLaMP 3 backend (production) — 768-dim, music-specific.
+# Requires PyTorch + ROCm/CUDA, a CLaMP 3 checkpoint, and MERT-v1-95M:
+uv sync --extra clamp3
+EMBEDDER_BACKEND=clamp3 \
+  CLAMP3_CHECKPOINT=/path/to/weights_clamp3_saas_*.pth \
+  MERT_FOLDER=/path/to/MERT-v1-95M \
+  uv run uvicorn embedder.app:app --port 9000
+# MERT_FOLDER can be a local copy or the hub id `m-a-p/MERT-v1-95M`.
+# The clamp3 extra includes `sentencepiece`, required by the
+# xlm-roberta-base text tokenizer that powers text-query stations.
+
+# Or the legacy CLAP backend — 512-dim, requires PyTorch + ROCm/CUDA + a checkpoint:
 uv sync --extra clap
 CLAP_CHECKPOINT=/path/to/clap.pt EMBEDDER_BACKEND=clap \
   uv run uvicorn embedder.app:app --port 9000
@@ -171,13 +182,17 @@ url = "http://localhost:9000"
 timeout_seconds = 30
 ```
 
-Restart the gateway. You'll see:
+Restart the gateway. You'll see (CLaMP 3, the production backend):
 
 ```
-INFO  embedder: probe ok model=clap-music_audioset_epoch_15_esc_90.14 dim=512
+INFO  embedder: probe ok model=clamp3-saas dim=768 device=cuda
 ```
 
-(or `model=stub-v1` if you went with the stub backend).
+For the legacy CLAP backend the probe reports `dim=512` instead; the
+stub backend reports `model=stub-v1` (and `dim=512` by default,
+overridable via `EMBEDDER_STUB_DIM`). The gateway's
+`[recommend].embedding_dim` must match the probed dim — see
+[CONFIGURATION.md](./CONFIGURATION.md).
 
 ## Verifying everything works
 

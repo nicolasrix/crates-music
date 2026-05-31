@@ -16,7 +16,7 @@ source of truth.
                     │  • Subsonic proxy + augments     │
                     │  • Cover-art proxy + self-heal   │
                     │  • OAuth 2.1 server              │
-                    │  • Recommender (CLAP + ANN +     │
+                    │  • Recommender (CLaMP 3 + ANN +  │
                     │    queue filter + MMR + feedback)│
                     │  • Event log + scrobble intercept│
                     │  • WebSocket sync                │
@@ -40,7 +40,8 @@ Three things benefit from being shared across clients:
 1. **Cache** — transcoded audio is expensive to produce. Producing it
    once on the gateway and serving it to every client beats paying
    the transcode cost per device.
-2. **Recommender** — the CLAP model is hundreds of MB; running it on
+2. **Recommender** — the content embedder (CLaMP 3, formerly CLAP) is
+   hundreds of MB; running it on
    each client is impractical. Running it once on the gateway and
    exposing similarity queries over HTTP is straightforward.
 3. **Sync** — playback queue + playback position + likes need to be
@@ -59,7 +60,7 @@ crates/
   music-cache/       # SQLite metadata cache + on-disk LRU audio cache
   music-player/      # native playback (rodio + symphonia)
   music-sync/        # WebSocket client + state machine
-  music-recommend/   # SERVER-ONLY: CLAP embedder, ANN index, event log
+  music-recommend/   # SERVER-ONLY: CLaMP 3 embedder (CLAP legacy), ANN index, event log
   music-gateway/     # the gateway binary
   music-cli/         # the CLI binary
 
@@ -67,7 +68,7 @@ apps/
   web/               # TS + React + Vite
 
 services/
-  embedder/          # Python FastAPI sidecar (CLAP audio + text)
+  embedder/          # Python FastAPI sidecar (CLaMP 3 audio + text; CLAP legacy)
 ```
 
 Each `crates/*` directory is a workspace member with its own
@@ -179,12 +180,18 @@ See [API.md](./API.md) for the endpoint reference.
 Backend-only. Two indices planned, blended at query time — they
 capture different things:
 
-- **Content embeddings** (CLAP) — computed once per track at ingest.
-  Captures "these tracks sound similar." Bonus: text-aligned, so
-  natural-language queries ("sunny afternoon", "late night drive")
-  work via the same index. **Live;** text queries land via
-  `GET /v1/recommend/station?text=...&n=...` and the web app's
-  `/station` page.
+- **Content embeddings** (CLaMP 3, 768-dim; CLAP at 512-dim is the
+  prior/alternative backend) — computed once per track at ingest.
+  Captures "these tracks sound similar." CLaMP 3 is music-specific:
+  audio runs through a MERT-v1-95M frontend (mean over 13 hidden
+  layers) into the CLaMP 3 audio encoder; text runs an xlm-roberta-base
+  tokenizer into the CLaMP 3 text encoder, landing in the **same
+  768-dim joint space** as audio. So natural-language queries ("sunny
+  afternoon", "late night drive") work via the same index. **Live;**
+  text queries land via `GET /v1/recommend/station?text=...&n=...` and
+  the web app's `/station` page. Embedding dim is a per-backend
+  property (CLaMP 3 768, CLAP 512); the gateway's
+  `[recommend].embedding_dim` must match the running embedder.
 - **Behavioural embeddings** (track2vec on listening sessions) —
   retrained nightly. Captures "this user plays these together,"
   which can diverge from acoustic similarity. **Deferred (P6.8);**
@@ -193,8 +200,11 @@ capture different things:
 Both will eventually be stored as mmap'd HNSW files via
 [`usearch`](https://github.com/unum-cloud/usearch).
 
-Inference runs in a Python sidecar (FastAPI + LAION CLAP) so the
-gateway stays lightweight. Boot probe: gateway checks the embedder's
+Inference runs in a Python sidecar (FastAPI + CLaMP 3, or LAION CLAP
+on the legacy backend) so the gateway stays lightweight. In the live
+deployment the sidecar runs on the GPU host, which has the GPU (AMD
+RDNA4 GPU); the gateway host can be CPU-only and reaches the
+sidecar over the LAN. Boot probe: gateway checks the embedder's
 `/healthz` at startup. If unreachable, it logs a warning and runs in
 **degraded mode** — recommend endpoints return 404 for every seed
 (reserved for a future tag-only fallback).
@@ -205,7 +215,8 @@ New track discovered (Subsonic poll)
       MP3 sources → raw byte-range (no transcode, ~10× faster)
       everything else (FLAC/OGG/OPUS/M4A) → ?format=mp3 transcode
   → POST /embed/audio to the sidecar
-  → sidecar returns L2-normalized 512-dim float32 vector
+  → sidecar returns an L2-normalized float32 vector (dim is
+    backend-dependent: 768 for CLaMP 3, 512 for CLAP)
   → upsert into content-ANN index (mmap'd HNSW, cosine)
   → mark track ready in catalog
 ```
@@ -221,6 +232,18 @@ Ingest is single-worker. Crash recovery is built in: rows flagged
 `in_progress` at startup get reset to `not_started`. The ANN is a
 derived cache — rebuildable from SQLite, so you can wipe the file
 freely.
+
+CLaMP 3 embeddings are anisotropic — they cluster in a narrow cone,
+which inflates and poorly-separates cosine similarities (especially
+for text-query stations). An **All-but-the-Top (ABTT)** whitening step
+([`crates/music-recommend/src/whitening.rs`](../crates/music-recommend/src/whitening.rs))
+corrects this: subtract the corpus mean, project out the top ~dim/100
+principal directions, renormalize. It's fit post-hoc over the existing
+audio embeddings (no re-embedding) and gated by
+`[recommend].whitening_enabled` (default true). A cross-modal **text
+mean** additionally centers text-station queries by the text-modality
+mean, since CLaMP 3 text embeddings sit at a modality-gap offset from
+audio. Whitening is a no-op for the CLAP backend.
 
 ### Beyond raw similarity
 

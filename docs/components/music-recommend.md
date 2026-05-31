@@ -16,8 +16,10 @@ tables.
 | `metadata` | `track_metadata` cache (artist/title/album/year/genre/duration) | `0003_track_metadata.sql` |
 | `play_history` | `play_history` (track_id PK, last_played_ms) — recency clock (populated by scrobble interceptor; reserved for the planned MMR recency term, see [Algorithm reference](#algorithm-reference)) | `0004_play_history.sql` |
 | `feedback` | `recommend_feedback` (track_id, session_id, vote, occurred_ms) | `0005_recommend_feedback.sql` |
-| `projection` | `embedding_projection_2d` (track_id, model_version, x, y) for UMAP visualisation | `0006_embedding_projection_2d.sql` |
-| `ann` | `usearch` HNSW + sidecar `(TrackId ↔ u64)` map | n/a (derived cache) |
+| `projection` | `embedding_projection_2d` (track_id, model_version, x, y, + `pc1..pc4` PCA axes, + `z` for 3D) for UMAP/PCA latent-space visualisation | `0006` + `0009_embedding_projection_pcs.sql` + `0010_embedding_projection_z.sql` |
+| `whitening` | All-but-the-Top (ABTT) whitening transform — corpus mean, top-k principal directions, optional cross-modal text mean | n/a (pure compute; persisted by `whitening_store`) |
+| `whitening_store` | `embedding_whitening` table (per-`model_version` fitted transform + text mean) | `0011_embedding_whitening.sql` + `0012_embedding_whitening_text_mean.sql` |
+| `ann` | `usearch` HNSW + sidecar `(TrackId ↔ u64)` map; whitens vectors on entry when a transform is installed | n/a (derived cache) |
 | `embedder` | HTTP client for the Python sidecar | n/a |
 | `ingest` | Worker: claim → fetch audio → embed → upsert | n/a |
 | `aggregate` | Σ-similarity multi-seed fan-out helpers | n/a |
@@ -73,9 +75,18 @@ if a number here diverges from a constant in the code, the code wins.
 
 ### 1. Retrieval — cosine ANN
 
-`AnnIndex::query` against the `usearch` HNSW (cosine metric, 512-dim
-CLAP vectors). Returns top-K with `similarity ∈ [-1, 1]`. CLAP outputs
-are unit-norm, so in practice scores cluster in `[0, 1]`.
+`AnnIndex::query` against the `usearch` HNSW (cosine metric). The vector
+dimension is a per-backend property — 768 for the current CLaMP 3
+embedder, 512 for the legacy CLAP one — read from config
+(`[recommend].embedding_dim`), not hardcoded. Returns top-K with
+`similarity ∈ [-1, 1]`. Embeddings are unit-norm, so in practice scores
+cluster in `[0, 1]`.
+
+When ABTT whitening is enabled (default), the index holds *de-coned*
+vectors and `query` whitens its input by the audio mean first, so the
+single rule "whiten a raw vector exactly once on entry" holds. The
+text-station path uses `query_text`, which centers by the cross-modal
+text mean instead (see [Whitening](#whitening-abtt) below).
 
 ### 2. Multi-seed aggregation — Σ-similarity
 
@@ -210,6 +221,7 @@ use music_recommend::{
     MetadataStore, TrackMetadata, BackfillStats, backfill_metadata,
     MmrCandidate, mmr_rerank,
     QueueFilter, QueueFilterConfig, DiversityMode,
+    Whitening, WhiteningStore, default_k,
     ann::AnnIndex,
     aggregate::sample_indices,
     ingest::{IngestWorker, AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store},
@@ -258,12 +270,14 @@ isn't loaded." The gateway distinguishes these to surface
 let ann = AnnIndex::open(&path, dim, connectivity)?;
 let ann = AnnIndex::open_in_memory(dim, connectivity)?;
 
-ann.upsert(&track_id, &vector)?;
-let results = ann.query_excluding(&seed_vector, 20, &[seed_id])?;
+ann.set_whitening(Some(whitening.into()))?;   // install ABTT transform; None = identity
+ann.upsert(&track_id, &vector)?;               // whitens raw vector on entry
+let results = ann.query_excluding(&seed_vector, 20, &[seed_id])?;  // audio-mean centering
+let station = ann.query_text(&text_vector, 20)?;                   // text-mean centering
 ann.persist()?;  // save to file (no-op for in-memory)
 ```
 
-`usearch` handles HNSW + cosine internally. Two design choices we
+`usearch` handles HNSW + cosine internally. Three design choices we
 made on top of it:
 
 1. **String → u64 key map**. usearch keys are `u64`; our `TrackId`s
@@ -275,6 +289,62 @@ made on top of it:
    `1 - cos_sim` (cosine distance). We invert it before returning so
    callers see `1.0 = identical, -1.0 = opposite`. Less mental
    gymnastics at call sites.
+
+3. **Whitening lives inside the index**. When a `Whitening` transform
+   is installed (`set_whitening`), `upsert`/`rebuild_from`/`query`
+   whiten the raw vector exactly once on entry, so the HNSW stores
+   de-coned vectors and MMR's candidate-vs-candidate cosine reads the
+   already-whitened stored vector (no caller re-whitens). `query_text`
+   is the one exception: it centers by the cross-modal text mean rather
+   than the audio mean, because text queries sit at a modality-gap
+   offset. `None` = identity, so the `whitening_enabled = false` path
+   behaves exactly as before whitening existed. `set_whitening` does
+   **not** retroactively re-whiten — follow it with `rebuild_from`.
+
+### Whitening (ABTT)
+
+CLaMP 3 embeddings are **anisotropic** — they occupy a narrow cone, so
+raw cosines are inflated and poorly separated (worst for text-query
+stations, where unrelated prompts can collapse together). All-but-the-Top
+whitening de-cones them:
+
+1. Subtract the corpus **mean** (the dominant shared direction).
+2. Project out the top `k ≈ dim/100` **principal directions**
+   (power-iteration + deflation — no linear-algebra dependency).
+3. Renormalize to unit length.
+
+```rust
+let w = Whitening::fit(&audio_vectors, default_k(dim))?;     // fit over the corpus
+let w = w.with_text_mean(text_modality_mean)?;               // optional cross-modal mean
+let whitened = w.transform(&raw_audio_vec)?;                 // audio path (audio mean)
+let whitened = w.transform_text(&raw_text_vec)?;             // station path (text mean)
+```
+
+The transform is fit **post-hoc over existing audio embeddings — no
+re-embedding** — and lives inside `AnnIndex` (see above), so the single
+invariant "whiten a raw vector exactly once on entry" holds and the only
+consumer change is that seed lookups return the raw SQLite row.
+
+**Cross-modal text mean.** ABTT is fit on audio, but CLaMP 3 *text*
+embeddings sit at a modality-gap offset; centering them by the audio mean
+collapses station queries. So `Whitening` carries an optional `text_mean`
+(estimated by embedding a fixed prompt corpus through the sidecar);
+`query_text` centers by it before the shared de-coning. The text mean only
+affects queries, so attaching it needs **no ANN rebuild**.
+
+`WhiteningStore` persists the fitted transform per `model_version`
+(`embedding_whitening` table). The gateway fits-or-loads at boot, gated by
+`[recommend].whitening_enabled` (default true), and refits on demand via
+`POST /v1/recommend/refit_whitening`.
+
+> Note: with the text tokenizer fixed upstream, station collapse is
+> resolved even with whitening off; the audio-fit de-coning applied to the
+> *text* path is marginally worse for genre purity than leaving text
+> un-de-coned — a tracked follow-up to route the station path around
+> de-coning. The audio whitening that drives `/next` stays as-is.
+
+Source: `whitening::Whitening`, `whitening_store::WhiteningStore`,
+`whitening_text` (gateway-side text-mean fit).
 
 ### Ingest worker
 
@@ -360,9 +430,11 @@ changed.
 
 ### `ProjectionStore`
 
-2D UMAP projection of every embedded track. Computed offline by the
-`backfill-projection` workflow; read at request time by the
-`/v1/diagnostics/recommend/latent_space` endpoint.
+UMAP/PCA projection of every embedded track for the latent-space
+visualisation, read at request time by the
+`/v1/diagnostics/recommend/latent_space` endpoint. Each `Projection2D`
+row carries `x, y` (UMAP), optional `z` (3D UMAP, migration `0010`), and
+optional `pc1..pc4` (PCA axes, migration `0009`).
 
 ```rust
 let store = ProjectionStore::new(embedding_pool.clone());
@@ -370,6 +442,14 @@ store.upsert_many(&model_version, &points).await?;
 let points = store.all_for_version(&model_version).await?;
 let summaries = store.list_versions().await?;
 ```
+
+Reduction is **vectors-over-the-wire** (it does not require a shared
+filesystem): the gateway reads its own embedding rows, ships the `(N,
+dim)` matrix to the embedder's `POST /reduce` (base64 row-major LE f32),
+and persists the returned coordinates itself. This is what lets the
+embedder run on a separate GPU host from the gateway. `auto_projection`
+(gateway-side) drives both a 2D `auto-{ts}` and a 3D `auto-{ts}-d3`
+version after each ingest drain.
 
 ### Queue filter + MMR
 
@@ -464,6 +544,10 @@ the broadcast path zero-dependency.
 | `0006_embedding_projection_2d.sql` | `embedding_projection_2d` (track_id, model_version, x, y). |
 | `0007_events_session_id.sql` | `ALTER TABLE events ADD COLUMN session_id TEXT` + partial index. NULL allowed (pre-0007 rows, out-of-session events, missing client payload). |
 | `0008_recommend_sessions.sql` | `recommend_sessions` (session_id PK, anchor_track_id, items_count, started_ms, ended_ms). Partial index on `ended_ms IS NULL` for O(1) active-session lookup. |
+| `0009_embedding_projection_pcs.sql` | Adds `pc1..pc4` PCA-axis columns to `embedding_projection_2d`. |
+| `0010_embedding_projection_z.sql` | Adds `z` column for 3D UMAP projections (`auto-{ts}-d3`). |
+| `0011_embedding_whitening.sql` | `embedding_whitening` (per-`model_version` ABTT transform: mean + top-k principal directions + fit metadata). |
+| `0012_embedding_whitening_text_mean.sql` | Adds the cross-modal `text_mean` column for centering text-station queries. |
 
 The store owns its own SQLite file
 (`gateway-state.recommend.sqlite`), separate from the OAuth state DB.
@@ -497,11 +581,15 @@ integration level:
 - **No behavioural index.** Track2vec on session windows is the
   natural next step, with the event log as input. Deferred.
 - **Text-station handler is filter-bypass.** `GET /v1/recommend/station`
-  embeds the prompt and runs the ANN top-N — that's it. No queue
-  context, no MMR rerank, no per-session downvote exclusion. The
-  same `EmbedderClient::embed_text` + `AnnIndex::query` primitives
-  used here are wired through; layering the queue filter onto the
-  text path is a small follow-up.
+  embeds the prompt and runs `AnnIndex::query_text` top-N — that's it.
+  No queue context, no MMR rerank, no per-session downvote exclusion.
+  The same `EmbedderClient::embed_text` + `query_text` primitives used
+  here are wired through; layering the queue filter onto the text path
+  is a small follow-up.
+- **Text path uses audio-fit de-coning.** The ABTT components are fit on
+  audio; applying them to text (after text-mean centering) is marginally
+  worse for genre purity than leaving text un-de-coned. Routing the
+  station query path around de-coning is a tracked follow-up.
 - **No re-embedding on track edit.** If track audio is replaced
   upstream, we'd serve stale embeddings. Detection requires polling
   Navidrome for ETag changes per track — feasible, not done.
