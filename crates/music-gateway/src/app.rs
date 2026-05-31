@@ -3,6 +3,7 @@
 
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     http::StatusCode,
     middleware::from_fn_with_state,
     routing::{any, get, post},
@@ -24,6 +25,23 @@ use crate::scrobble;
 use crate::state::AppState;
 use crate::sync::handlers as sync_handlers;
 
+/// Aggregate request-body cap for the JSON `/v1/*` API.
+///
+/// This is a coarse memory-abuse backstop that fires *before* a handler
+/// buffers and parses the body — distinct from the per-field/per-batch
+/// caps inside the handlers (those bound individual fields once parsed).
+/// 1 MiB comfortably covers the largest realistic request (a full
+/// `MAX_BATCH` scrobble batch with small per-event metadata, or a
+/// 1000-id enqueue ≈ 45 KiB) while rejecting multi-MB payloads. It is
+/// deliberately tighter than axum's 2 MiB default to make intent
+/// explicit. A client that wants to send 1000 events *each* near the
+/// 4 KiB metadata cap must split across requests — the aggregate cap is
+/// orthogonal to the per-field cap by design.
+///
+/// NOT applied to `/rest/*`: the Subsonic proxy and audio-stream paths
+/// forward bodies for Navidrome and must not inherit this limit.
+const MAX_V1_BODY_BYTES: usize = 1024 * 1024;
+
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(healthz))
@@ -37,7 +55,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/oauth/token", post(oauth_handlers::token))
         .route("/oauth/revoke", post(oauth_handlers::revoke));
 
-    let protected = Router::new()
+    let v1 = Router::new()
         .route("/v1/whoami", get(whoami))
         .route("/v1/sync/snapshot", get(sync_handlers::snapshot))
         .route("/v1/sync/ops", post(sync_handlers::submit_op))
@@ -121,13 +139,22 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/diagnostics/recommend/sessions",
             get(diagnostics_handlers::recommend_sessions),
         )
+        // Coarse body cap on the JSON API only — see MAX_V1_BODY_BYTES.
+        // Scoped to this sub-router so it does NOT reach the /rest proxy
+        // below once the two are merged.
+        .layer(DefaultBodyLimit::max(MAX_V1_BODY_BYTES));
+
+    let rest = Router::new()
         // /rest/scrobble is intercepted to write the recommender's
         // recency clock before delegating to the same proxy used by
         // every other /rest/* call. axum's matchit prefers the more
         // specific path over the wildcard, so this wins regardless of
         // registration order.
         .route("/rest/scrobble", any(scrobble::scrobble))
-        .route("/rest/*subsonic_path", any(proxy))
+        .route("/rest/*subsonic_path", any(proxy));
+
+    let protected = v1
+        .merge(rest)
         .layer(from_fn_with_state(state.clone(), require_bearer));
 
     let merged = public.merge(protected);

@@ -183,3 +183,45 @@ async fn events_rejects_oversized_metadata() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(state.event_store().count().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn events_rejects_body_over_size_limit() {
+    // The /v1 router carries an aggregate body cap (MAX_V1_BODY_BYTES =
+    // 1 MiB) that fires while the body is being read, before any handler
+    // buffers it whole. The events handler wraps the extractor in a
+    // Result and maps the length-limit rejection to 400.
+    //
+    // This batch is *individually* valid on every field — 1000 events
+    // (== MAX_BATCH), each with a ~1 KiB metadata blob well under the
+    // 4 KiB per-field cap — so WITHOUT the body limit it would be a 202
+    // Accepted. It only fails because the aggregate (~1.2 MiB) exceeds
+    // the body cap. That makes this a discriminating test for the layer,
+    // not for the per-field validators.
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+
+    let pad = "x".repeat(1100);
+    let events: Vec<Value> = (0..1000)
+        .map(|i| {
+            json!({
+                "event_type": "scrobble",
+                "track_id": format!("t{i}"),
+                "occurred_at": 1,
+                "metadata": {"pad": pad}
+            })
+        })
+        .collect();
+    let body = json!({ "events": events });
+    assert!(
+        body.to_string().len() > 1024 * 1024,
+        "test fixture must exceed the 1 MiB cap"
+    );
+
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert!(
+        resp.status().is_client_error(),
+        "oversized body must be rejected, got {}",
+        resp.status()
+    );
+    assert_eq!(state.event_store().count().await.unwrap(), 0);
+}
