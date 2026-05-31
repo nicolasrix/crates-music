@@ -42,18 +42,19 @@ def test_stub_dim_override_to_768(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_clamp3_requires_checkpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Selecting the clamp3 backend without CLAMP3_CHECKPOINT is a config
-    # error — surface the missing var as a KeyError at construction
-    # rather than booting a half-configured backend.
+    # error — surface the missing var as a clear RuntimeError at
+    # construction (which names the var + backend) rather than a bare
+    # KeyError traceback, since _default_embedder runs at import time.
     monkeypatch.setenv("EMBEDDER_BACKEND", "clamp3")
     monkeypatch.setenv("MERT_FOLDER", "/fake/mert")
-    with pytest.raises(KeyError, match="CLAMP3_CHECKPOINT"):
+    with pytest.raises(RuntimeError, match="CLAMP3_CHECKPOINT"):
         _default_embedder()
 
 
 def test_clamp3_requires_mert_folder_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDDER_BACKEND", "clamp3")
     monkeypatch.setenv("CLAMP3_CHECKPOINT", "/fake/ckpt.pth")
-    with pytest.raises(KeyError, match="MERT_FOLDER"):
+    with pytest.raises(RuntimeError, match="MERT_FOLDER"):
         _default_embedder()
 
 

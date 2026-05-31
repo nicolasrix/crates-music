@@ -489,33 +489,44 @@ impl AnnIndex {
     where
         I: IntoIterator<Item = (&'a TrackId, &'a [f32])>,
     {
-        // Snapshot the transform once (clone the Arc, drop the guard) so
-        // the per-vector whitening below holds only the index lock.
+        // Whiten (and dim-check) every vector *before* taking the index write
+        // lock. The transform is pure CPU work; holding the write lock across
+        // the whole corpus (≤10⁴ vectors) would stall every concurrent query
+        // and upsert for the duration of the rebuild. Snapshot the transform
+        // once (clone the Arc, drop the guard) so the prep loop is lock-free.
         let whitening = self.whitening.read().map_err(|_| AnnError::Poisoned)?.clone();
+        let prepared: Vec<(TrackId, Vec<f32>)> = pairs
+            .into_iter()
+            .map(|(id, v)| {
+                if v.len() != self.dim {
+                    return Err(AnnError::DimMismatch {
+                        expected: self.dim,
+                        got: v.len(),
+                    });
+                }
+                let whitened = match &whitening {
+                    Some(w) => w
+                        .transform(v)
+                        .map_err(|e| AnnError::Whitening(e.to_string()))?,
+                    None => v.to_vec(),
+                };
+                Ok((id.clone(), whitened))
+            })
+            .collect::<Result<_, AnnError>>()?;
+
+        // Lock held only for the index mutations now.
         let mut inner = self.inner.write().map_err(|_| AnnError::Poisoned)?;
         inner.index.reset().map_err(to_usearch_err)?;
         inner.forward.clear();
         inner.reverse.clear();
         inner.next_key = 1;
-        for (id, v) in pairs {
-            if v.len() != self.dim {
-                return Err(AnnError::DimMismatch {
-                    expected: self.dim,
-                    got: v.len(),
-                });
-            }
-            let whitened: Vec<f32> = match &whitening {
-                Some(w) => w
-                    .transform(v)
-                    .map_err(|e| AnnError::Whitening(e.to_string()))?,
-                None => v.to_vec(),
-            };
+        for (id, whitened) in prepared {
             let key = inner.next_key;
             inner.next_key += 1;
             ensure_capacity(&inner.index, inner.forward.len() + 1)?;
             inner.index.add(key, &whitened).map_err(to_usearch_err)?;
             inner.forward.insert(id.clone(), key);
-            inner.reverse.insert(key, id.clone());
+            inner.reverse.insert(key, id);
         }
         drop(inner);
         self.dirty.store(true, Ordering::Release);

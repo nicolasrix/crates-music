@@ -355,7 +355,10 @@ Cutover mechanics for reference (e.g. future model bumps): (1) rebuild
 (3) wipe the old-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) —
 a dim change is non-migratable; (4) Save/restart; (5) re-embed via
 `scripts/enqueue_all_tracks.py` — recommender runs degraded until the
-GPU drains the queue.
+GPU drains the queue. The cached ABTT whitening (`embedding_whitening`
+table) does **not** need a manual wipe — `load_or_fit_whitening` detects
+a stale-dim cached row at boot, logs a warning, and refits from the
+corpus automatically.
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
