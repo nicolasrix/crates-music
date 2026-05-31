@@ -388,6 +388,65 @@ impl OauthStore {
         }))
     }
 
+    /// Atomic single-use redemption for rotation: revoke the refresh
+    /// token (and every access token derived from it) and return its row
+    /// **exactly once**, scoped to `client_id`. Returns `None` for a
+    /// token that is missing, expired, already revoked, or registered to
+    /// a different client.
+    ///
+    /// The single-row `UPDATE ... RETURNING` is the concurrency gate
+    /// (mirrors `consume_auth_code`): two simultaneous refreshes of the
+    /// same token can't both win because only the row whose `revoked_at`
+    /// was still NULL is updated and returned — the loser matches no rows
+    /// and gets `None`. SQLite serialises the write transactions, so the
+    /// access-token cascade in the winning transaction is consistent.
+    /// A non-matching `client_id` leaves the token untouched (the WHERE
+    /// doesn't match), so a wrong-client attempt can't burn a valid token.
+    pub async fn consume_refresh_token(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> Result<Option<RefreshToken>> {
+        let token_hash = session::hash_token(token);
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE token_hash = ? \
+               AND client_id = ? \
+               AND revoked_at IS NULL \
+               AND (expires_at IS NULL OR expires_at > ?) \
+             RETURNING token_hash, client_id, issued_at, expires_at",
+        )
+        .bind(now)
+        .bind(&token_hash)
+        .bind(client_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        // Cascade-revoke derived access tokens only when we actually
+        // consumed the refresh (otherwise a no-op).
+        if row.is_some() {
+            sqlx::query(
+                "UPDATE access_tokens SET revoked_at = ? \
+                 WHERE refresh_token_hash = ? AND revoked_at IS NULL",
+            )
+            .bind(now)
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        Ok(row.map(|r| RefreshToken {
+            token_hash: r.get("token_hash"),
+            client_id: r.get("client_id"),
+            issued_at_unix_ms: r.get("issued_at"),
+            expires_at_unix_ms: r.get("expires_at"),
+        }))
+    }
+
     /// Revoke a refresh token plus every access token derived from it.
     /// Idempotent on missing input.
     pub async fn revoke_refresh_token(&self, token: &str) -> Result<()> {

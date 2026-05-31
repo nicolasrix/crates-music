@@ -563,34 +563,26 @@ async fn grant_refresh_token(
         )
     })?;
 
-    let found = state
+    // Rotation is a single atomic step: `consume_refresh_token` revokes
+    // the presented token and returns its row exactly once, scoped to
+    // this client. A concurrent replay of the same token loses the race
+    // and gets `None` here — closing the find-then-revoke window that
+    // would otherwise let one refresh mint two valid pairs. A wrong
+    // client_id, an unknown/expired/revoked token, and a replay all
+    // collapse to the same `invalid_grant` (no oracle, and a
+    // wrong-client attempt does not burn a valid token).
+    let _consumed = state
         .oauth()
-        .find_refresh_token(&refresh)
+        .consume_refresh_token(&refresh, &client_id)
         .await
         .map_err(|e| oauth_internal(&e))?
         .ok_or_else(|| {
             oauth_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
-                "refresh token is invalid, expired, or revoked",
+                "refresh token is invalid, expired, revoked, or for a different client",
             )
         })?;
-    if found.client_id != client_id {
-        return Err(oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "client_id does not match the refresh token",
-        ));
-    }
-
-    // Rotation: revoke the presented refresh first, then issue a new
-    // pair. Order matters in the unlikely event we're racing against a
-    // concurrent attempt.
-    state
-        .oauth()
-        .revoke_refresh_token(&refresh)
-        .await
-        .map_err(|e| oauth_internal(&e))?;
 
     let pair = mint_pair(state, &client_id).await?;
     Ok(Json(pair))
