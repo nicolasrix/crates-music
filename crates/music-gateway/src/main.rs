@@ -384,8 +384,7 @@ async fn load_or_fit_whitening(
                         let n = embedding_store
                             .counts(model_version)
                             .await
-                            .map(|c| usize::try_from(c.done).unwrap_or(0))
-                            .unwrap_or(0);
+                            .map_or(0, |c| usize::try_from(c.done).unwrap_or(0));
                         store
                             .upsert(model_version, &updated, n, now_unix_ms())
                             .await

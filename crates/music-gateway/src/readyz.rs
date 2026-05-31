@@ -99,16 +99,16 @@ fn probe_embedder(state: &AppState) -> Value {
             "dim": dim,
         })
     } else {
-        let detail = handle
-            .last_health()
-            .map(|h| {
+        let detail = handle.last_health().map_or_else(
+            || "never reached at boot".to_string(),
+            |h| {
                 if h.reachable {
                     format!("model not loaded (version={})", h.model_version)
                 } else {
                     "unreachable".to_string()
                 }
-            })
-            .unwrap_or_else(|| "never reached at boot".to_string());
+            },
+        );
         error(detail)
     }
 }

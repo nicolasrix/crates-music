@@ -1127,6 +1127,9 @@ async fn insert_projection_point(
     .await;
 }
 
+// Test fixture mirroring the projection-row column set; the wide arg list
+// matches the table columns rather than a domain abstraction.
+#[allow(clippy::too_many_arguments)]
 async fn insert_projection_point_with_pcs(
     state: &music_gateway::AppState,
     track_id: &str,
@@ -1399,6 +1402,9 @@ async fn latent_space_pcs_are_null_when_reducer_did_not_write_them() {
     }
 }
 
+// Test fixture mirroring the projection-row column set; the wide arg list
+// matches the table columns rather than a domain abstraction.
+#[allow(clippy::too_many_arguments)]
 async fn insert_projection_point_with_z(
     state: &music_gateway::AppState,
     track_id: &str,
@@ -1975,7 +1981,7 @@ async fn latent_neighbours_returns_top_k_excluding_seed() {
         );
         // Distances are non-negative and bounded by ~2 (cosine).
         let d = entry["cosine_distance"].as_f64().unwrap();
-        assert!(d >= 0.0 && d <= 2.0, "distance in cosine range: {d}");
+        assert!((0.0..=2.0).contains(&d), "distance in cosine range: {d}");
     }
 }
 

@@ -611,7 +611,7 @@ fn client_with_bearer(server: &MockServer, token: Option<&str>) -> EmbedderClien
     EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().expect("server uri"),
         timeout: Duration::from_secs(2),
-        bearer_token: token.map(|s| s.to_string()),
+        bearer_token: token.map(str::to_string),
     })
     .expect("client builds")
 }

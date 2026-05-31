@@ -76,9 +76,9 @@ async fn fetch_clip_emits_subspans_for_get_song_request_and_body() {
     // synchronous `with_default` would have to block_on, which is
     // illegal nested inside #[tokio::test].
     {
+        use tracing::Instrument;
         let _guard = tracing::dispatcher::set_default(&dispatch);
         let root = tracing::info_span!("test.root");
-        use tracing::Instrument;
         fetcher
             .fetch_clip(&trace_id)
             .instrument(root)

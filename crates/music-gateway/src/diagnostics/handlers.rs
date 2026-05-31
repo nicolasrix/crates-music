@@ -1156,7 +1156,7 @@ pub async fn recommend_latent_neighbours(
         .into_iter()
         .map(|r| LatentNeighbourEntry {
             track_id: r.track_id.into_inner(),
-            cosine_distance: (1.0 - r.similarity as f64).max(0.0),
+            cosine_distance: (1.0 - f64::from(r.similarity)).max(0.0),
         })
         .collect();
     Ok(Json(LatentNeighboursResponse {

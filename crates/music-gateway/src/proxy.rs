@@ -227,6 +227,10 @@ async fn browse_proxy(
 ///      Navidrome's `coverArt` IDs are content-derived — when the file
 ///      changes, the id changes, so the old cache entry becomes
 ///      unreachable rather than stale).
+// One cohesive request flow (cache hit/ETag revalidation/upstream fetch/
+// placeholder fallback); splitting it would scatter the shared `key`/`ttl`/
+// `now` context without making it clearer. 24 lines over the pedantic cap.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "proxy.cover_art",
     skip_all,
