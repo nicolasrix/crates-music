@@ -146,10 +146,14 @@ through `NODE_EXTRA_CA_CERTS` setup.
 - The `<audio>` element (mounted once at the bottom of the layout).
 - Current track + queue + position.
 - "Time-to-skip" event throttling.
-- The player-bar thumbs-up / thumbs-down buttons. Clicks POST to
+- The player-bar **"rate rec"** thumbs (distinct from the **"rate
+  track"** EntityRating control beside them — see [Library
+  ratings](#library-ratings-likedislike)). Clicks POST to
   `/v1/recommend/feedback` with the active recommend session id and
   re-render with the returned `(up, down)` counts. Clicking an
-  already-active thumb clears the vote.
+  already-active thumb clears the vote. Locked unless the current track
+  was pushed by the autoplay refill (rating a self-picked track would
+  feed misleading recommender signal).
 - The `playback.start` RUM mark (measured from `src` set → first
   `playing` event — the user-perceived latency, not `loadedmetadata`
   which fires too early).
@@ -163,6 +167,37 @@ When you click play on a track:
 
 Position updates fire on `timeupdate` (~4 Hz). Likes / skips /
 scrobbles are batched into `/v1/events` every 5s.
+
+## Library ratings (like/dislike)
+
+Distinct from the player-bar *recommendation* thumbs above: this is the
+durable **like/dislike of an entity itself** (track, album, or artist),
+backed by `PUT`/`GET /v1/library/rating(s)`. The UI uses thumbs-up /
+thumbs-down icons (a filled heart read as a like even for a dislike, so
+the earlier `Heart`/`HeartCrack` pair was replaced).
+
+- **`components/EntityRating.tsx`** — the shared tri-state control
+  (like / neutral / dislike; clicking the active verdict clears it).
+  Kind-aware copy and aria labels, reused by the player bar (track) and
+  the Album / Artist hero headers.
+- **`player/useRatings.ts`** — `useRatingsMaps()` fetches all ratings once
+  (TanStack Query key `["library","ratings"]`) and splits them into three
+  `Map<id, "like"|"dislike">` (tracks / albums / artists);
+  `useEntityRating(kind, id)` is the optimistic mutation (patches the maps
+  on `onMutate`, rolls back on error, invalidates on settle).
+- **Auto-skip** — `player/autoSkip.ts` holds the pure predicates
+  `isDislikedEntity(trackId, parents, maps)` (disliked if the track **or**
+  its album **or** its artist is disliked) and `nextPlayableIndex(...)`.
+  An effect in `PlayerContext.tsx` fires only on a genuine queue *advance*
+  onto a new track — disliking the **currently-playing** track leaves it
+  playing rather than yanking it. A direct single-track click overrides the
+  skip (`directPlayRef`).
+- **`pages/LikedSongs.tsx`** (`/liked`) — liked tracks, albums, and artists
+  in sections, hydrated client-side from the id-only ratings list.
+
+Enforcement is *also* server-side and always-on (dislikes are excluded from
+recommendations, likes boost them) — the client maps only drive the UI and
+the optimistic auto-skip.
 
 ## RUM (`rum/`)
 

@@ -107,6 +107,9 @@ override when running CLaMP 3.
 | `preference_enabled` | bool | no | `false` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. |
 | `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. |
 | `affinity_half_life_days` | f32 | no | `30.0` | Half-life of the per-track affinity decayed counter. Older signal fades toward zero with this half-life so taste can drift. |
+| `like_bonus` | f32 | no | `0.15` | Relevance boost added to a **liked track** (`PUT /v1/library/rating`). Distinct from `preference_*`: the like/dislike channel is durable, never decays, and is **always-on** regardless of `preference_enabled`. A dislike has no knob — it hard-excludes the entity from play entirely. |
+| `like_bonus_album` | f32 | no | `0.06` | Boost added to every track of a **liked album**. Additive with `like_bonus` and `like_bonus_artist`. |
+| `like_bonus_artist` | f32 | no | `0.03` | Boost added to every track of a **liked artist**. The defaults follow the hierarchy `like_bonus > like_bonus_album > like_bonus_artist`, with `album + artist < track`, so a directly-liked track always outranks one liked only via its album/artist. |
 
 ```toml
 [recommend]
@@ -160,6 +163,12 @@ Cache directory follows the same XDG layout under
 | `MUSIC_GATEWAY_CONFIG` | — | Path to `gateway.toml`. Overridden by `--config` flag. |
 | `RUST_LOG` | `info` | Tracing filter. `RUST_LOG=music_gateway=debug,sqlx=warn` is a good debug starting point. |
 | `RECOMMEND_EMBEDDING_DIM` | — | Consumed by `docker/gateway/gen_config.py` to emit the `[recommend] embedding_dim` section. Unset → no section → gateway defaults to 512. Set `768` for CLaMP 3. |
+| `RECOMMEND_PREFERENCE_ENABLED` | — | `gen_config.py` → `[recommend] preference_enabled`. `true` to turn on affinity re-scoring (see the `[recommend]` table). Unset → gateway default `false`. |
+| `RECOMMEND_PREFERENCE_WEIGHT` | — | `gen_config.py` → `[recommend] preference_weight`. Unset → gateway default `0.15`. |
+| `RECOMMEND_AFFINITY_HALF_LIFE_DAYS` | — | `gen_config.py` → `[recommend] affinity_half_life_days`. Unset → gateway default `30.0`. |
+| `RECOMMEND_LIKE_BONUS` | — | `gen_config.py` → `[recommend] like_bonus`. Unset → gateway default `0.15`. |
+| `RECOMMEND_LIKE_BONUS_ALBUM` | — | `gen_config.py` → `[recommend] like_bonus_album`. Unset → gateway default `0.06`. |
+| `RECOMMEND_LIKE_BONUS_ARTIST` | — | `gen_config.py` → `[recommend] like_bonus_artist`. Unset → gateway default `0.03`. |
 
 ### Embedder
 

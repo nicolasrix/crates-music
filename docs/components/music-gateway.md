@@ -24,6 +24,7 @@ crates/music-gateway/
 │   ├── proxy.rs                 # /rest/* → Navidrome; L2 + cover-art proxy
 │   ├── recommend.rs             # /v1/recommend/{next, from-any, from-seeds, station, enqueue}
 │   ├── recommend_feedback.rs    # POST /v1/recommend/feedback (thumbs up/down)
+│   ├── library_rating.rs        # PUT/GET /v1/library/rating(s) — durable like/dislike
 │   ├── scrobble.rs              # /rest/scrobble interceptor → play_history + event log
 │   ├── events.rs                # POST /v1/events
 │   ├── embedder.rs              # EmbedderHandle + degraded-mode boot probe
@@ -92,6 +93,7 @@ every handler cheaply. The current fields (see `state.rs`):
 | `event_store` | Append-only event log. |
 | `play_history` | MMR recency clock. |
 | `feedback` | Per-session thumbs-up/down store. |
+| `ratings` | Durable per-entity like/dislike store (`RatingStore`; track/album/artist). |
 | `projection` | UMAP 2D projection store. |
 | `ann` | `usearch` HNSW index (Arc — shared with the ingest worker). |
 | `recommend_model_version` | Stamp for new embeddings + ANN queries. Sourced from the embedder's last health probe. |

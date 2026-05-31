@@ -492,6 +492,67 @@ Response (200):
 - 409 Conflict if there are no embeddings to fit on.
 - 500 if listing / fitting / persisting fails.
 
+### Library ratings
+
+The user's **durable like/dislike** for a track, album, or artist. This
+is the gateway's own taste store — we never write back to Navidrome, so a
+verdict lives only here. It is a distinct channel from the recommendation
+thumbs (`POST /v1/recommend/feedback`): that rates whether a *recommendation*
+was a good fit (session-scoped, decays); this rates the *entity itself*
+(durable, never decays). Enforcement is **always-on**, independent of the
+`preference_enabled` flag:
+
+- **dislike** hard-excludes the entity from play — a disliked track, or
+  *every track* of a disliked album/artist, is dropped from all recommender
+  candidate generation and auto-skipped by the player on queue advance (a
+  direct click still overrides the skip).
+- **like** boosts relevance, weighted `track > album > artist` (additive;
+  see the `like_bonus*` knobs in [CONFIGURATION.md](./CONFIGURATION.md)).
+
+#### `PUT /v1/library/rating`
+
+Set or clear one entity's verdict. The nullable `rating` field encodes all
+three states in one request shape (so the client has a single mutation call
+site, mirroring the feedback endpoint):
+
+```json
+{
+  "kind": "album",          // "track" | "album" | "artist"; defaults to "track"
+  "id": "al-123",
+  "rating": "dislike"       // "like" | "dislike" | null
+}
+```
+
+- `"like"` / `"dislike"` upserts the `(kind, id)` row.
+- `null` (or omitted) clears it back to neutral (deletes the row).
+- `kind` defaults to `"track"` so the original track-only wire shape
+  (`{id, rating}`) keeps working unchanged.
+
+Response echoes the stored verdict (200):
+```json
+{ "kind": "album", "id": "al-123", "rating": "dislike" }
+```
+
+- 400 if `id` is empty or longer than 256 chars, or the body is invalid JSON.
+- 500 if the rating store write fails.
+
+#### `GET /v1/library/ratings`
+
+Every rated entity, newest first. Ids only — the client hydrates
+titles/art via the Subsonic `getSong` / `getAlbum` / `getArtist` paths
+(the gateway's metadata cache has no cover art).
+
+```json
+{
+  "ratings": [
+    { "kind": "track",  "id": "tr-9", "rating": "like" },
+    { "kind": "artist", "id": "ar-2", "rating": "dislike" }
+  ]
+}
+```
+
+- 500 if the rating store read fails.
+
 ### Event log
 
 #### `POST /v1/events`

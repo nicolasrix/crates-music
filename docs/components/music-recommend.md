@@ -428,6 +428,39 @@ session-scoped excludes to the ANN exclusion list. Downvotes from
 other sessions are not consulted by design — the user's mood may have
 changed.
 
+### `RatingStore`
+
+The user's **durable like/dislike** for any rateable entity — a track,
+album, or artist. Backed by one generic `entity_rating(kind, entity_id,
+rating, updated_ms)` table (migration `0015`). This is a separate channel
+from both `FeedbackStore` (session-scoped recommendation thumbs) and
+`TrackAffinityStore` (decaying play/skip affinity): ratings never decay and
+are enforced always-on, so folding them into affinity would double-count
+and let dislikes fade. See `src/rating.rs` for the full rationale.
+
+```rust
+let store = RatingStore::new(embedding_pool.clone());
+store.set(RatedKind::Album, "al-123", Rating::Dislike, now_ms).await?;
+store.clear(RatedKind::Artist, "ar-2").await?;
+let verdict = store.get(RatedKind::Track, "tr-9").await?;        // Option<Rating>
+let disliked = store.disliked_ids(RatedKind::Album).await?;       // HashSet<String>
+let liked    = store.liked_ids(RatedKind::Artist).await?;         // Vec<String>
+let all      = store.all().await?;        // Vec<(RatedKind, String, Rating)>, newest-first
+```
+
+How the recommend handlers consume it (per-request, in `recommend.rs`):
+
+- **Dislike → exclusion.** `disliked_exclusions` unions disliked track ids
+  with the tracks of disliked albums/artists (expanded via
+  `MetadataStore::track_ids_for_albums` / `track_ids_for_artists`) into the
+  ANN exclude set every recommend path already honours.
+- **Like → additive bonus.** `affinity_bonuses` adds `LIKE_BONUS` to liked
+  tracks, plus `LIKE_BONUS_ALBUM` / `LIKE_BONUS_ARTIST` to candidates whose
+  album/artist is liked. The constants descend `0.15 > 0.06 > 0.03` with
+  `album + artist < track`, so a directly-liked track always outranks one
+  liked only through its parents. The magnitudes are config-overridable
+  (`[recommend] like_bonus*`).
+
 ### `ProjectionStore`
 
 UMAP/PCA projection of every embedded track for the latent-space
@@ -548,6 +581,9 @@ the broadcast path zero-dependency.
 | `0010_embedding_projection_z.sql` | Adds `z` column for 3D UMAP projections (`auto-{ts}-d3`). |
 | `0011_embedding_whitening.sql` | `embedding_whitening` (per-`model_version` ABTT transform: mean + top-k principal directions + fit metadata). |
 | `0012_embedding_whitening_text_mean.sql` | Adds the cross-modal `text_mean` column for centering text-station queries. |
+| `0013_track_affinity.sql` | `track_affinity` (track_id PK, decayed counter + last-update ms). Feeds the `preference_enabled` re-scoring. |
+| `0014_track_rating.sql` | `track_rating` (track_id PK, ±1 verdict, updated_ms) — the original track-only durable like/dislike. Superseded by `0015`. |
+| `0015_entity_rating.sql` | Generalises ratings to any entity: `entity_rating(kind, entity_id, rating, updated_ms)`, `WITHOUT ROWID`, PK `(kind, entity_id)`. Copies the live `track_rating` rows forward as `kind='track'`, then drops `track_rating`. Forward-only. |
 
 The store owns its own SQLite file
 (`gateway-state.recommend.sqlite`), separate from the OAuth state DB.

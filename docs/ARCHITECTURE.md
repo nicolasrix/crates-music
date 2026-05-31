@@ -266,6 +266,14 @@ layer three post-retrieval steps on top:
    `session_id`, tracks the user thumbs-downed *within that session*
    are excluded. Per-session, not global — the user may have been
    in a different mood last week.
+4. **Durable like/dislike** (`RatingStore`, `PUT /v1/library/rating`).
+   A persistent per-entity verdict that — unlike the session downvotes
+   and the decaying affinity signal — never decays and is enforced
+   always-on. A **dislike hard-excludes** the entity from play (a
+   disliked track, or *every track* of a disliked album/artist, drops
+   out of candidate generation and the player auto-skips it); a **like**
+   adds a relevance bonus weighted `track > album > artist`. This is the
+   gateway's own taste store — never written back to Navidrome.
 
 The `/rest/scrobble` interceptor writes a `last_played_ms` per track
 to a dedicated `play_history` table. That row is reserved for a planned
