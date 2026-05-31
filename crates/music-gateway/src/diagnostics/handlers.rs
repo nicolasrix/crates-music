@@ -328,6 +328,17 @@ const MAX_BATCH: usize = 50;
 /// from filling the table with multi-MB strings.
 const MAX_USER_AGENT_LEN: usize = 256;
 
+/// Per-field length caps on client-supplied RUM fields. The emitter
+/// produces short, structured values; anything larger is a bug or a
+/// client trying to bloat the (un-trimmed) ring. Reject the batch with
+/// 422 rather than truncate, so the telemetry isn't silently corrupted.
+const MAX_SESSION_ID_LEN: usize = 64;
+const MAX_NAME_LEN: usize = 128;
+const MAX_PAGE_PATH_LEN: usize = 512;
+const MAX_RATING_LEN: usize = 32;
+/// Serialized-`fields` JSON budget per event.
+const MAX_FIELDS_BYTES: usize = 4096;
+
 #[derive(Debug, Deserialize)]
 pub struct ClientEventInput {
     /// Random per-page-load identifier. Lets the diagnostics page
@@ -446,7 +457,23 @@ pub async fn submit_client_events(
                 .fields
                 .as_ref()
                 .map_or_else(|| "{}".to_string(), ToString::to_string);
-            ClientEventRecord {
+            let too_long = if e.session_id.len() > MAX_SESSION_ID_LEN {
+                Some("session_id")
+            } else if e.name.len() > MAX_NAME_LEN {
+                Some("name")
+            } else if e.page_path.len() > MAX_PAGE_PATH_LEN {
+                Some("page_path")
+            } else if e.rating.as_ref().is_some_and(|r| r.len() > MAX_RATING_LEN) {
+                Some("rating")
+            } else if fields_json.len() > MAX_FIELDS_BYTES {
+                Some("fields")
+            } else {
+                None
+            };
+            if let Some(field) = too_long {
+                return Err(field);
+            }
+            Ok(ClientEventRecord {
                 received_ms,
                 occurred_ms: e.occurred_ms,
                 session_id: e.session_id,
@@ -456,9 +483,18 @@ pub async fn submit_client_events(
                 page_path: e.page_path,
                 user_agent: user_agent.clone(),
                 fields_json,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, &'static str>>()
+        .map_err(|field| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "event field exceeds size limit",
+                    "field": field,
+                })),
+            )
+        })?;
     let n = records.len();
     state
         .trace_store()

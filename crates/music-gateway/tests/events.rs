@@ -151,3 +151,35 @@ async fn events_persists_metadata_intact() {
     let meta = recent[0].metadata.as_ref().expect("metadata present");
     assert_eq!(meta["to_ms"], 30500);
 }
+
+#[tokio::test]
+async fn events_rejects_oversized_event_type() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+
+    let body = json!({
+        "events": [
+            {"event_type": "x".repeat(65), "track_id": "t1", "occurred_at": 1}
+        ]
+    });
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.event_store().count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn events_rejects_oversized_metadata() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+
+    let big = "v".repeat(5000);
+    let body = json!({
+        "events": [
+            {"event_type": "seek", "track_id": "t1", "occurred_at": 1,
+             "metadata": {"blob": big}}
+        ]
+    });
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.event_store().count().await.unwrap(), 0);
+}
