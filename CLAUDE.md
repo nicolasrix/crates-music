@@ -82,7 +82,12 @@ Backend-only. Two indices, blended at query time — they capture different thin
 
 Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (single user, ~10⁴ tracks) an in-process index is sufficient — no separate vector DB.
 
-Inference runtime: **ONNX Runtime via the [`ort`](https://crates.io/crates/ort) crate**, ROCm execution provider (gateway has an AMD RDNA4, 16 GB VRAM). CPU fallback always available — required because ROCm coverage for newest AMD generations sometimes lags.
+Inference runtime: the Python embedder sidecar (PyTorch, ROCm). The
+**GPU lives on the GPU host** (RDNA4 GPU, 16 GB VRAM), which hosts
+the embedder sidecar; the **gateway host (the NAS host) is CPU-only** and
+reaches the sidecar over the LAN — see the deployment topology in the
+status section below. CPU fallback always available — required because
+ROCm coverage for newest AMD generations sometimes lags.
 
 ### Ingest pipeline
 
@@ -315,29 +320,42 @@ music-specific acoustic similarity. Done so far:
   then cached). The GPU box's `:9000` embedder is now CLaMP 3 (was CLAP),
   same container name + port + shared bearer token.
 
-Deployment topology (discovered 2026-05-30): the **GPU embedder runs on
-the GPU host** (`192.0.2.53:9000`); the **live recommender consumer is
-the NAS gateway** (`crates-gateway`), whose `EMBEDDER_URL` dials that
-box over the LAN. the NAS host's own `crates-embedder` (CLAP CPU) is vestigial
-— unused while `EMBEDDER_URL` points off-box. The GPU host additionally
-runs a caddy+gateway *cert/proxy test* instance with a deliberately-dead
-embedder URL — not a recommender.
+**Deployment topology** (optionally split across two hosts):
 
-Not yet done — **production cutover on the NAS host** (the irreversible part):
-the live `crates-music/gateway:dev` image there was built 2026-05-27, days
-*before* the 768 support (gen_config.py `RECOMMEND_EMBEDDING_DIM` +
-`[recommend].embedding_dim`, all committed 2026-05-30) — its baked
-`gen_config.py` has zero `RECOMMEND_EMBEDDING_DIM` references, so a
-YAML-only `RECOMMEND_EMBEDDING_DIM: '768'` edit is a **silent no-op**.
-The cutover is therefore: (1) rebuild `crates-music/gateway:dev` from this
-branch and ship it to the NAS host (`scripts/ship-image.sh … nas-host`,
-`REMOTE_DOCKER="sudo docker"`); (2) add `RECOMMEND_EMBEDDING_DIM: '768'`
-to the gateway service in the NAS Custom App YAML; (3) wipe the
-512-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) from the gateway's
-`gw-data` — the 512→768 change makes it non-migratable; (4) Save/restart;
-(5) re-embed via `scripts/enqueue_all_tracks.py` — recommender runs
-degraded until the GPU drains the queue. Until step 1–4 land, the NAS
-gateway (512) is dim-mismatched against the now-768 embedder.
+- **the NAS host** is the **gateway host** and is **CPU-only** (no GPU). It
+  runs `crates-gateway` (the live recommender consumer) + `crates-caddy`.
+  Its `EMBEDDER_URL` dials the GPU host's GPU sidecar over the LAN.
+  the NAS host's own `crates-embedder` (CLAP CPU) is vestigial — unused while
+  `EMBEDDER_URL` points off-box.
+- **The GPU host** (`192.0.2.53`) has the **AMD RDNA4
+  XT** and runs the **GPU embedder sidecar** (`crates-embedder`,
+  `embedder-clamp3-rocm:dev`) on `:9000`. It additionally runs a
+  caddy+gateway *cert/proxy test* instance with a deliberately-dead
+  embedder URL — not a recommender, ignore its health.
+
+**Production cutover on the NAS host — DONE (2026-05-31).** Verified live:
+
+- `crates-gateway` image rebuilt from this branch (built 2026-05-31
+  00:58, baked `gen_config.py` has full `RECOMMEND_EMBEDDING_DIM`
+  support); `RECOMMEND_EMBEDDING_DIM=768` set in the Custom App YAML and
+  reflected in the live `gateway.toml` (`[recommend] embedding_dim =
+  768`); the 512-dim ANN sidecar was wiped and rebuilt at 768 from
+  SQLite (**7349 embedded tracks**). Boot log: embedder probe
+  `dim=768 device=cuda`, whitening loaded (`k=7`), cross-modal text mean
+  fitted + persisted, plus a post-tokenizer-fix `refit_whitening`.
+- The GPU sidecar on the GPU host was rebuilt with the tokenizer fix
+  (`embedder-clamp3-rocm:dev`, built 2026-05-31 01:44): `sentencepiece`
+  present, full xlm-roberta vocab (`vocab_size=250002`, distinct token
+  streams per genre, 0 `<unk>`), `dim=768 device=cuda`.
+
+Cutover mechanics for reference (e.g. future model bumps): (1) rebuild
+`crates-music/gateway:dev` from the branch and ship to the NAS host
+(`scripts/ship-image.sh … nas-host`, `REMOTE_DOCKER="sudo docker"`);
+(2) set `RECOMMEND_EMBEDDING_DIM` in the NAS Custom App YAML;
+(3) wipe the old-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) —
+a dim change is non-migratable; (4) Save/restart; (5) re-embed via
+`scripts/enqueue_all_tracks.py` — recommender runs degraded until the
+GPU drains the queue.
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
