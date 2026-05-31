@@ -337,3 +337,21 @@ def test_affinity_half_life_rejects_non_numeric() -> None:
     env = _minimum_env() | {"RECOMMEND_AFFINITY_HALF_LIFE_DAYS": "soon"}
     with pytest.raises(ConfigError, match="must be a number"):
         build_config(env)
+
+
+def test_like_bonus_emitted_when_set() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS": "0.3"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["like_bonus"] == pytest.approx(0.3)
+
+
+def test_like_bonus_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "like_bonus" not in parsed["recommend"]
+
+
+def test_like_bonus_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS": "-0.5"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)

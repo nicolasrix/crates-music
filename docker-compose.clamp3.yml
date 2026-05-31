@@ -73,3 +73,7 @@ services:
       # RECOMMEND_PREFERENCE_ENABLED: "true"
       # RECOMMEND_PREFERENCE_WEIGHT: "0.15"
       # RECOMMEND_AFFINITY_HALF_LIFE_DAYS: "30"
+      # Durable per-track like/dislike is always-on (dislikes excluded, likes
+      # boosted) regardless of the preference flag. This only tunes the like
+      # boost magnitude; default 0.15.
+      # RECOMMEND_LIKE_BONUS: "0.15"
