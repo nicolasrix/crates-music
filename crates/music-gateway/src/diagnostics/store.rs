@@ -469,6 +469,23 @@ impl TraceStore {
         Ok(())
     }
 
+    /// Evict oldest `client_events` rows so at most `max_rows` remain.
+    /// The upload handler calls this after every insert (there is no
+    /// drainer for RUM — inserts come straight from the handler). Same
+    /// MAX(id)-frontier strategy as [`trim_to_capacity`]: cheap and a
+    /// no-op when already under capacity.
+    pub async fn trim_client_events_to_capacity(&self, max_rows: usize) -> sqlx::Result<()> {
+        let max_rows_i64 = i64::try_from(max_rows).unwrap_or(i64::MAX);
+        sqlx::query(
+            "DELETE FROM client_events
+             WHERE id <= COALESCE((SELECT MAX(id) FROM client_events), 0) - ?",
+        )
+        .bind(max_rows_i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Most-recently-received client events, newest first. Optional
     /// name filter mirrors `query()` semantics: `None` means "all".
     pub async fn recent_client_events(

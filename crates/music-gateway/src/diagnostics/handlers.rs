@@ -339,6 +339,11 @@ const MAX_RATING_LEN: usize = 32;
 /// Serialized-`fields` JSON budget per event.
 const MAX_FIELDS_BYTES: usize = 4096;
 
+/// Ring capacity for the `client_events` table, mirroring the `spans`
+/// ring (`TRACES_MAX_ROWS`). Trimmed after each insert so the table
+/// can't grow without bound on a long-lived gateway.
+const CLIENT_EVENTS_MAX_ROWS: usize = 100_000;
+
 #[derive(Debug, Deserialize)]
 pub struct ClientEventInput {
     /// Random per-page-load identifier. Lets the diagnostics page
@@ -496,9 +501,14 @@ pub async fn submit_client_events(
             )
         })?;
     let n = records.len();
-    state
-        .trace_store()
+    let store = state.trace_store();
+    store
         .insert_client_events(records)
+        .await
+        .map_err(db_error)?;
+    // Bound the ring right after the write (no drainer for RUM).
+    store
+        .trim_client_events_to_capacity(CLIENT_EVENTS_MAX_ROWS)
         .await
         .map_err(db_error)?;
     Ok(Json(ClientEventsAccepted { accepted: n }))
