@@ -13,7 +13,7 @@ use axum::{
     response::IntoResponse,
 };
 use music_core::SessionId;
-use music_recommend::{EventInput, EventType};
+use music_recommend::{AffinityEvent, EventInput, EventType};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -104,10 +104,66 @@ pub async fn submit(
         .collect();
 
     match state.event_store().append_batch(&events).await {
-        Ok(n) => (StatusCode::ACCEPTED, Json(EventsResponse { accepted: n })).into_response(),
+        Ok(n) => {
+            // Durable capture done. Now fold skips into the preference
+            // affinity counter (best-effort, post-persist so a failure
+            // here never costs us the logged signal).
+            fold_skip_affinity(&state, &events).await;
+            (StatusCode::ACCEPTED, Json(EventsResponse { accepted: n })).into_response()
+        }
         Err(err) => {
             tracing::error!(error = %err, "events: batch append failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "event log unavailable").into_response()
+        }
+    }
+}
+
+/// Pull a `played_ms` (playback position at skip) out of an event's
+/// opaque metadata. Accepts integer or float JSON; `None` if absent or
+/// the wrong shape.
+#[allow(clippy::cast_possible_truncation)] // playback position in ms; precision loss is immaterial
+fn extract_played_ms(metadata: Option<&serde_json::Value>) -> Option<i64> {
+    let v = metadata?.get("played_ms")?;
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .filter(|ms| *ms >= 0)
+}
+
+/// Fold each skip in the batch into the affinity counter, scaled by how
+/// far into the track the user got (`played_ms / duration`). A skip
+/// without a known position *or* a track of unknown duration is left
+/// alone — we don't penalise blindly, since an early-vs-late skip means
+/// very different things and we can't tell them apart without both.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // completion ratio in [0,1]
+async fn fold_skip_affinity(state: &AppState, events: &[EventInput]) {
+    let half_life_ms = state.affinity_half_life_ms();
+    for ev in events {
+        if ev.event_type != EventType::Skip {
+            continue;
+        }
+        let Some(played_ms) = extract_played_ms(ev.metadata.as_ref()) else {
+            continue;
+        };
+        let duration_ms = match state.metadata_store().get(&ev.track_id).await {
+            Ok(Some(meta)) => meta.duration_seconds.map(|s| i64::from(s) * 1000),
+            _ => None,
+        };
+        let Some(duration_ms) = duration_ms.filter(|d| *d > 0) else {
+            continue;
+        };
+        // clamp handled inside event_weight; compute the raw ratio here.
+        let completion = (played_ms as f64 / duration_ms as f64) as f32;
+        if let Err(err) = state
+            .track_affinity()
+            .apply_event(
+                &ev.track_id,
+                AffinityEvent::Skip { completion },
+                ev.occurred_at,
+                half_life_ms,
+            )
+            .await
+        {
+            tracing::warn!(error = %err, "events: skip affinity update failed; continuing");
         }
     }
 }

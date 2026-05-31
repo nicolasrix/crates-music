@@ -113,6 +113,26 @@ pub async fn submit(
             .into_response();
     }
 
+    // Fold the explicit thumb into the preference affinity counter
+    // (best-effort; never block the response on it). A `null` vote
+    // (un-click) is left to decay rather than un-folded — exact reversal
+    // of a decayed counter isn't well-defined, and the signal fades on
+    // its own. The feedback endpoint is the sole affinity channel for
+    // explicit thumbs; `/v1/events` like/unlike are not double-counted.
+    if let Some(dir) = req.vote {
+        let event = match dir {
+            VoteDir::Up => music_recommend::AffinityEvent::Like,
+            VoteDir::Down => music_recommend::AffinityEvent::Dislike,
+        };
+        if let Err(err) = state
+            .track_affinity()
+            .apply_event(&track, event, occurred_ms, state.affinity_half_life_ms())
+            .await
+        {
+            tracing::warn!(error = %err, "feedback: affinity update failed; continuing");
+        }
+    }
+
     let counts = match state.feedback().for_track(&track).await {
         Ok(c) => c,
         Err(err) => {

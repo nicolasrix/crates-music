@@ -442,6 +442,7 @@ fn walk_mmr_bench(
             artist_key: metadata_map
                 .get(&c.track_id)
                 .map(QueueFilter::artist_key_for),
+            relevance_bonus: 0.0,
         })
         .collect();
 

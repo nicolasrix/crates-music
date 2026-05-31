@@ -91,13 +91,30 @@ pub async fn scrobble(
         let session_id = state.sync().active_session_id().await;
         let event = EventInput {
             event_type: EventType::Scrobble,
-            track_id,
+            track_id: track_id.clone(),
             occurred_at,
             metadata: None,
             session_id,
         };
         if let Err(err) = state.event_store().append_batch(&[event]).await {
             tracing::warn!(error = %err, "event log append failed; continuing with forward");
+        }
+
+        // Fold a completed play into the preference affinity counter. A
+        // *submission* scrobble means the listen counted (Navidrome only
+        // submits past its threshold), so credit it as a full-completion
+        // play. Best-effort, like the writes above.
+        if let Err(err) = state
+            .track_affinity()
+            .apply_event(
+                &track_id,
+                music_recommend::AffinityEvent::Play { completion: 1.0 },
+                occurred_at,
+                state.affinity_half_life_ms(),
+            )
+            .await
+        {
+            tracing::warn!(error = %err, "affinity play update failed; continuing with forward");
         }
     }
 

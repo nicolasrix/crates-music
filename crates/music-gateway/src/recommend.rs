@@ -35,7 +35,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
-use crate::state::AppState;
+use crate::state::{AppState, PreferenceParams};
 use crate::whitening_text;
 
 const MAX_N: usize = 100;
@@ -123,10 +123,28 @@ pub async fn next(
         return Err((StatusCode::NOT_FOUND, "seed not embedded"));
     };
 
-    let results = state
+    // `/next` is the raw acoustic top-K path (no MMR). When preference
+    // re-scoring is enabled we over-fetch so a track the listener loves
+    // that sits just outside the raw top-N can still be pulled in, then
+    // re-rank by `similarity + β·affinity` and truncate. With preference
+    // off this is byte-for-byte the old behaviour (fetch exactly n).
+    let pref = preference_lookup(&state);
+    let fetch_n = if pref.is_some() {
+        n.saturating_mul(MMR_POOL_BUFFER_FACTOR)
+    } else {
+        n
+    };
+    let mut results = state
         .ann()
-        .query_excluding(&vector, n, std::slice::from_ref(&seed_id))
+        .query_excluding(&vector, fetch_n, std::slice::from_ref(&seed_id))
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+
+    if let Some(p) = &pref {
+        let ids: Vec<TrackId> = results.iter().map(|r| r.track_id.clone()).collect();
+        let bonuses = affinity_bonuses(Some(p), &ids).await;
+        rescore_ann_by_preference(&mut results, &bonuses);
+        results.truncate(n);
+    }
     tracing::Span::current().record("results", results.len());
 
     Ok(Json(RecommendNextResponse {
@@ -141,6 +159,25 @@ pub async fn next(
             })
             .collect(),
     }))
+}
+
+/// Stable re-rank of raw ANN results by `similarity + preference bonus`,
+/// descending. Used by the non-MMR `/next` path. The sort is stable, so
+/// candidates that tie on the blended score keep their ANN
+/// (similarity-descending) order — preference only reorders genuine
+/// near-ties, never reshuffles the relevance backbone.
+fn rescore_ann_by_preference(
+    results: &mut [music_recommend::ann::AnnQueryResult],
+    bonuses: &HashMap<TrackId, f32>,
+) {
+    results.sort_by(|a, b| {
+        let blended = |r: &music_recommend::ann::AnnQueryResult| {
+            r.similarity + bonuses.get(&r.track_id).copied().unwrap_or(0.0)
+        };
+        blended(b)
+            .partial_cmp(&blended(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 // --- /v1/recommend/station -------------------------------------------
@@ -709,6 +746,7 @@ pub async fn from_seeds(
         internal_top_n,
     );
 
+    let pref = preference_lookup(&state);
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(
@@ -717,6 +755,7 @@ pub async fn from_seeds(
                 qc,
                 aggregated,
                 top_n,
+                pref.as_ref(),
             )
             .await
         }
@@ -873,9 +912,18 @@ pub async fn from_any(
             .query_excluding(&vector, internal_n, &excludes_for_query)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
+        let pref = preference_lookup(&state);
         let (filtered, filter_stats) = match &req.queue_context {
             Some(qc) => {
-                apply_queue_filter_to_ann(state.metadata_store(), state.ann(), qc, results, n).await
+                apply_queue_filter_to_ann(
+                    state.metadata_store(),
+                    state.ann(),
+                    qc,
+                    results,
+                    n,
+                    pref.as_ref(),
+                )
+                .await
             }
             None => (results, FilterStats::default()),
         };
@@ -1560,6 +1608,56 @@ impl CandidateLike for music_recommend::ann::AnnQueryResult {
 /// float ops, still well under the 1.5 ms budget.
 const MMR_POOL_BUFFER_FACTOR: usize = 2;
 
+/// Everything [`walk_mmr`] needs to turn each candidate's stored
+/// affinity into a relevance bonus. Built from [`AppState`] only when the
+/// preference feature is enabled (see [`preference_lookup`]); `None`
+/// throughout means "preference off / cold start → no bonus".
+struct PreferenceLookup<'a> {
+    store: &'a music_recommend::TrackAffinityStore,
+    params: PreferenceParams,
+    now_ms: i64,
+}
+
+/// Resolve the preference lookup for this request, or `None` when the
+/// feature is disabled. Stamps a single `now_ms` so every candidate in
+/// the call decays to the same instant.
+fn preference_lookup(state: &AppState) -> Option<PreferenceLookup<'_>> {
+    state.preference_params().map(|params| PreferenceLookup {
+        store: state.track_affinity(),
+        params,
+        now_ms: now_unix_ms(),
+    })
+}
+
+/// Per-candidate additive relevance bonus (`β · affinity`) keyed by track
+/// id. Absent entries are an implicit `0.0` (never-engaged candidates).
+/// Only the MMR path consumes it — HardCap/Off score on raw similarity —
+/// so we skip the DB round-trip for those modes. A lookup error degrades
+/// to "no bonus" rather than failing the request: preference is an
+/// enhancement, not a correctness requirement.
+async fn affinity_bonuses(
+    pref: Option<&PreferenceLookup<'_>>,
+    candidate_ids: &[TrackId],
+) -> HashMap<TrackId, f32> {
+    let Some(p) = pref else {
+        return HashMap::new();
+    };
+    match p
+        .store
+        .affinity_many(candidate_ids, p.now_ms, p.params.half_life_ms)
+        .await
+    {
+        Ok(map) => map
+            .into_iter()
+            .map(|(id, aff)| (id, music_recommend::preference_bonus(aff, p.params.weight)))
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "affinity lookup failed; recommending without preference bonus");
+            HashMap::new()
+        }
+    }
+}
+
 /// Diversity-mode-aware slate selection. Owns the `match` over
 /// [`DiversityMode`] so the two HTTP handlers don't each re-implement
 /// the dispatch.
@@ -1569,24 +1667,59 @@ async fn apply_queue_filter_generic<C: CandidateLike>(
     qc: &QueueContext,
     candidates: Vec<C>,
     top_n: usize,
+    pref: Option<&PreferenceLookup<'_>>,
 ) -> (Vec<C>, FilterStats) {
     let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id().clone()).collect();
     let (filter, metadata) = build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
     let cfg = qc.config();
 
     match cfg.diversity_mode {
-        DiversityMode::HardCap => walk_hard_cap(candidates, &metadata, filter, top_n),
-        DiversityMode::Mmr => walk_mmr(
-            candidates,
-            &metadata,
-            filter,
-            ann,
-            cfg.mmr_lambda,
-            cfg.artist_penalty_weight,
-            top_n,
-        ),
+        // HardCap admits in relevance order, so preference is applied by
+        // pre-sorting the pool by `sim + bonus` before the walk. (Empty
+        // bonuses → stable sort is a no-op → identical to legacy order.)
+        DiversityMode::HardCap => {
+            let bonuses = affinity_bonuses(pref, &candidate_ids).await;
+            let candidates = presort_by_preference(candidates, &bonuses);
+            walk_hard_cap(candidates, &metadata, filter, top_n)
+        }
+        // MMR folds the bonus directly into its relevance term.
+        DiversityMode::Mmr => {
+            let bonuses = affinity_bonuses(pref, &candidate_ids).await;
+            walk_mmr(
+                candidates,
+                &metadata,
+                filter,
+                ann,
+                cfg.mmr_lambda,
+                cfg.artist_penalty_weight,
+                top_n,
+                &bonuses,
+            )
+        }
+        // Off is the deliberate raw-input A/B baseline — left untouched
+        // by preference so it stays a clean control.
         DiversityMode::Off => walk_off(candidates, &filter, top_n),
     }
+}
+
+/// Stable re-rank of a candidate pool by `sim + preference bonus`,
+/// descending — the HardCap path's preference lever. An empty bonus map
+/// (feature off / cold start / none of these candidates engaged) short-
+/// circuits to preserve the incoming ANN/aggregate order exactly.
+fn presort_by_preference<C: CandidateLike>(
+    mut candidates: Vec<C>,
+    bonuses: &HashMap<TrackId, f32>,
+) -> Vec<C> {
+    if bonuses.is_empty() {
+        return candidates;
+    }
+    candidates.sort_by(|a, b| {
+        let blended = |c: &C| c.sim() + bonuses.get(c.track_id()).copied().unwrap_or(0.0);
+        blended(b)
+            .partial_cmp(&blended(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates
 }
 
 /// Hard-cap (legacy) path: walk candidates in input/relevance order,
@@ -1631,6 +1764,8 @@ fn walk_hard_cap<C: CandidateLike>(
 /// the post-rerank filter, so there's no extra DB hit. A candidate with
 /// no cached metadata gets `artist_key = None` and pays no penalty —
 /// which is what the filter would do for the same case anyway.
+#[allow(clippy::too_many_arguments)] // diversity knobs + the bonus map;
+// bundling them adds ceremony without cutting coupling.
 fn walk_mmr<C: CandidateLike>(
     candidates: Vec<C>,
     metadata: &HashMap<TrackId, music_recommend::TrackMetadata>,
@@ -1639,6 +1774,7 @@ fn walk_mmr<C: CandidateLike>(
     lambda: f32,
     artist_penalty_weight: f32,
     top_n: usize,
+    affinity_bonuses: &HashMap<TrackId, f32>,
 ) -> (Vec<C>, FilterStats) {
     // 1. Drop excluded candidates up front. No point spending the
     //    vector lookup on tracks the user already has queued.
@@ -1657,6 +1793,10 @@ fn walk_mmr<C: CandidateLike>(
             sim_to_seed: c.sim(),
             vector: ann.get_vector(c.track_id()).ok().flatten(),
             artist_key: metadata.get(c.track_id()).map(QueueFilter::artist_key_for),
+            relevance_bonus: affinity_bonuses
+                .get(c.track_id())
+                .copied()
+                .unwrap_or(0.0),
         })
         .collect();
 
@@ -1726,11 +1866,12 @@ async fn apply_queue_filter_to_aggregate(
     qc: &QueueContext,
     candidates: Vec<music_recommend::aggregate::AggregatedResult>,
     top_n: usize,
+    pref: Option<&PreferenceLookup<'_>>,
 ) -> (
     Vec<music_recommend::aggregate::AggregatedResult>,
     FilterStats,
 ) {
-    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n, pref).await
 }
 
 /// Apply the [`QueueFilter`] to ANN `from-any` results. Same shape as
@@ -1741,8 +1882,9 @@ async fn apply_queue_filter_to_ann(
     qc: &QueueContext,
     candidates: Vec<music_recommend::ann::AnnQueryResult>,
     top_n: usize,
+    pref: Option<&PreferenceLookup<'_>>,
 ) -> (Vec<music_recommend::ann::AnnQueryResult>, FilterStats) {
-    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n, pref).await
 }
 
 /// Look up the seed's embedding. The ANN owns query-time state, so we
