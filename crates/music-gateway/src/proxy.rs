@@ -168,8 +168,8 @@ async fn browse_proxy(
     tracing::Span::current().record("outcome", "upstream_fetch");
 
     // Miss or stale → fetch upstream, buffer body, store, return.
-    let upstream_url = build_upstream_url(state.config(), method, client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let upstream_url =
+        build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
     let upstream = state
         .http()
         .get(upstream_url)
@@ -309,7 +309,7 @@ async fn cover_art_proxy(
     }
 
     let upstream_url = build_upstream_url(state.config(), "getCoverArt", client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| e.status())?;
     let upstream = state
         .http()
         .get(upstream_url)
@@ -702,8 +702,8 @@ async fn pass_through(
     method: &str,
     client_query: &str,
 ) -> Result<Response, StatusCode> {
-    let upstream_url = build_upstream_url(state.config(), method, client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let upstream_url =
+        build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
     let upstream = state
         .http()
         .get(upstream_url)
@@ -947,13 +947,59 @@ fn cache_key(method: &str, client_query: &str) -> String {
     key
 }
 
+/// Why building an upstream URL failed.
+#[derive(Debug)]
+enum UpstreamUrlError {
+    /// The Subsonic method name contained path-navigation characters
+    /// (`/`, `\`, or a `..` segment). `Url::join` interprets those as
+    /// relative-path navigation, so a crafted method like `../admin`
+    /// would escape the `rest/` prefix and reach an arbitrary upstream
+    /// endpoint — with the gateway's Navidrome credentials attached.
+    /// Rejected before the join. A caller bug / hostile request, so the
+    /// handlers surface it as 400, not 500.
+    InvalidMethod,
+    /// The configured upstream base URL didn't parse. A server
+    /// misconfiguration → 500.
+    Parse,
+}
+
+impl UpstreamUrlError {
+    fn status(&self) -> StatusCode {
+        match self {
+            UpstreamUrlError::InvalidMethod => StatusCode::BAD_REQUEST,
+            UpstreamUrlError::Parse => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// A Subsonic method name is safe to splice into the upstream path iff it
+/// carries no path-navigation. Real method names are simple identifiers
+/// (`getAlbumList2`, `stream`), optionally with the legacy `.view` suffix
+/// (`ping.view`) — none contain a separator or a `..` segment. We block
+/// `/`, `\`, and the `..` substring rather than all dots so the `.view`
+/// form keeps proxying. Percent-encoded separators (`%2f`, `%2e`) are
+/// preserved verbatim by `Url::join` and never act as navigation, so a
+/// literal-character check is sufficient to keep the join inside `rest/`.
+fn is_valid_subsonic_method(method: &str) -> bool {
+    !method.is_empty()
+        && !method.contains('/')
+        && !method.contains('\\')
+        && !method.contains("..")
+}
+
 fn build_upstream_url(
     config: &Config,
     subsonic_method: &str,
     client_query: &str,
-) -> Result<Url, url::ParseError> {
+) -> Result<Url, UpstreamUrlError> {
+    if !is_valid_subsonic_method(subsonic_method) {
+        return Err(UpstreamUrlError::InvalidMethod);
+    }
     let base = ensure_trailing_slash(&config.upstream.navidrome_url);
-    let mut url = Url::parse(&base)?.join(&format!("rest/{subsonic_method}"))?;
+    let mut url = Url::parse(&base)
+        .map_err(|_| UpstreamUrlError::Parse)?
+        .join(&format!("rest/{subsonic_method}"))
+        .map_err(|_| UpstreamUrlError::Parse)?;
 
     let salt = auth::random_salt();
     let token = auth::compute_token(&config.upstream.password, &salt);
@@ -987,6 +1033,94 @@ fn ensure_trailing_slash(s: &str) -> String {
 pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        // Do not follow redirects. This client talks only to the trusted
+        // upstream Navidrome with the gateway's credentials attached to
+        // every request. If a (compromised or misconfigured) upstream
+        // answered with a 3xx to an attacker-controlled host, reqwest's
+        // default policy would replay the request — and its query string,
+        // which carries `u`/`t`/`s` auth params — to that location.
+        // Surfacing the 3xx to the client instead keeps the credentials
+        // from ever leaving the gateway↔Navidrome hop.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("rustls reqwest client should always build")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn valid_methods_accepted() {
+        for m in [
+            "ping",
+            "stream",
+            "getAlbumList2",
+            "search3",
+            "getCoverArt",
+            // Legacy Subsonic `.view` suffix must keep proxying.
+            "ping.view",
+            "stream.view",
+        ] {
+            assert!(is_valid_subsonic_method(m), "should accept {m:?}");
+        }
+    }
+
+    #[test]
+    fn path_navigation_methods_rejected() {
+        for m in [
+            "",
+            "../admin",
+            "..%2fadmin", // literal `..` still present pre-decode
+            "foo/bar",
+            "a\\b",
+            "..",
+            "rest/../admin",
+        ] {
+            assert!(!is_valid_subsonic_method(m), "should reject {m:?}");
+        }
+    }
+
+    fn test_config() -> Config {
+        Config::from_toml_str(
+            r#"
+[server]
+listen = "0.0.0.0:8443"
+tls_cert = "/c.pem"
+tls_key = "/k.pem"
+bearer_token = "t"
+
+[upstream]
+navidrome_url = "http://nav.lan:4533"
+username = "alice"
+password = "wonderland"
+
+[cache]
+path = "/tmp/cache.sqlite"
+browse_ttl_seconds = 3600
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn build_upstream_url_rejects_traversal_with_400() {
+        let cfg = test_config();
+        let err = build_upstream_url(&cfg, "../admin", "").unwrap_err();
+        assert!(matches!(err, UpstreamUrlError::InvalidMethod));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn build_upstream_url_keeps_valid_method_under_rest_prefix() {
+        let cfg = test_config();
+        let url = build_upstream_url(&cfg, "getAlbumList2", "type=newest").unwrap();
+        // The method stays a single segment under `/rest/` — no escape.
+        assert_eq!(url.path(), "/rest/getAlbumList2");
+        // Injected auth params are present and the client query rides along.
+        let q = url.query().unwrap();
+        assert!(q.contains("u=alice"));
+        assert!(q.contains("type=newest"));
+    }
 }

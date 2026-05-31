@@ -315,3 +315,66 @@ async fn find_refresh_token_returns_none_for_unknown() {
     let oauth = store_with_client().await;
     assert!(oauth.find_refresh_token("nope").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn consume_refresh_token_is_single_use_under_concurrency() {
+    // The core of the atomicity fix: two simultaneous redemptions of the
+    // same refresh token must not both succeed (that would mint two valid
+    // token pairs from one refresh). Exactly one wins.
+    let oauth = store_with_client().await;
+    let issued = oauth
+        .mint_refresh_token(NewRefreshToken {
+            client_id: "web".to_string(),
+            ttl: None,
+        })
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        oauth.consume_refresh_token(&issued.token, "web"),
+        oauth.consume_refresh_token(&issued.token, "web"),
+    );
+    let winners = [a.unwrap(), b.unwrap()].into_iter().flatten().count();
+    assert_eq!(winners, 1, "exactly one concurrent consume may win");
+
+    // And the token is now spent for everyone.
+    assert!(
+        oauth
+            .consume_refresh_token(&issued.token, "web")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn consume_refresh_token_wrong_client_does_not_burn_token() {
+    // A wrong-client attempt must be rejected *without* revoking the
+    // token, so a legitimate client can still use it afterwards.
+    let oauth = store_with_client().await;
+    let issued = oauth
+        .mint_refresh_token(NewRefreshToken {
+            client_id: "web".to_string(),
+            ttl: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        oauth
+            .consume_refresh_token(&issued.token, "someone-else")
+            .await
+            .unwrap()
+            .is_none(),
+        "wrong client must not consume the token"
+    );
+    // Still valid for the rightful client.
+    assert!(
+        oauth
+            .consume_refresh_token(&issued.token, "web")
+            .await
+            .unwrap()
+            .is_some(),
+        "rightful client can still redeem"
+    );
+}

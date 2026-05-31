@@ -23,6 +23,17 @@ use crate::state::AppState;
 /// request from running unbounded transactions.
 const MAX_BATCH: usize = 1_000;
 
+/// Cap on the free-form `EventType::Other` string. Known variants are
+/// short words; an unbounded custom type is a buggy/abusive client
+/// writing megabytes into the `event_type` column.
+const MAX_EVENT_TYPE_LEN: usize = 64;
+/// Cap on a track id. Subsonic ids are short opaque strings; anything
+/// longer is malformed.
+const MAX_TRACK_ID_LEN: usize = 256;
+/// Cap on serialized `metadata` JSON per event. Metadata is a small
+/// type-specific blob (e.g. `played_ms`); 4 KiB is generous.
+const MAX_METADATA_BYTES: usize = 4096;
+
 #[derive(Debug, Deserialize)]
 pub struct EventsRequest {
     pub events: Vec<EventPayload>,
@@ -63,6 +74,21 @@ pub async fn submit(
             "batch too large (max 1000 events)",
         )
             .into_response();
+    }
+    // Per-field caps: reject the whole batch rather than write an
+    // oversized free-text field into the event log.
+    for p in &req.events {
+        if p.event_type.as_str().len() > MAX_EVENT_TYPE_LEN {
+            return (StatusCode::BAD_REQUEST, "event_type too long").into_response();
+        }
+        if p.track_id.len() > MAX_TRACK_ID_LEN {
+            return (StatusCode::BAD_REQUEST, "track_id too long").into_response();
+        }
+        if let Some(m) = &p.metadata
+            && m.to_string().len() > MAX_METADATA_BYTES
+        {
+            return (StatusCode::BAD_REQUEST, "metadata too large").into_response();
+        }
     }
 
     let events: Vec<EventInput> = req

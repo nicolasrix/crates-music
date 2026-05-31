@@ -24,7 +24,12 @@ Required env:
 Optional env:
     BATCH_SIZE             tracks per enqueue POST (default: 500)
     DRY_RUN=1              walk Navidrome and count, skip gateway POSTs
-    INSECURE=1             accept untrusted TLS certs (e.g. self-signed)
+    CA_CERT_PATH           PEM file with the CA that issued the gateway cert
+                           (e.g. the mkcert root CA, `mkcert -CAROOT`). Added
+                           as a trust anchor so verification stays ON.
+    INSECURE=1             DISABLE TLS verification entirely (loud warning;
+                           exposes the bearer token to a MITM). Prefer
+                           CA_CERT_PATH.
 """
 
 from __future__ import annotations
@@ -75,13 +80,33 @@ def subsonic_auth_params(username: str, password: str) -> dict[str, str]:
     }
 
 
-def make_ssl_ctx(insecure: bool) -> ssl.SSLContext | None:
-    if not insecure:
-        return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+def make_ssl_ctx(ca_cert_path: str, insecure: bool) -> ssl.SSLContext | None:
+    """Build the TLS context for gateway/Navidrome calls.
+
+    Priority:
+      1. CA_CERT_PATH set  → verify against the system store *plus* that CA
+         (the secure way to trust an mkcert `gateway.local` cert).
+      2. INSECURE=1        → disable verification entirely, with a loud
+         stderr warning. Escape hatch only; leaks the bearer to a MITM.
+      3. neither           → None, i.e. urllib's default system-store
+         verification.
+    """
+    if ca_cert_path:
+        ctx = ssl.create_default_context(cafile=ca_cert_path)
+        return ctx
+    if insecure:
+        print(
+            "WARNING: INSECURE=1 — TLS certificate verification is DISABLED, "
+            "so anyone who can intercept the connection can read your bearer "
+            "token. Set CA_CERT_PATH to the mkcert root CA instead "
+            "(`mkcert -CAROOT`).",
+            file=sys.stderr,
+        )
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
 
 
 def http_get_json(url: str, params: dict[str, str], ssl_ctx: ssl.SSLContext | None) -> dict:
@@ -197,9 +222,10 @@ def main() -> int:
     gw_bearer = envreq("GATEWAY_BEARER")
     batch_size = int(os.environ.get("BATCH_SIZE", "500"))
     dry_run = os.environ.get("DRY_RUN") == "1"
+    ca_cert_path = os.environ.get("CA_CERT_PATH", "").strip()
     insecure = os.environ.get("INSECURE") == "1"
 
-    ssl_ctx = make_ssl_ctx(insecure)
+    ssl_ctx = make_ssl_ctx(ca_cert_path, insecure)
     auth = subsonic_auth_params(nav_user, nav_pass)
 
     print(f"navidrome: {nav_url}")

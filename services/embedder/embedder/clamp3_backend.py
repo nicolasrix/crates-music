@@ -43,9 +43,15 @@ import time
 
 import numpy as np
 
+from embedder.checkpoint import verify_checkpoint
 from embedder.protocol import EmbedResult
 
 logger = logging.getLogger(__name__)
+
+# Optional pin: when set, the checkpoint's SHA-256 must match this digest or
+# the backend refuses to start. Mirrors CLAP_CHECKPOINT_SHA256; the strongest
+# guard against a swapped/tampered .pth on top of weights_only=True.
+_CHECKPOINT_SHA256_ENV = "CLAMP3_CHECKPOINT_SHA256"
 
 
 class Clamp3Embedder:
@@ -97,6 +103,15 @@ class Clamp3Embedder:
 
         self._device = _detect_device()
         self._max_audio_length = MAX_AUDIO_LENGTH
+
+        # Fail closed before the path reaches torch.load (which unpickles).
+        # weights_only=True below blocks pickle RCE; this adds tamper
+        # detection and logs the digest to pin via CLAMP3_CHECKPOINT_SHA256.
+        self._checkpoint_sha256 = verify_checkpoint(
+            checkpoint_path,
+            sha256_env=_CHECKPOINT_SHA256_ENV,
+            label="CLaMP 3 checkpoint",
+        )
 
         # BertConfigs match upstream extract_clamp3.py:42-53 exactly —
         # any drift here would mean load_state_dict mismatches and

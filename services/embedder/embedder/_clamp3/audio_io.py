@@ -21,6 +21,10 @@ Local modifications:
   real library. ffmpeg (already in the image) decodes ~everything, so on a
   LibsndfileError we shell out to it. ffmpeg also downmixes + resamples in
   the same pass, so the mono-fold / resampler below no-op on that path.
+- 2026-05-31: Bounded the ffmpeg subprocess with a wall-clock timeout. A
+  crafted/corrupt input could otherwise make ffmpeg hang indefinitely and
+  pin an embedder worker. On timeout the child is killed and the failure
+  surfaces as a RuntimeError, same as an undecodable input.
 """
 
 import io
@@ -34,6 +38,12 @@ import torch
 import torchaudio
 
 np.set_printoptions(precision=4, suppress=True)
+
+# Wall-clock cap on a single ffmpeg decode. ffmpeg decodes far faster than
+# realtime, so even a multi-minute track finishes in a second or two; 60 s
+# is a generous ceiling that never trips on a legitimate input but bounds a
+# pathological hang on malformed/crafted bytes.
+FFMPEG_DECODE_TIMEOUT_SECONDS = 60
 
 
 def load_audio_bytes(
@@ -135,12 +145,19 @@ def _decode_via_ffmpeg(raw_bytes, target_sr, is_mono):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
+                timeout=FFMPEG_DECODE_TIMEOUT_SECONDS,
             )
         except subprocess.CalledProcessError as e:
             # Truly undecodable even by ffmpeg — surface the ffmpeg stderr so
             # the failure reason in the queue is actionable, not just "500".
             detail = e.stderr.decode("utf-8", "replace").strip()[-500:]
             raise RuntimeError(f"ffmpeg decode failed: {detail}") from e
+        except subprocess.TimeoutExpired as e:
+            # run() kills the child on timeout; convert to the same
+            # RuntimeError shape so the queue records an actionable reason.
+            raise RuntimeError(
+                f"ffmpeg decode timed out after {FFMPEG_DECODE_TIMEOUT_SECONDS}s"
+            ) from e
     # f32le is interleaved; reshape to (n_channels, n_samples). frombuffer is
     # read-only and .copy() makes it writable (torch warns on / mis-handles
     # non-writable arrays, and the downstream resampler may mutate in place).

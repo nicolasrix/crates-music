@@ -206,8 +206,10 @@ async fn main() -> Result<()> {
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");
+    // `with_connect_info` so handlers can extract the peer `SocketAddr`
+    // (the login brute-force limiter keys on it).
     axum_server::bind_rustls(listen, tls)
-        .serve(router.into_make_service())
+        .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .context("axum-server")?;
 

@@ -9,10 +9,12 @@ server respects the model_loaded flag.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
-from embedder.app import build_app, get_embedder
+from embedder.app import _auth_disabled_warning, build_app, get_embedder
 from embedder.stub import DEFAULT_DIM as STUB_DIM, StubEmbedder
 
 
@@ -340,13 +342,18 @@ def test_reduce_returns_503_when_umap_extra_missing(
     assert "umap" in r.json()["detail"].lower() or "reduce" in r.json()["detail"].lower()
 
 
-def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
-    # Knobs only the reducer can validate (an unknown metric, n_neighbors ≥ N)
-    # raise ValueError from the reducer — a caller bug, surfaced as 400
-    # rather than an opaque 500. (Out-of-range n_components is rejected
-    # earlier by Pydantic as 422 — see test_reduce_rejects_bad_n_components.)
+def test_reduce_returns_400_with_sanitized_detail_on_reducer_valueerror(
+    app_with_loaded_stub, monkeypatch
+):
+    # Data-dependent knobs only the reducer can validate (chiefly
+    # n_neighbors ≥ N) raise ValueError from inside UMAP — a caller bug,
+    # surfaced as 400. The exception text can carry internal detail
+    # (array shapes, library internals), so the response body must be a
+    # fixed, non-leaky message and the specifics logged server-side only.
+    leaky = "n_neighbors=20 >= n_samples=1; internal array shape (1, 2)"
+
     def fake_project_matrix(track_ids, matrix, **kwargs):
-        raise ValueError("unknown metric 'bogus'")
+        raise ValueError(leaky)
 
     monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
@@ -357,11 +364,47 @@ def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
             "track_ids": ["t1"],
             "dim": 2,
             "vectors_b64": _pack([[1.0, 2.0]]),
-            "metric": "bogus",
+            "metric": "cosine",
         },
     )
     assert r.status_code == 400
-    assert "metric" in r.json()["detail"]
+    assert r.json()["detail"] == "invalid reduction parameters"
+    # The internal exception text must not leak to the client.
+    assert "n_samples" not in r.text
+    assert "array shape" not in r.text
+
+
+def test_reduce_rejects_unknown_metric_with_422(app_with_loaded_stub):
+    # The metric is allowlisted at the schema level (Literal), so an
+    # unknown metric is rejected as a 422 before the handler runs —
+    # never passed through to UMAP.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "metric": "bogus",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_reduce_rejects_out_of_range_knobs_with_422(app_with_loaded_stub):
+    # n_neighbors and min_dist are bounded at the schema level.
+    client = TestClient(app_with_loaded_stub)
+    for bad in ({"n_neighbors": 0}, {"n_neighbors": 9999}, {"min_dist": -0.1}, {"min_dist": 2.0}):
+        r = client.post(
+            "/reduce",
+            json={
+                "track_ids": ["t1"],
+                "dim": 2,
+                "vectors_b64": _pack([[1.0, 2.0]]),
+                **bad,
+            },
+        )
+        assert r.status_code == 422, f"expected 422 for {bad}, got {r.status_code}"
 
 
 def test_reduce_rejects_bad_n_components(app_with_loaded_stub):
@@ -418,8 +461,10 @@ def test_reduce_does_not_require_model_loaded(
 #
 # When EMBEDDER_BEARER_TOKEN is set in the environment the embedder
 # requires `Authorization: Bearer <token>` on /embed/* and /reduce.
-# /healthz stays open — boot probes shouldn't need to be told the
-# secret, and a 200 from /healthz doesn't leak compute time.
+# /healthz stays reachable for liveness probes — boot probes shouldn't
+# need the secret — but it redacts the descriptive fields
+# (model_version, dim, device) for unauthenticated callers so a LAN peer
+# can't fingerprint the model/hardware.
 
 
 @pytest.fixture
@@ -432,9 +477,45 @@ def secured_app(monkeypatch):
 
 
 def test_auth_healthz_stays_open_when_token_set(secured_app):
+    # Liveness must not require the secret — Docker HEALTHCHECK / readiness
+    # probes hit /healthz without a bearer.
     client = TestClient(secured_app)
     r = client.get("/healthz")
     assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["model_loaded"] is True
+
+
+def test_auth_healthz_redacts_descriptive_fields_without_bearer(secured_app):
+    # An unauthenticated peer must not be able to fingerprint the model
+    # or hardware: model_version / dim / device are withheld.
+    client = TestClient(secured_app)
+    body = client.get("/healthz").json()
+    assert "model_version" not in body
+    assert "dim" not in body
+    assert "device" not in body
+
+
+def test_auth_healthz_full_body_with_correct_bearer(secured_app):
+    # The gateway boot probe carries the bearer, so split-host deploys
+    # still get the descriptive fields they read at startup.
+    client = TestClient(secured_app)
+    body = client.get(
+        "/healthz", headers={"Authorization": "Bearer shared-secret"}
+    ).json()
+    assert body["model_version"] == "stub-v1"
+    assert body["dim"] == STUB_DIM
+    assert body["device"] == "cpu"
+
+
+def test_auth_healthz_redacts_with_wrong_bearer(secured_app):
+    # A wrong token is treated like no token for /healthz — liveness
+    # only, no fingerprinting. (It's a hard 401 on the compute endpoints.)
+    client = TestClient(secured_app)
+    r = client.get("/healthz", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 200
+    assert "model_version" not in r.json()
 
 
 def test_auth_embed_audio_401_without_bearer(secured_app):
@@ -492,11 +573,14 @@ def test_auth_reduce_401_without_bearer(secured_app, monkeypatch, tmp_path):
     assert r.status_code == 401, r.text
 
 
-def test_auth_no_token_set_allows_everything(monkeypatch):
-    # Default behaviour: env var absent → no enforcement, calls pass
-    # through. Single-host deployments don't need to set anything.
+def test_auth_no_token_stub_backend_allows_everything(monkeypatch, caplog):
+    # Default dev behaviour: stub backend + no token → no enforcement,
+    # calls pass through, and NO warning is emitted (loopback dev is the
+    # intended fail-open case).
     monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
-    app = build_app()
+    monkeypatch.delenv("EMBEDDER_BACKEND", raising=False)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app()
     stub = StubEmbedder(model_version="stub-v1", loaded=True)
     app.dependency_overrides[get_embedder] = lambda: stub
     client = TestClient(app)
@@ -506,6 +590,30 @@ def test_auth_no_token_set_allows_everything(monkeypatch):
         headers={"content-type": "application/octet-stream"},
     )
     assert r.status_code == 200, r.text
+    assert not any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_no_token_real_backend_warns(monkeypatch, caplog):
+    # Canary: a real model backend with no token is the split-host
+    # footgun — auth is silently off. We don't hard-fail (loopback
+    # deployments stay working), but the warning must be impossible to
+    # miss. Inject a stub so no model/torch load happens; the warning
+    # keys off EMBEDDER_BACKEND, not the injected embedder.
+    monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("EMBEDDER_BACKEND", "clamp3")
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app(embedder=stub)
+    assert app.state.bearer_token is None
+    assert any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_disabled_warning_decision():
+    # Pure decision helper: warn only for a non-stub backend with no token.
+    assert _auth_disabled_warning("stub", None) is None
+    assert _auth_disabled_warning("clamp3", "secret") is None
+    assert _auth_disabled_warning("clap", None) is not None
+    assert _auth_disabled_warning("clamp3", None) is not None
 
 
 def test_vectors_are_l2_normalized(app_with_loaded_stub):

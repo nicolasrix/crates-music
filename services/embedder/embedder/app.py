@@ -1,7 +1,9 @@
 """FastAPI app surface.
 
 Endpoints:
-- GET  /healthz       — liveness + model_loaded probe (reports backend dim)
+- GET  /healthz       — liveness + model_loaded probe; descriptive fields
+                        (model_version, dim, device) only for authenticated
+                        callers when a bearer token is configured
 - POST /embed/audio   — raw bytes → dim-shaped float vector
 - POST /embed/text    — JSON {text} → dim-shaped float vector
 
@@ -17,16 +19,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import os
 import re
-from typing import Annotated, Mapping
+from typing import Annotated, Literal, Mapping
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from embedder import reduce as reduce_module
 from embedder.protocol import Embedder
+
+# Propagates to uvicorn's handlers; no handler attached here so importing
+# the app doesn't reconfigure logging for the host process.
+_log = logging.getLogger("embedder")
 
 # Upper bounds on request size. The only caller of these endpoints is the
 # gateway (single-user, ~10⁴ tracks), so these are guardrails against a
@@ -117,11 +125,22 @@ class ReduceRequest(BaseModel):
         description="base64 of N*D little-endian float32, row-major "
         "(np.frombuffer(dtype='<f4')).",
     )
-    n_neighbors: int = reduce_module.DEFAULT_N_NEIGHBORS
-    min_dist: float = reduce_module.DEFAULT_MIN_DIST
+    # Bounds keep a caller (the gateway, but be defensive) from steering
+    # UMAP into a pathologically slow or nonsensical run. n_neighbors is
+    # capped well above any single-user library; min_dist is a [0, 1] knob
+    # by UMAP's own definition.
+    n_neighbors: int = Field(reduce_module.DEFAULT_N_NEIGHBORS, gt=0, le=500)
+    min_dist: float = Field(reduce_module.DEFAULT_MIN_DIST, ge=0.0, le=1.0)
     random_state: int = reduce_module.DEFAULT_RANDOM_STATE
     n_components: int = Field(2, ge=2, le=3)
-    metric: str = reduce_module.DEFAULT_METRIC
+    # Allowlist the distance metric rather than passing an arbitrary string
+    # through to UMAP: an unknown metric is a 422 at the edge instead of a
+    # deep ValueError (or an unexpected/expensive code path) inside the
+    # reducer. These four cover the geometries we use; "cosine" matches the
+    # L2-normalized embedding space.
+    metric: Literal["cosine", "euclidean", "manhattan", "correlation"] = (
+        reduce_module.DEFAULT_METRIC
+    )
 
 
 class ReducePoint(BaseModel):
@@ -155,6 +174,29 @@ def _require_env(name: str, backend: str) -> str:
             f"{name} must be set when EMBEDDER_BACKEND={backend!r}"
         )
     return val
+
+
+def _auth_disabled_warning(backend: str, token: str | None) -> str | None:
+    """Return a warning message if a non-stub backend runs without a
+    bearer token, else None.
+
+    Fail-open (no token → no auth) is intentional for the `stub`/dev
+    backend, where the sidecar is typically only reachable on loopback.
+    But a real model backend is the split-host deployment shape, where
+    the sidecar is reachable across the LAN — there, a missing token
+    silently exposes the inference + file-opening endpoints to every
+    peer. We can't know the network topology from inside the process, so
+    we don't hard-fail (that would break a working loopback deployment on
+    a restart that happened to drop the env var); we make the
+    misconfiguration impossible to miss in the logs instead.
+    """
+    if token is None and backend != "stub":
+        return (
+            f"EMBEDDER_BEARER_TOKEN is unset but EMBEDDER_BACKEND={backend!r}: "
+            "/embed/* and /reduce are UNAUTHENTICATED. Set EMBEDDER_BEARER_TOKEN "
+            "for any split-host (LAN-reachable) deployment."
+        )
+    return None
 
 
 def _default_embedder() -> Embedder:
@@ -210,23 +252,21 @@ def get_embedder(request: Request) -> Embedder:
 EmbedderDep = Annotated[Embedder, Depends(get_embedder)]
 
 
-def _require_bearer(request: Request) -> None:
-    """FastAPI dependency guarding privileged endpoints.
+def _check_bearer(request: Request) -> bool:
+    """Return whether the request is authorized for privileged data.
 
-    If `app.state.bearer_token` is None (the default — no
-    `EMBEDDER_BEARER_TOKEN` in the env at build time), this is a
-    no-op. When configured, requires `Authorization: Bearer <token>`
-    on the incoming request and raises 401 otherwise.
+    True when no token is configured (`app.state.bearer_token is None` —
+    auth disabled, the same-host/dev default) or the `Authorization`
+    header carries the configured token. False otherwise.
 
-    Deliberately not applied to /healthz — boot probes shouldn't need
-    to be told the secret, and 200/503 on /healthz doesn't reveal
-    anything compute-y. /embed/* and /reduce both fan out to the
-    model and/or open caller-supplied files, so they're the actual
-    privileged surface.
+    Does not raise: callers decide what a failure means. `_require_bearer`
+    turns it into a 401 for the inference/compute endpoints; `/healthz`
+    turns it into a downgraded (liveness-only) body so the probe still
+    works without the secret.
     """
     token = request.app.state.bearer_token
     if token is None:
-        return
+        return True
     header = request.headers.get("authorization", "")
     expected = f"Bearer {token}"
     # Constant-time compare: avoids leaking token length / common-prefix
@@ -234,7 +274,20 @@ def _require_bearer(request: Request) -> None:
     # negligible either way; this is the cheap correct thing.
     import hmac
 
-    if not hmac.compare_digest(header, expected):
+    return hmac.compare_digest(header, expected)
+
+
+def _require_bearer(request: Request) -> None:
+    """FastAPI dependency guarding privileged endpoints.
+
+    No-op when auth is disabled (no `EMBEDDER_BEARER_TOKEN`). When a
+    token is configured, requires `Authorization: Bearer <token>` and
+    raises 401 otherwise. /embed/* and /reduce both fan out to the
+    model and/or do nontrivial compute, so they're the privileged
+    surface; /healthz is handled separately (it stays reachable for
+    liveness probes but redacts descriptive fields when unauthenticated).
+    """
+    if not _check_bearer(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -254,19 +307,36 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
     # var doesn't quietly accept everyone with `Bearer `.
     token = os.environ.get("EMBEDDER_BEARER_TOKEN", "").strip()
     app.state.bearer_token = token or None
+    # Fail loud (but don't hard-fail) when a real backend is exposed with
+    # auth off — the common split-host footgun is dropping the env var.
+    backend = os.environ.get("EMBEDDER_BACKEND", "stub").lower()
+    warning = _auth_disabled_warning(backend, app.state.bearer_token)
+    if warning is not None:
+        _log.warning(warning)
 
-    @app.get("/healthz", response_model=HealthResponse)
-    def healthz(emb: EmbedderDep, response: Response) -> HealthResponse:
+    @app.get("/healthz")
+    def healthz(emb: EmbedderDep, request: Request) -> Response:
         loaded = emb.loaded
-        if not loaded:
-            response.status_code = 503
-        return HealthResponse(
-            status="ok" if loaded else "loading",
-            model_loaded=loaded,
-            model_version=emb.model_version,
-            dim=emb.dim,
-            device=emb.device,
-        )
+        status_code = 200 if loaded else 503
+        status = "ok" if loaded else "loading"
+        # Liveness (status + model_loaded) is safe for any LAN peer —
+        # it's exactly what the Docker HEALTHCHECK (`curl --fail`) and the
+        # gateway boot probe need to see 200/503. The descriptive fields
+        # (model_version, dim, device) fingerprint the model + hardware,
+        # so they're returned only to an authenticated caller. The gateway
+        # probe carries the bearer by default, so split-host deploys still
+        # see them; an unauthenticated peer gets liveness only.
+        if _check_bearer(request):
+            payload = HealthResponse(
+                status=status,
+                model_loaded=loaded,
+                model_version=emb.model_version,
+                dim=emb.dim,
+                device=emb.device,
+            ).model_dump()
+        else:
+            payload = {"status": status, "model_loaded": loaded}
+        return JSONResponse(content=payload, status_code=status_code)
 
     @app.post("/embed/audio")
     async def embed_audio(req: Request, emb: EmbedderDep, _: BearerDep) -> Response:
@@ -344,11 +414,16 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
                 detail=f"reduce extra not installed (umap/sklearn): {e}",
             ) from e
         except ValueError as e:
-            # Bad knobs (n_components ∉ {2,3}, an unknown UMAP `metric`,
-            # n_neighbors ≥ N) raise ValueError from the reducer. That's
-            # a caller bug, not a server fault — surface a 400 rather
-            # than an opaque 500.
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            # The reducer still raises ValueError for data-dependent bad
+            # knobs that pydantic can't catch up front — chiefly
+            # n_neighbors >= N (more neighbors than points). That's a 400
+            # (caller bug), but the exception text can carry internal
+            # detail (array shapes, library internals), so we log it at
+            # WARNING server-side and return a fixed, non-leaky message.
+            _log.warning("reduce rejected request: %s", e)
+            raise HTTPException(
+                status_code=400, detail="invalid reduction parameters"
+            ) from e
         return ReduceResponse(
             points=[
                 ReducePoint(
@@ -374,8 +449,6 @@ def _build_embed_response(result, model_version: str, dim: int) -> Response:
     endpoints share the same envelope + header logic. `dim` comes from
     the backend so a CLAP and CLaMP 3 deployment can share this code.
     """
-    from fastapi.responses import JSONResponse
-
     payload = EmbedResponse(
         vector=[float(x) for x in result.vector.tolist()],
         dim=dim,

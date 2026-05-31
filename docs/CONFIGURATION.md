@@ -152,7 +152,9 @@ Cache directory follows the same XDG layout under
 |---|---|---|
 | `EMBEDDER_BACKEND` | `stub` | `stub` for deterministic hash vectors (no GPU); `clap` for the real LAION CLAP backend; `clamp3` for the CLaMP 3 backend. Any other value → service refuses to start. |
 | `CLAP_CHECKPOINT` | — | Required when `EMBEDDER_BACKEND=clap`. Path to a `.pt` checkpoint file. |
+| `CLAP_CHECKPOINT_SHA256` | — | Optional integrity pin for the CLAP checkpoint. When set, the backend refuses to start unless the file's SHA-256 matches (tamper/swap detection on top of `weights_only=True`). The boot log prints the computed digest to copy. |
 | `CLAMP3_CHECKPOINT` | — | Required when `EMBEDDER_BACKEND=clamp3`. Path to the CLaMP 3 unified saas `.pth` checkpoint. |
+| `CLAMP3_CHECKPOINT_SHA256` | — | Optional integrity pin for the CLaMP 3 checkpoint (same semantics as `CLAP_CHECKPOINT_SHA256`). |
 | `MERT_FOLDER` | — | Required when `EMBEDDER_BACKEND=clamp3`. Path to a local `m-a-p/MERT-v1-95M` copy (the audio frontend). May also be the HF hub id, but that's discouraged in prod since the container user has no writable HF cache. |
 | `EMBEDDER_STUB_DIM` | `512` | Optional. Overrides the stub backend's wire dimension (e.g. set `768` so the stub mimics CLaMP 3's output shape in dev). |
 | `EMBEDDER_BEARER_TOKEN` | — | Optional shared secret for split-host deploys (gateway and embedder on different machines). When set, `/embed/*` and `/reduce` require `Authorization: Bearer <token>`; `/healthz` is exempt. Empty string = unset. |

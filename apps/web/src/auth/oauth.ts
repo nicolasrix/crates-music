@@ -5,7 +5,14 @@
 // initial-load origin in sync without per-environment URL config.
 
 import { deriveChallenge, generateVerifier } from "./pkce";
-import { clearTokens, popVerifier, stashVerifier, writeTokens } from "./tokens";
+import {
+  clearTokens,
+  popState,
+  popVerifier,
+  stashState,
+  stashVerifier,
+  writeTokens,
+} from "./tokens";
 
 const CLIENT_ID = "web";
 const REDIRECT_URI = `${location.origin}/oauth/callback`;
@@ -13,7 +20,9 @@ const REDIRECT_URI = `${location.origin}/oauth/callback`;
 export async function startLogin() {
   const verifier = await generateVerifier();
   const challenge = await deriveChallenge(verifier);
+  const state = crypto.randomUUID();
   stashVerifier(verifier);
+  stashState(state);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -21,15 +30,21 @@ export async function startLogin() {
     redirect_uri: REDIRECT_URI,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    state: crypto.randomUUID(),
+    state,
   });
   // Full-page redirect — the gateway's authorize handler will bounce
   // through /oauth/login if no session, then back to redirect_uri.
   location.assign(`/oauth/authorize?${params.toString()}`);
 }
 
-export async function completeLogin(code: string): Promise<void> {
+export async function completeLogin(code: string, returnedState: string | null): Promise<void> {
+  // Pop both before any early return so a failed attempt can't be
+  // replayed against a stale verifier/state left in sessionStorage.
+  const expectedState = popState();
   const verifier = popVerifier();
+  if (!expectedState || returnedState !== expectedState) {
+    throw new Error("OAuth state mismatch — aborting sign-in (possible CSRF)");
+  }
   if (!verifier) {
     throw new Error("missing PKCE verifier — did you reload the callback page?");
   }

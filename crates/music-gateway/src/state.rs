@@ -21,11 +21,14 @@ use music_recommend::metadata::MetadataStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
 
+use tokio::sync::Semaphore;
+
 use crate::config::Config;
 use crate::diagnostics::TraceStore;
 use crate::embedder::EmbedderHandle;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::proxy::build_http_client;
+use crate::ratelimit::LoginLimiter;
 use crate::sync::SyncStore;
 
 #[derive(Debug, Clone)]
@@ -79,6 +82,14 @@ struct Inner {
     /// (e.g. 60 covers on a page reload) coalesces into a single
     /// upstream fetch per key per cooldown window.
     placeholder_revalidations: Mutex<HashMap<String, Instant>>,
+    /// Brute-force throttle for `POST /oauth/login`. See `LoginLimiter`.
+    login_limiter: LoginLimiter,
+    /// Single-permit gate serialising `POST /v1/recommend/refit_whitening`.
+    /// A refit is an expensive whole-corpus power-iteration plus
+    /// embedder prompt-corpus calls; concurrent refits would duplicate
+    /// that work and race on the persisted transform. `try_acquire`
+    /// turns a second concurrent request into a fast 429.
+    refit_gate: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -128,8 +139,18 @@ impl AppState {
                 trace_store,
                 placeholder_etags: RwLock::new(HashSet::new()),
                 placeholder_revalidations: Mutex::new(HashMap::new()),
+                login_limiter: LoginLimiter::default(),
+                refit_gate: Arc::new(Semaphore::new(1)),
             }),
         }
+    }
+
+    pub fn login_limiter(&self) -> &LoginLimiter {
+        &self.inner.login_limiter
+    }
+
+    pub fn refit_gate(&self) -> &Arc<Semaphore> {
+        &self.inner.refit_gate
     }
 
     pub fn config(&self) -> &Config {

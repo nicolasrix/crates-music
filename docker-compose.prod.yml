@@ -33,7 +33,10 @@
 #                             to http://embedder:9000 (the in-compose
 #                             sidecar). Point at a remote host for
 #                             split-host deployments.
-#   EMBEDDER_BEARER_TOKEN   — shared secret enforced on /embed/*
+#   EMBEDDER_BEARER_TOKEN   — shared secret enforced on /embed/*.
+#                             Optional for the default single-host deploy
+#                             (the embedder is compose-internal); REQUIRED
+#                             for split-host (see docker-compose.embedder-only.yml).
 #   EMBEDDER_MODELS_DIR     — host path or named volume holding the
 #                             CLAP checkpoint as clap.pt. Defaults to
 #                             a named volume; override with an absolute
@@ -106,6 +109,11 @@ services:
     environment:
       EMBEDDER_BACKEND: clap
       CLAP_CHECKPOINT: /models/clap.pt
+      # Optional here: this embedder is `expose`-only (compose-internal,
+      # never published — see below), so the docker network is the trust
+      # boundary. For split-host (embedder on a separate box via
+      # docker-compose.embedder-only.yml) the token is REQUIRED on both
+      # hosts — that file enforces it with `:?`.
       EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
     volumes:
       # Shared with the gateway. /reduce writes UMAP projections
@@ -154,6 +162,10 @@ services:
       # In-compose sidecar by default. Override to a remote URL for
       # split-host deployments where the GPU box runs the embedder.
       EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:9000}
+      # Match the embedder's token. Optional single-host (the in-compose
+      # sidecar has none); set it when EMBEDDER_URL points at a remote
+      # split-host embedder that enforces a token, or the gateway can't
+      # authenticate and drops to degraded mode.
       EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
       # OAuth redirect must match the URL the browser actually loads,
       # *including the port* when it isn't the default 443. The base

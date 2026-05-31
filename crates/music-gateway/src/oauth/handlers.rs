@@ -5,9 +5,11 @@
 
 use std::time::Duration;
 
+use std::net::{IpAddr, SocketAddr};
+
 use axum::Form;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -140,24 +142,46 @@ pub async fn login_get(Query(q): Query<LoginQuery>) -> Html<String> {
 /// cookie, and redirects (303 See Other).
 pub async fn login_post(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     Query(q): Query<LoginQuery>,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, (StatusCode, String)> {
-    // Gateway must be bootstrapped first.
+    // Peer address as the limiter key. Falls back to an unspecified
+    // address when connection info is absent (e.g. unit tests via
+    // `oneshot`), which buckets such callers together — fine, they share
+    // one throttle. See `LoginLimiter` for the reverse-proxy caveat.
+    let ip = connect.map_or(IpAddr::from([0, 0, 0, 0]), |ci| ci.0.ip());
+    if let Err(remaining) = state.login_limiter().check(ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many login attempts; retry in {}s",
+                remaining.as_secs() + 1
+            ),
+        ));
+    }
+
+    // Uniform failure: an unauthenticated caller must not be able to
+    // tell "gateway not bootstrapped" from "wrong password" — both
+    // return an identical 401. When no master password is stored we
+    // still burn an Argon2id verify (`verify_absent`) so the two paths
+    // are timing-indistinguishable as well as response-identical. The
+    // one-time setup URL printed at startup is how the operator
+    // bootstraps; the login form never needs to disclose that state.
     let phc = state
         .oauth()
         .master_password_hash()
         .await
-        .map_err(internal)?
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "gateway not yet configured — visit /oauth/setup first".to_string(),
-        ))?;
-
-    let ok = password::verify(&form.password, &phc).map_err(internal)?;
+        .map_err(internal)?;
+    let ok = match phc {
+        Some(phc) => password::verify(&form.password, &phc).map_err(internal)?,
+        None => password::verify_absent(&form.password),
+    };
     if !ok {
-        return Err((StatusCode::UNAUTHORIZED, "invalid password".to_string()));
+        state.login_limiter().record_failure(ip);
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
     }
+    state.login_limiter().record_success(ip);
 
     let issued = state
         .oauth()
@@ -539,34 +563,26 @@ async fn grant_refresh_token(
         )
     })?;
 
-    let found = state
+    // Rotation is a single atomic step: `consume_refresh_token` revokes
+    // the presented token and returns its row exactly once, scoped to
+    // this client. A concurrent replay of the same token loses the race
+    // and gets `None` here — closing the find-then-revoke window that
+    // would otherwise let one refresh mint two valid pairs. A wrong
+    // client_id, an unknown/expired/revoked token, and a replay all
+    // collapse to the same `invalid_grant` (no oracle, and a
+    // wrong-client attempt does not burn a valid token).
+    let _consumed = state
         .oauth()
-        .find_refresh_token(&refresh)
+        .consume_refresh_token(&refresh, &client_id)
         .await
         .map_err(|e| oauth_internal(&e))?
         .ok_or_else(|| {
             oauth_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
-                "refresh token is invalid, expired, or revoked",
+                "refresh token is invalid, expired, revoked, or for a different client",
             )
         })?;
-    if found.client_id != client_id {
-        return Err(oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "client_id does not match the refresh token",
-        ));
-    }
-
-    // Rotation: revoke the presented refresh first, then issue a new
-    // pair. Order matters in the unlikely event we're racing against a
-    // concurrent attempt.
-    state
-        .oauth()
-        .revoke_refresh_token(&refresh)
-        .await
-        .map_err(|e| oauth_internal(&e))?;
 
     let pair = mint_pair(state, &client_id).await?;
     Ok(Json(pair))

@@ -128,6 +128,8 @@ fn config_with_gateway_block_roundtrips() {
         gateway: Some(GatewayConfig {
             url: "https://gateway.local:8443".into(),
             bearer_token: "abc".into(),
+            ca_cert_path: None,
+            insecure_tls: false,
         }),
         cache: CacheConfig::default(),
     };
