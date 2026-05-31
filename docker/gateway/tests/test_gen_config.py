@@ -234,3 +234,40 @@ def test_state_db_override() -> None:
     parsed = tomllib.loads(build_config(env))
     assert parsed["oauth"]["state_db"] == "/var/lib/crates-music/state.sqlite"
     assert parsed["cache"]["path"] == "/var/lib/crates-music/cache.sqlite"
+
+
+# --- [recommend] section --------------------------------------------------
+#
+# Only emitted when RECOMMEND_EMBEDDING_DIM is set. Existing CLAP/stub
+# deploys leave it unset and the gateway applies its 512 default; the
+# CLaMP 3 variant sets 768. The dim must match the embedder's /healthz
+# dim or the gateway's ANN open fails loudly at boot.
+
+
+def test_recommend_section_omitted_when_unset() -> None:
+    parsed = tomllib.loads(build_config(_minimum_env()))
+    assert "recommend" not in parsed
+
+
+def test_recommend_embedding_dim_emitted_when_set() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["embedding_dim"] == 768
+
+
+def test_recommend_embedding_dim_empty_treated_as_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": ""}
+    parsed = tomllib.loads(build_config(env))
+    assert "recommend" not in parsed
+
+
+def test_recommend_embedding_dim_rejects_non_integer() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768.0"}
+    with pytest.raises(ConfigError, match="RECOMMEND_EMBEDDING_DIM"):
+        build_config(env)
+
+
+def test_recommend_embedding_dim_rejects_non_positive() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "0"}
+    with pytest.raises(ConfigError, match="positive"):
+        build_config(env)

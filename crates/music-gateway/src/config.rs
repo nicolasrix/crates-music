@@ -122,18 +122,32 @@ pub struct RecommendConfig {
     /// rebuilt from SQLite at the new dim.
     #[serde(default = "default_embedding_dim")]
     pub embedding_dim: usize,
+
+    /// All-but-the-Top whitening of the content ANN. When true, the
+    /// gateway fits (or loads) a per-model whitening transform at boot and
+    /// the ANN stores + queries de-coned vectors — fixing CLaMP 3's
+    /// embedding anisotropy that made text-query stations cluster. When
+    /// false, the ANN holds raw vectors (legacy behaviour). Toggling this
+    /// triggers a one-time ANN rebuild at the next boot.
+    #[serde(default = "default_whitening_enabled")]
+    pub whitening_enabled: bool,
 }
 
 impl Default for RecommendConfig {
     fn default() -> Self {
         Self {
             embedding_dim: default_embedding_dim(),
+            whitening_enabled: default_whitening_enabled(),
         }
     }
 }
 
 fn default_embedding_dim() -> usize {
     512
+}
+
+fn default_whitening_enabled() -> bool {
+    true
 }
 
 impl Default for OauthConfig {

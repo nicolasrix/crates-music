@@ -1,13 +1,17 @@
 """Embedder protocol: any backend that can embed raw audio bytes and text.
 
-Two implementations:
-- `ClapEmbedder` (production, gated behind the `clap` extra) — wraps LAION CLAP.
-- `StubEmbedder` (tests + degraded-mode fallback) — deterministic hash-based.
+Three implementations:
+- `ClapEmbedder` (gated behind the `clap` extra) — wraps LAION CLAP, 512-dim.
+- `Clamp3Embedder` (gated behind the `clamp3` extra) — wraps CLaMP 3, 768-dim.
+- `StubEmbedder` (tests + degraded-mode fallback) — deterministic hash-based,
+  default 512-dim but the constructor takes a `dim` so the stub can stand in
+  for either backend's wire shape during tests.
 
-Both produce L2-normalized 512-dim float32 vectors AND a per-stage
-timing breakdown in milliseconds, so the gateway can attribute time
+All backends produce L2-normalized float32 vectors of shape `(dim,)` plus a
+per-stage timing breakdown in milliseconds, so the gateway can attribute time
 inside `embed_audio` / `embed_text` to its sub-steps via the
-`Server-Timing` HTTP response header.
+`Server-Timing` HTTP response header. `dim` is a per-backend property so the
+sidecar can be swapped without the FastAPI layer hardcoding a dimension.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ class EmbedResult:
 
 
 class Embedder(Protocol):
-    """Anything that can produce CLAP-shaped embeddings."""
+    """Anything that can produce embedding vectors of a fixed dimension."""
 
     @property
     def model_version(self) -> str: ...
@@ -55,10 +59,20 @@ class Embedder(Protocol):
         """
         ...
 
+    @property
+    def dim(self) -> int:
+        """Vector dimension this backend produces.
+
+        Read by `/healthz` and by `_build_embed_response` instead of a
+        hardcoded module constant. Keeps the FastAPI layer agnostic to
+        the chosen backend (CLAP=512, CLaMP 3=768, stub=ctor-arg).
+        """
+        ...
+
     def embed_audio(self, raw_bytes: bytes) -> EmbedResult:
-        """Return an `EmbedResult` whose vector has shape (EMBEDDING_DIM,)."""
+        """Return an `EmbedResult` whose vector has shape (self.dim,)."""
         ...
 
     def embed_text(self, text: str) -> EmbedResult:
-        """Return an `EmbedResult` whose vector has shape (EMBEDDING_DIM,)."""
+        """Return an `EmbedResult` whose vector has shape (self.dim,)."""
         ...

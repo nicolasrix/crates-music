@@ -82,7 +82,12 @@ Backend-only. Two indices, blended at query time — they capture different thin
 
 Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (single user, ~10⁴ tracks) an in-process index is sufficient — no separate vector DB.
 
-Inference runtime: **ONNX Runtime via the [`ort`](https://crates.io/crates/ort) crate**, ROCm execution provider (gateway has an AMD RDNA4, 16 GB VRAM). CPU fallback always available — required because ROCm coverage for newest AMD generations sometimes lags.
+Inference runtime: the Python embedder sidecar (PyTorch, ROCm). The
+**GPU lives on the GPU host** (RDNA4 GPU, 16 GB VRAM), which hosts
+the embedder sidecar; the **gateway host (the NAS host) is CPU-only** and
+reaches the sidecar over the LAN — see the deployment topology in the
+status section below. CPU fallback always available — required because
+ROCm coverage for newest AMD generations sometimes lags.
 
 ### Ingest pipeline
 
@@ -228,8 +233,129 @@ web has the optimistic-update sync provider. Single-linearizer model
   + `.ann.keys` sidecar.
 
 **Deferred from P6:** behavioural index + nightly track2vec retrain
-(P6.8), text-query stations via CLAP's text encoder (P6.9). The event
-log is in place to capture signal for P6.8 when it lands.
+(P6.8). The event log is in place to capture signal for P6.8 when it
+lands. **P6.9 (text-query stations) now done on the CLaMP 3 branch** —
+`embed_text` is implemented in `Clamp3Embedder` and the gateway's
+`GET /v1/recommend/station?text=…` was already wired; see the CLaMP 3
+migration notes below.
+
+**CLaMP 3 migration — in flight (`feat/clamp3-migration`).** Swapping
+the content embedder from LAION CLAP (512-dim) to
+[CLaMP 3](https://github.com/sanderwood/clamp3) (768-dim) for stronger
+music-specific acoustic similarity. Done so far:
+
+- Upstream inference code vendored under
+  `services/embedder/embedder/_clamp3/` (slim `model.py` / `audio_io.py`
+  / `feature_extractor.py` / MusicHuBERT, pinned at upstream `9016d2b`,
+  `LICENSES/` + `VENDORED.md`).
+- `Clamp3Embedder` backend (`embedder/clamp3_backend.py`): MERT-v1-95M
+  frontend → mean-over-13-layers → BOS/EOS markers → CLaMP 3 audio
+  encoder → L2-norm, producing 768-dim vectors. Selected via
+  `EMBEDDER_BACKEND=clamp3` (`CLAMP3_CHECKPOINT` + `MERT_FOLDER`), behind
+  the new `[clamp3]` extra. `embed_text` is wired too: xlm-roberta-base
+  tokenize → MAX_TEXT_LENGTH-windowed CLaMP 3 text encoder →
+  token-count-weighted mean → L2-norm, into the *same* 768-dim joint
+  space as audio. Drives `GET /v1/recommend/station?text=…` (P6.9).
+- **ABTT whitening** (`music-recommend/src/whitening.rs`): CLaMP 3
+  embeddings are anisotropic (a narrow cone → inflated, poorly-separated
+  cosines, esp. for text-query stations). All-but-the-Top fixes this:
+  subtract the corpus mean, project out the top ~dim/100 principal
+  directions (power-iteration + deflation, no linalg dep), renormalize.
+  Fit *post-hoc* over the existing audio embeddings — **no re-embedding**.
+  The transform lives in `AnnIndex` (whitens on `upsert`/`rebuild_from`/
+  `query`; `None` = identity), so the ANN holds de-coned vectors and the
+  single rule "whiten a raw vector exactly once on entry" holds — the only
+  consumer change is `lookup_seed_vector` returning the raw SQLite row.
+  Cached per-model in `embedding_whitening` (migration 0011), fit-or-load
+  at boot, gated by `[recommend].whitening_enabled` (default true). Refit
+  via `POST /v1/recommend/refit_whitening`.
+- **Cross-modal text mean** (migration 0012, `whitening_text.rs`): ABTT is
+  fit on audio, but CLaMP 3 text embeddings sit at a modality-gap offset —
+  so audio-fit whitening *collapses* text station queries (verified live:
+  thrash vs ballad went 3/10 → 9/10 overlap). Fix: estimate `μ_text` by
+  embedding a fixed prompt corpus through the sidecar, center text queries
+  by it (not the audio mean) before the shared de-coning. `Whitening` holds
+  an optional `text_mean`; `AnnIndex::query_text` (station path) centers by
+  it, `query`/`upsert` use the audio mean. Text-mean only affects queries,
+  so attaching it needs **no ANN rebuild**. Fit lazily at boot when absent
+  + the embedder is up, and on every refit. `/next` (audio→audio) is
+  unaffected and clearly improved (two seeds → 0/10 overlap).
+- **Station collapse was actually a tokenizer bug, not geometry (fixed
+  2026-05-31, `e0e2955`).** The whitening/text-mean work above improved
+  but never resolved station collapse (thrash vs ballad stuck at 7-9/10,
+  some pairs 10/10 identical) because the real cause was upstream: the
+  embedder image's **xlm-roberta-base tokenizer loaded a degenerate
+  5-token vocab** (specials only) — every word tokenized to `<unk>`, so
+  "death metal" and "smooth jazz" produced identical token streams and
+  identical embeddings. Two packaging gaps: `sentencepiece` missing from
+  the `[clamp3]` extra *and* the explicit `RUN pip install` layers (those
+  images use `pip install --no-deps .`, so the extra alone never lands),
+  and the Dockerfile HF prebake fetched `AutoModel` but never
+  `AutoTokenizer` (runtime is `TRANSFORMERS_OFFLINE=1`). Fix adds
+  sentencepiece to both, prebakes the tokenizer, a build-time assert, and
+  a fail-loud runtime guard in `Clamp3Embedder.__init__`. Audio was never
+  affected (no tokenizer) — only text stations. Verified live after an
+  embedder rebuild + `text_mean` refit (no track re-embedding, text is
+  query-time): every collapsing pair → 0/10 overlap, results genre-coherent
+  (e.g. "smooth jazz" → Jazz×5/Funk×2; "boom bap hip hop" → Rap/Hip-Hop
+  ×8), `/next` unchanged. NB: with the tokenizer fixed, station collapse
+  disappears even with **no** whitening on the text path; the audio-fit
+  ABTT de-coning applied to text is marginally *worse* than not de-coning
+  (offline genre purity 0.44 vs ~0.57) — a possible follow-up to route the
+  station query path around de-coning. The audio whitening that drives
+  `/next` stays as-is.
+- Dim is now a per-backend property (not an app constant);
+  `EMBEDDER_STUB_DIM` lets the stub mimic the 768 wire shape in dev.
+- Deployment: `docker/embedder/Dockerfile.clamp3` (CPU) bakes MERT +
+  xlm-roberta-base into the HF cache; `docker-compose.clamp3.yml` flips
+  the gateway to 768 via `gen_config.py`'s new optional `[recommend]`
+  section. GPU twins `docker/embedder/Dockerfile.clamp3-rocm` +
+  `docker-compose.clamp3-rocm.yml` (rocm6.4 wheels, MIOpen kernel cache,
+  HF prebake) — the split-host shape, since the embedder runs on the
+  GPU host's GPU (RDNA4) and the gateway reaches it over the LAN.
+- **GPU image built + smoke-tested + swapped live (2026-05-30).** Real
+  forward pass on RDNA4 verified end-to-end: `/healthz` →
+  `dim:768, device:cuda`, saas `state_dict` aligns, output L2-normed
+  (norm=1.0), warm ~230 ms/clip (cold first call ~5 s = MIOpen JIT,
+  then cached). The GPU box's `:9000` embedder is now CLaMP 3 (was CLAP),
+  same container name + port + shared bearer token.
+
+**Deployment topology** (optionally split across two hosts):
+
+- **the NAS host** is the **gateway host** and is **CPU-only** (no GPU). It
+  runs `crates-gateway` (the live recommender consumer) + `crates-caddy`.
+  Its `EMBEDDER_URL` dials the GPU host's GPU sidecar over the LAN.
+  the NAS host's own `crates-embedder` (CLAP CPU) is vestigial — unused while
+  `EMBEDDER_URL` points off-box.
+- **The GPU host** (`192.0.2.53`) has the **AMD RDNA4
+  XT** and runs the **GPU embedder sidecar** (`crates-embedder`,
+  `embedder-clamp3-rocm:dev`) on `:9000`. It additionally runs a
+  caddy+gateway *cert/proxy test* instance with a deliberately-dead
+  embedder URL — not a recommender, ignore its health.
+
+**Production cutover on the NAS host — DONE (2026-05-31).** Verified live:
+
+- `crates-gateway` image rebuilt from this branch (built 2026-05-31
+  00:58, baked `gen_config.py` has full `RECOMMEND_EMBEDDING_DIM`
+  support); `RECOMMEND_EMBEDDING_DIM=768` set in the Custom App YAML and
+  reflected in the live `gateway.toml` (`[recommend] embedding_dim =
+  768`); the 512-dim ANN sidecar was wiped and rebuilt at 768 from
+  SQLite (**7349 embedded tracks**). Boot log: embedder probe
+  `dim=768 device=cuda`, whitening loaded (`k=7`), cross-modal text mean
+  fitted + persisted, plus a post-tokenizer-fix `refit_whitening`.
+- The GPU sidecar on the GPU host was rebuilt with the tokenizer fix
+  (`embedder-clamp3-rocm:dev`, built 2026-05-31 01:44): `sentencepiece`
+  present, full xlm-roberta vocab (`vocab_size=250002`, distinct token
+  streams per genre, 0 `<unk>`), `dim=768 device=cuda`.
+
+Cutover mechanics for reference (e.g. future model bumps): (1) rebuild
+`crates-music/gateway:dev` from the branch and ship to the NAS host
+(`scripts/ship-image.sh … nas-host`, `REMOTE_DOCKER="sudo docker"`);
+(2) set `RECOMMEND_EMBEDDING_DIM` in the NAS Custom App YAML;
+(3) wipe the old-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) —
+a dim change is non-migratable; (4) Save/restart; (5) re-embed via
+`scripts/enqueue_all_tracks.py` — recommender runs degraded until the
+GPU drains the queue.
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,

@@ -23,6 +23,7 @@ from embedder.reduce import (
     compute_pcs,
     decode_vector_blob,
     default_proj_version,
+    project_matrix,
     read_embeddings_from_sqlite,
     run,
     write_projections_to_sqlite,
@@ -450,3 +451,57 @@ def test_run_returns_zero_when_no_embeddings(
     )
     assert written == 0
     assert pv == default_proj_version(random_state=42)
+
+
+# --- project_matrix (vectors-over-the-wire) --------------------------------
+
+
+def test_project_matrix_rejects_track_id_count_mismatch() -> None:
+    matrix = np.zeros((3, 2), dtype=np.float32)
+    with pytest.raises(ValueError, match="track_ids"):
+        project_matrix(["only-one"], matrix)
+
+
+def test_project_matrix_delegates_to_project_embeddings(monkeypatch) -> None:
+    """project_matrix is a thin in-memory wrapper: it should build one
+    Embedding per row and forward the knobs verbatim to
+    project_embeddings (the pure UMAP+PCA core)."""
+    captured: dict = {}
+
+    def fake_project_embeddings(embeddings, **kwargs):
+        captured["track_ids"] = [e.track_id for e in embeddings]
+        captured["rows"] = [list(e.vector) for e in embeddings]
+        captured.update(kwargs)
+        return [Projection2D(track_id=e.track_id, x=0.0, y=0.0) for e in embeddings]
+
+    monkeypatch.setattr("embedder.reduce.project_embeddings", fake_project_embeddings)
+    matrix = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    out = project_matrix(
+        ["t1", "t2"],
+        matrix,
+        n_neighbors=20,
+        min_dist=0.25,
+        random_state=7,
+        metric="euclidean",
+        n_components=3,
+    )
+    assert [p.track_id for p in out] == ["t1", "t2"]
+    assert captured["track_ids"] == ["t1", "t2"]
+    assert captured["rows"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert captured["n_neighbors"] == 20
+    assert captured["min_dist"] == 0.25
+    assert captured["random_state"] == 7
+    assert captured["metric"] == "euclidean"
+    assert captured["n_components"] == 3
+
+
+def test_project_matrix_real_umap_3d_populates_z() -> None:
+    pytest.importorskip("umap")
+    rng = np.random.default_rng(0)
+    n = 30  # > default n_neighbors (15)
+    matrix = rng.standard_normal((n, 8)).astype(np.float32)
+    track_ids = [f"t{i}" for i in range(n)]
+    out = project_matrix(track_ids, matrix, n_components=3)
+    assert len(out) == n
+    assert [p.track_id for p in out] == track_ids
+    assert all(p.z is not None for p in out)

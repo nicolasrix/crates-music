@@ -448,103 +448,129 @@ async fn embed_audio_succeeds_when_server_timing_header_is_present() {
 
 // --- /reduce -----------------------------------------------------------------
 
-use music_recommend::embedder::{ReduceParams, ReduceResult};
+use base64::Engine;
+use music_recommend::embedder::ReduceParams;
 
-fn default_reduce_params() -> ReduceParams {
-    ReduceParams {
-        db_path: "/tmp/rec.sqlite".into(),
-        model_version: "stub-v1".into(),
-        proj_version: None,
-        n_neighbors: 15,
-        min_dist: 0.1,
-        random_state: 42,
-        n_components: 2,
+/// Pack a matrix the same way `EmbedderClient::reduce` does — row-major
+/// little-endian f32, base64 — so a test can assert on the exact wire
+/// body without hand-computing base64.
+fn pack_b64(vectors: &[Vec<f32>]) -> String {
+    let mut bytes = Vec::new();
+    for v in vectors {
+        for f in v {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
     }
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
+#[allow(clippy::float_cmp)] // exact literals from the mocked response
 #[tokio::test]
-async fn reduce_serializes_full_body_and_parses_response() {
+async fn reduce_packs_matrix_and_parses_points() {
     let server = MockServer::start().await;
+    let track_ids = vec!["t1".to_string(), "t2".to_string()];
+    let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
     Mock::given(method("POST"))
         .and(path("/reduce"))
         .and(body_json(json!({
-            "db_path": "/tmp/rec.sqlite",
-            "model_version": "stub-v1",
-            "proj_version": "auto-1",
+            "track_ids": ["t1", "t2"],
+            "dim": 2,
+            "vectors_b64": pack_b64(&vectors),
             "n_neighbors": 15,
             "min_dist": 0.1,
             "random_state": 42,
             "n_components": 2,
+            "metric": "cosine",
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "proj_version": "auto-1",
-            "written": 42,
+            "points": [
+                {"track_id": "t1", "x": 0.5, "y": -0.5, "z": null,
+                 "pc1": 0.1, "pc2": 0.2, "pc3": 0.3, "pc4": 0.4},
+                // Second point omits z/pc* — they must default to None.
+                {"track_id": "t2", "x": 1.5, "y": -1.5}
+            ]
         })))
         .mount(&server)
         .await;
 
     let client = client_for(&server);
-    let mut params = default_reduce_params();
-    params.proj_version = Some("auto-1".into());
-    let out: ReduceResult = client.reduce(&params).await.expect("reduce");
-    assert_eq!(out.proj_version, "auto-1");
-    assert_eq!(out.written, 42);
-}
-
-#[tokio::test]
-async fn reduce_omits_proj_version_when_none() {
-    // When proj_version is None, the field must serialise as JSON null
-    // (or be absent). The embedder's pydantic model accepts either —
-    // null is the simpler wire shape and avoids "default missing" foot-
-    // guns when both sides change at once.
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/reduce"))
-        .and(body_json(json!({
-            "db_path": "/tmp/rec.sqlite",
-            "model_version": "stub-v1",
-            "proj_version": null,
-            "n_neighbors": 15,
-            "min_dist": 0.1,
-            "random_state": 42,
-            "n_components": 2,
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "proj_version": "derived-from-defaults",
-            "written": 0,
-        })))
-        .mount(&server)
-        .await;
-
-    let client = client_for(&server);
-    let out = client
-        .reduce(&default_reduce_params())
+    let points = client
+        .reduce(&track_ids, &vectors, 2, &ReduceParams::default())
         .await
         .expect("reduce");
-    assert_eq!(out.proj_version, "derived-from-defaults");
-    assert_eq!(out.written, 0);
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0].track_id, "t1");
+    assert_eq!(points[0].x, 0.5);
+    assert_eq!(points[0].y, -0.5);
+    assert_eq!(points[0].pc1, Some(0.1));
+    assert_eq!(points[0].pc4, Some(0.4));
+    assert_eq!(points[0].z, None);
+    assert_eq!(points[1].track_id, "t2");
+    assert_eq!(points[1].pc1, None);
+    assert_eq!(points[1].z, None);
+}
+
+#[allow(clippy::float_cmp)] // exact literal from the mocked response
+#[tokio::test]
+async fn reduce_3d_sends_n_components_three_and_reads_z() {
+    let server = MockServer::start().await;
+    let track_ids = vec!["t1".to_string()];
+    let vectors = vec![vec![1.0f32, 2.0, 3.0]];
+    Mock::given(method("POST"))
+        .and(path("/reduce"))
+        .and(body_json(json!({
+            "track_ids": ["t1"],
+            "dim": 3,
+            "vectors_b64": pack_b64(&vectors),
+            "n_neighbors": 15,
+            "min_dist": 0.1,
+            "random_state": 42,
+            "n_components": 3,
+            "metric": "cosine",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "points": [{"track_id": "t1", "x": 1.0, "y": 2.0, "z": 3.0}]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let params = ReduceParams {
+        n_components: 3,
+        ..ReduceParams::default()
+    };
+    let points = client
+        .reduce(&track_ids, &vectors, 3, &params)
+        .await
+        .expect("reduce");
+    assert_eq!(points[0].z, Some(3.0));
 }
 
 #[tokio::test]
 async fn reduce_400_maps_to_server_error() {
-    // The embedder returns 400 when the SQLite path doesn't exist;
-    // surface that as a Server error so the gateway can log a clear
-    // diagnostic and pause auto-trigger retries.
+    // The embedder 400s on a malformed request (e.g. a byte-length
+    // mismatch); surface that as a Server error so the gateway can log
+    // a clear diagnostic and pause auto-trigger retries.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/reduce"))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "detail": "db_path does not exist: /tmp/nope.sqlite",
+            "detail": "vectors_b64 decodes to 8 bytes, expected 16",
         })))
         .mount(&server)
         .await;
 
     let client = client_for(&server);
-    let err = client.reduce(&default_reduce_params()).await.unwrap_err();
+    let ids = vec!["t1".to_string()];
+    let vecs = vec![vec![0.0f32, 0.0]];
+    let err = client
+        .reduce(&ids, &vecs, 2, &ReduceParams::default())
+        .await
+        .unwrap_err();
     match err {
         EmbedderError::Server { status, body } => {
             assert_eq!(status, 400);
-            assert!(body.contains("db_path"));
+            assert!(body.contains("vectors_b64"));
         }
         other => panic!("expected Server, got {other:?}"),
     }
@@ -565,7 +591,12 @@ async fn reduce_503_maps_to_model_not_loaded() {
         .await;
 
     let client = client_for(&server);
-    let err = client.reduce(&default_reduce_params()).await.unwrap_err();
+    let ids = vec!["t1".to_string()];
+    let vecs = vec![vec![0.0f32, 0.0]];
+    let err = client
+        .reduce(&ids, &vecs, 2, &ReduceParams::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, EmbedderError::ModelNotLoaded), "got {err:?}");
 }
 

@@ -1,0 +1,69 @@
+# CLaMP 3-variant compose override (CPU).
+#
+# Use:
+#   cp docker/.env.example .env
+#   $EDITOR .env                       # set NAVIDROME_*, CRATES_CONFIG_DIR
+#   docker compose -f docker-compose.yml -f docker-compose.clamp3.yml up --build
+#
+# Swaps the stub embedder for the CPU CLaMP 3 variant and flips the
+# gateway to the 768-dim embedding space CLaMP 3 produces.
+#
+# ─── One-time cutover from CLAP/stub (512-dim) ────────────────────────
+# CLaMP 3 vectors are 768-dim; the existing ANN sidecar (if any) was
+# built at 512. They are NOT migratable — the ANN commits to its dim on
+# open. Before the first boot on this variant, delete the stale sidecar
+# from the gw-data volume so it rebuilds at 768:
+#
+#   docker compose run --rm --entrypoint sh gateway -c \
+#     'rm -f /data/state/gateway-state.ann /data/state/gateway-state.ann.keys'
+#
+# The library then re-embeds under the new model_version (the checkpoint
+# filename) via the ingest queue — degraded/empty recommendations until
+# that drains. On CPU this is the slow part; expect hours for a large
+# library.
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clamp3
+    image: crates-music/embedder-clamp3:dev
+    environment:
+      EMBEDDER_BACKEND: clamp3
+      # The checkpoint filename IS the embedding model_version — keep the
+      # real upstream name. Override only if your file differs; if so,
+      # match it in the bind-mount below too. Defaults to the canonical
+      # saas filename baked into the image.
+      CLAMP3_CHECKPOINT: ${CLAMP3_CHECKPOINT:-/models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth}
+      # MERT-v1-95M + xlm-roberta-base are baked into the image's HF cache,
+      # so the hub id resolves offline. Point at a /models path instead if
+      # you bind-mount a local MERT copy.
+      MERT_FOLDER: ${MERT_FOLDER:-m-a-p/MERT-v1-95M}
+      # OMP/MKL/NUMBA thread caps are set in the Dockerfile; uncomment to
+      # override per-deploy.
+      # OMP_NUM_THREADS: 8
+    volumes:
+      # Bind-mount the embedder's `models/` subdir under the crates config
+      # dir on the host (e.g. a `crates` dir on your NAS's configs
+      # dataset) read-only. The saas .pth lives at
+      # $CRATES_CONFIG_DIR/models/<file> and the container reads it at
+      # /models/<file> (the in-container path baked as CLAMP3_CHECKPOINT).
+      # We mount the dir (not the single file) so CLAMP3_CHECKPOINT can name
+      # the real file without a per-file bind. The .pth is large and
+      # operators provide it — it's never baked into the image.
+      - type: bind
+        source: ${CRATES_CONFIG_DIR:?set CRATES_CONFIG_DIR to the crates dir under your configs dataset, e.g. /mnt/pool/configs/crates}/models
+        target: /models
+        read_only: true
+    # CLaMP 3 holds the saas checkpoint + MERT-95M + xlm-roberta-base in
+    # RAM (several GB of float32) plus torch working memory. 6 GB is the
+    # conservative default; lower once you've measured your host.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-6g}
+
+  gateway:
+    environment:
+      # CLaMP 3's joint embedding space is 768-dim (CLAP was 512). The
+      # gateway templates [recommend] embedding_dim from this env via
+      # gen_config.py. Must match the embedder's /healthz dim or the ANN
+      # open will fail loudly at boot.
+      RECOMMEND_EMBEDDING_DIM: "768"

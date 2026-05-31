@@ -265,6 +265,49 @@ def project_embeddings(
     ]
 
 
+def project_matrix(
+    track_ids: Sequence[str],
+    matrix: np.ndarray,
+    *,
+    n_neighbors: int = DEFAULT_N_NEIGHBORS,
+    min_dist: float = DEFAULT_MIN_DIST,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    metric: str = DEFAULT_METRIC,
+    n_components: int = 2,
+) -> list[Projection2D]:
+    """Project an in-memory ``(N, D)`` matrix — the vectors-over-the-wire
+    counterpart to :func:`run`.
+
+    `run` reads embeddings from SQLite and writes the result back; this
+    takes the matrix directly and returns the projections, touching no
+    filesystem. The gateway reads its own recommend DB, ships the matrix
+    to the ``/reduce`` endpoint, and persists the returned coordinates
+    itself — so reduction no longer assumes the embedder can see the
+    gateway's SQLite file (it can't, in a split GPU-host deployment).
+
+    Pure (modulo BLAS-level FP rounding): same inputs + params → same
+    outputs. `model_version` is irrelevant here (it's the caller's
+    persistence key, not an input to UMAP), so the synthesized
+    `Embedding` rows carry an empty one.
+    """
+    if len(track_ids) != matrix.shape[0]:
+        raise ValueError(
+            f"track_ids ({len(track_ids)}) != matrix rows ({matrix.shape[0]})"
+        )
+    embeddings = [
+        Embedding(track_id=t, model_version="", vector=matrix[i])
+        for i, t in enumerate(track_ids)
+    ]
+    return project_embeddings(
+        embeddings,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        random_state=random_state,
+        metric=metric,
+        n_components=n_components,
+    )
+
+
 def write_projections_to_sqlite(
     conn: sqlite3.Connection,
     model_version: str,

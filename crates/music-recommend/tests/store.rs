@@ -306,3 +306,51 @@ async fn vectors_round_trip_negatives_and_subnormals() {
     let got = store.get(&k).await.unwrap().unwrap();
     assert_eq!(got.vector, v);
 }
+
+#[tokio::test]
+async fn list_done_embeddings_returns_done_rows_ordered_by_track_id() {
+    let (store, _dir) = fresh_store().await;
+    let model = ModelVersion::from("clap-v1");
+
+    // Two done rows (inserted out of track_id order), one still queued
+    // (must be excluded), and one under a different model_version.
+    for (track, vec) in [
+        ("t-b", vec![3.0_f32, 4.0]),
+        ("t-a", vec![1.0_f32, 2.0]),
+    ] {
+        let k = key(track, "clap-v1");
+        store.enqueue(&k).await.unwrap();
+        store.claim_next(&model).await.unwrap();
+        store
+            .mark_done(&Embedding::new(k, vec))
+            .await
+            .unwrap();
+    }
+    // Not-yet-embedded: enqueued but not done.
+    store.enqueue(&key("t-c", "clap-v1")).await.unwrap();
+    // Different model: done, but must not appear in clap-v1's list.
+    let other = key("t-d", "clap-v2");
+    store.enqueue(&other).await.unwrap();
+    store.claim_next(&ModelVersion::from("clap-v2")).await.unwrap();
+    store
+        .mark_done(&Embedding::new(other, vec![9.0_f32, 9.0]))
+        .await
+        .unwrap();
+
+    let got = store.list_done_embeddings(&model).await.unwrap();
+    let ids: Vec<&str> = got.iter().map(|e| e.key.track_id.as_str()).collect();
+    assert_eq!(ids, vec!["t-a", "t-b"]); // ordered by track_id, done-only, model-scoped
+    assert_eq!(got[0].vector, vec![1.0_f32, 2.0]);
+    assert_eq!(got[1].vector, vec![3.0_f32, 4.0]);
+}
+
+#[tokio::test]
+async fn list_done_embeddings_empty_when_none_done() {
+    let (store, _dir) = fresh_store().await;
+    store.enqueue(&key("t1", "clap-v1")).await.unwrap();
+    let got = store
+        .list_done_embeddings(&ModelVersion::from("clap-v1"))
+        .await
+        .unwrap();
+    assert!(got.is_empty());
+}

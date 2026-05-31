@@ -136,10 +136,14 @@ async fn missing_duration_falls_back_to_offset_zero() {
 }
 
 #[tokio::test]
-async fn mp3_source_skips_transcode_and_keeps_offset() {
-    // When the source codec is already MP3, the fetcher must skip the
-    // ?format=mp3&maxBitRate=192 params — those force Navidrome to run
-    // ffmpeg at realtime rate, which dominates wall-clock per fetch.
+async fn mp3_source_also_transcodes() {
+    // MP3 sources transcode too. The old raw-MP3 fast path (no
+    // ?format=mp3) mis-decoded VBR-header MP3s when the byte Range
+    // truncated them: the file's Xing header claims the full track
+    // length, so a truncated clip decodes to ~0.1 s — below MERT's 6 s
+    // floor. Forcing a transcode yields a fresh header-less stream that
+    // survives the Range cap. Navidrome honours the Range for MP3→MP3,
+    // so the clip stays bounded.
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -158,8 +162,8 @@ async fn mp3_source_skips_transcode_and_keeps_offset() {
     Mock::given(method("GET"))
         .and(path("/rest/stream"))
         .and(query_param("id", "t-mp3"))
-        .and(query_param_is_missing("format"))
-        .and(query_param_is_missing("maxBitRate"))
+        .and(query_param("format", "mp3"))
+        .and(query_param("maxBitRate", "192"))
         .and(query_param("timeOffset", "515"))
         .and(header_regex("range", r"^bytes=0-\d{6}$"))
         .respond_with(ResponseTemplate::new(206).set_body_bytes(b"mp3-bytes".to_vec()))

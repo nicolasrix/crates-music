@@ -24,6 +24,9 @@ Optional env (with defaults):
     EMBEDDER_TIMEOUT_SECONDS    30 (only used if EMBEDDER_URL set)
     EMBEDDER_BEARER_TOKEN       (unset/empty → no bearer_token field;
                                  only used if EMBEDDER_URL set)
+    RECOMMEND_EMBEDDING_DIM     (unset → no [recommend] section, gateway
+                                 defaults to 512 for CLAP; set to 768 for
+                                 the CLaMP 3 embedder)
 """
 
 from __future__ import annotations
@@ -61,7 +64,8 @@ def build_config(env: Mapping[str, str]) -> str:
     """Render a `gateway.toml` string from `env`.
 
     Validates required keys, applies defaults, and emits TOML in a
-    fixed section order (server, upstream, cache, oauth, embedder).
+    fixed section order (server, upstream, cache, oauth, embedder,
+    recommend).
     """
     for key in REQUIRED:
         value = env.get(key, "")
@@ -102,6 +106,23 @@ def build_config(env: Mapping[str, str]) -> str:
             raise ConfigError(
                 f"EMBEDDER_TIMEOUT_SECONDS must be an integer: {e}"
             ) from e
+
+    # Optional [recommend] section. Only emitted when explicitly set, so
+    # existing CLAP/stub deploys render byte-identical config (the gateway
+    # then applies its 512 default). Set to 768 for the CLaMP 3 embedder.
+    embedding_dim_raw = env.get("RECOMMEND_EMBEDDING_DIM", "").strip()
+    embedding_dim: int | None = None
+    if embedding_dim_raw:
+        try:
+            embedding_dim = int(embedding_dim_raw)
+        except ValueError as e:
+            raise ConfigError(
+                f"RECOMMEND_EMBEDDING_DIM must be an integer: {e}"
+            ) from e
+        if embedding_dim <= 0:
+            raise ConfigError(
+                f"RECOMMEND_EMBEDDING_DIM must be positive, got {embedding_dim}"
+            )
 
     parts: list[str] = []
 
@@ -145,6 +166,11 @@ def build_config(env: Mapping[str, str]) -> str:
         parts.append(f"timeout_seconds = {embedder_timeout}")
         if embedder_bearer is not None:
             parts.append(f"bearer_token = {_str(embedder_bearer)}")
+        parts.append("")
+
+    if embedding_dim is not None:
+        parts.append("[recommend]")
+        parts.append(f"embedding_dim = {embedding_dim}")
         parts.append("")
 
     return "\n".join(parts) + "\n"
