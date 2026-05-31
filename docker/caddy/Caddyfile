@@ -60,12 +60,35 @@
 		-Server
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		# HSTS deliberately commented out for first deploy. Turn on
-		# AFTER you've watched at least one renewal cycle succeed —
-		# browsers cache HSTS for `max-age` seconds, so a premature
-		# enable + cert mishap leaves clients unable to reach the
-		# site over plain HTTP for fallback.
-		# Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# Clickjacking defence: refuse to be framed. `frame-ancestors`
+		# (in the CSP below) covers modern browsers; X-Frame-Options is
+		# the legacy fallback for older ones.
+		X-Frame-Options "DENY"
+
+		# HSTS: force HTTPS for a year. Enabled now that public-trust LE
+		# issuance + DNS-01 auto-renewal is established (prod cutover
+		# done). No `preload` — that's a separate, hard-to-undo commitment
+		# requiring submission to the browser preload list. Caveat that
+		# motivated the earlier caution: once a client has seen this header
+		# it refuses plain-HTTP fallback to this host for `max-age`
+		# seconds, so a prolonged cert outage locks clients out. The
+		# renewal cycle has been observed succeeding, so that's acceptable.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# Content-Security-Policy, tuned to exactly what the SPA loads:
+		#   - script-src 'self': all JS is hashed, same-origin Vite assets
+		#     — the production index.html emits no inline script, so this
+		#     stays strict (real XSS protection, no 'unsafe-inline').
+		#   - style-src adds 'unsafe-inline' (React inline style attrs +
+		#     runtime <style> injection) and the Google Fonts CSS host.
+		#   - font-src adds the Google Fonts file host (gstatic).
+		#   - connect-src 'self' covers the gateway API and the
+		#     same-origin wss:// sync socket.
+		#   - img/media allow data:/blob: for placeholders + audio.
+		#   - object-src 'none', base-uri 'self', form-action 'self',
+		#     frame-ancestors 'none' lock down the remaining vectors.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 	}
 
 	log {
