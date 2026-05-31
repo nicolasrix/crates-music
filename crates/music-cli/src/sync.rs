@@ -21,7 +21,7 @@ use crate::config::{Config, GatewayConfig};
 pub async fn run_state(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
     let url = format!("{}/v1/sync/snapshot", gw.url.trim_end_matches('/'));
-    let body: serde_json::Value = http_client()
+    let body: serde_json::Value = http_client(gw)?
         .get(&url)
         .bearer_auth(&gw.bearer_token)
         .send()
@@ -39,7 +39,7 @@ pub async fn run_state(config: &Config) -> Result<()> {
 pub async fn run_push(config: &Config, track_ids: &[String]) -> Result<()> {
     let gw = require_gateway(config)?;
     let url = format!("{}/v1/sync/ops", gw.url.trim_end_matches('/'));
-    let client = http_client();
+    let client = http_client(gw)?;
     for track_id in track_ids {
         let item_id = new_item_id();
         let op = SyncOp::Push {
@@ -105,14 +105,41 @@ fn require_gateway(config: &Config) -> Result<&GatewayConfig> {
         .ok_or_else(|| anyhow::anyhow!("`music sync` requires a [gateway] block in the CLI config"))
 }
 
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        // mkcert-issued certs aren't in the system store on every dev
-        // machine; the gateway is local-network only so trusting the
-        // configured URL is reasonable.
-        .danger_accept_invalid_certs(true)
-        .build()
-        .expect("reqwest client builds with invalid-cert acceptance")
+/// Build the HTTPS client used for the gateway REST calls.
+///
+/// Verification is **on** by default (system trust store). The gateway's
+/// mkcert-issued `gateway.local` cert won't be in every machine's store,
+/// so `[gateway].ca_cert_path` can point at the mkcert root CA — it's
+/// added as an extra trust anchor, which keeps a real MITM cert (signed
+/// by neither the system roots nor that CA) rejected. `insecure_tls` is a
+/// loud, opt-in escape hatch that restores the old accept-anything
+/// behaviour for throwaway setups.
+fn http_client(gw: &GatewayConfig) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+
+    if let Some(ca_path) = &gw.ca_cert_path {
+        let pem = std::fs::read(ca_path)
+            .with_context(|| format!("reading gateway CA cert at {}", ca_path.display()))?;
+        // A PEM file may bundle a chain; trust every cert it contains.
+        let certs = reqwest::Certificate::from_pem_bundle(&pem)
+            .with_context(|| format!("parsing CA cert(s) at {}", ca_path.display()))?;
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+
+    if gw.insecure_tls {
+        eprintln!(
+            "WARNING: [gateway].insecure_tls is set — TLS certificate \
+             verification is DISABLED, so anyone who can intercept the \
+             connection can read your bearer token. Set \
+             [gateway].ca_cert_path to the mkcert root CA (`mkcert -CAROOT`) \
+             instead."
+        );
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    builder.build().context("building gateway HTTP client")
 }
 
 /// Convert https://host[:port] → wss://host[:port]<path> (and http→ws).

@@ -27,6 +27,19 @@ pub struct ServerConfig {
 pub struct GatewayConfig {
     pub url: String,
     pub bearer_token: String,
+    /// Path to a PEM file holding the CA that issued the gateway's TLS
+    /// cert — typically the mkcert root CA (`mkcert -CAROOT`/`rootCA.pem`).
+    /// Added as an *extra* trust anchor on top of the system store, so the
+    /// CLI verifies a `gateway.local` cert without installing the CA
+    /// system-wide. When unset, only the system trust store is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert_path: Option<PathBuf>,
+    /// Escape hatch: disable TLS certificate verification entirely. This
+    /// re-exposes the bearer token to anyone who can MITM the connection,
+    /// so it's only for throwaway/debug setups — prefer `ca_cert_path`.
+    /// Off by default; the CLI prints a loud warning when it's on.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 /// On-disk audio cache parameters. Defaults: 10 GB regular, 5 GB pinned,
