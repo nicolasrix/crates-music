@@ -22,7 +22,7 @@ import binascii
 import logging
 import os
 import re
-from typing import Annotated, Mapping
+from typing import Annotated, Literal, Mapping
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -125,11 +125,22 @@ class ReduceRequest(BaseModel):
         description="base64 of N*D little-endian float32, row-major "
         "(np.frombuffer(dtype='<f4')).",
     )
-    n_neighbors: int = reduce_module.DEFAULT_N_NEIGHBORS
-    min_dist: float = reduce_module.DEFAULT_MIN_DIST
+    # Bounds keep a caller (the gateway, but be defensive) from steering
+    # UMAP into a pathologically slow or nonsensical run. n_neighbors is
+    # capped well above any single-user library; min_dist is a [0, 1] knob
+    # by UMAP's own definition.
+    n_neighbors: int = Field(reduce_module.DEFAULT_N_NEIGHBORS, gt=0, le=500)
+    min_dist: float = Field(reduce_module.DEFAULT_MIN_DIST, ge=0.0, le=1.0)
     random_state: int = reduce_module.DEFAULT_RANDOM_STATE
     n_components: int = Field(2, ge=2, le=3)
-    metric: str = reduce_module.DEFAULT_METRIC
+    # Allowlist the distance metric rather than passing an arbitrary string
+    # through to UMAP: an unknown metric is a 422 at the edge instead of a
+    # deep ValueError (or an unexpected/expensive code path) inside the
+    # reducer. These four cover the geometries we use; "cosine" matches the
+    # L2-normalized embedding space.
+    metric: Literal["cosine", "euclidean", "manhattan", "correlation"] = (
+        reduce_module.DEFAULT_METRIC
+    )
 
 
 class ReducePoint(BaseModel):
@@ -403,11 +414,16 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
                 detail=f"reduce extra not installed (umap/sklearn): {e}",
             ) from e
         except ValueError as e:
-            # Bad knobs (n_components ∉ {2,3}, an unknown UMAP `metric`,
-            # n_neighbors ≥ N) raise ValueError from the reducer. That's
-            # a caller bug, not a server fault — surface a 400 rather
-            # than an opaque 500.
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            # The reducer still raises ValueError for data-dependent bad
+            # knobs that pydantic can't catch up front — chiefly
+            # n_neighbors >= N (more neighbors than points). That's a 400
+            # (caller bug), but the exception text can carry internal
+            # detail (array shapes, library internals), so we log it at
+            # WARNING server-side and return a fixed, non-leaky message.
+            _log.warning("reduce rejected request: %s", e)
+            raise HTTPException(
+                status_code=400, detail="invalid reduction parameters"
+            ) from e
         return ReduceResponse(
             points=[
                 ReducePoint(

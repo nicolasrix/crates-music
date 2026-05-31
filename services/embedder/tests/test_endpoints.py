@@ -342,13 +342,18 @@ def test_reduce_returns_503_when_umap_extra_missing(
     assert "umap" in r.json()["detail"].lower() or "reduce" in r.json()["detail"].lower()
 
 
-def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
-    # Knobs only the reducer can validate (an unknown metric, n_neighbors ≥ N)
-    # raise ValueError from the reducer — a caller bug, surfaced as 400
-    # rather than an opaque 500. (Out-of-range n_components is rejected
-    # earlier by Pydantic as 422 — see test_reduce_rejects_bad_n_components.)
+def test_reduce_returns_400_with_sanitized_detail_on_reducer_valueerror(
+    app_with_loaded_stub, monkeypatch
+):
+    # Data-dependent knobs only the reducer can validate (chiefly
+    # n_neighbors ≥ N) raise ValueError from inside UMAP — a caller bug,
+    # surfaced as 400. The exception text can carry internal detail
+    # (array shapes, library internals), so the response body must be a
+    # fixed, non-leaky message and the specifics logged server-side only.
+    leaky = "n_neighbors=20 >= n_samples=1; internal array shape (1, 2)"
+
     def fake_project_matrix(track_ids, matrix, **kwargs):
-        raise ValueError("unknown metric 'bogus'")
+        raise ValueError(leaky)
 
     monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
@@ -359,11 +364,47 @@ def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
             "track_ids": ["t1"],
             "dim": 2,
             "vectors_b64": _pack([[1.0, 2.0]]),
-            "metric": "bogus",
+            "metric": "cosine",
         },
     )
     assert r.status_code == 400
-    assert "metric" in r.json()["detail"]
+    assert r.json()["detail"] == "invalid reduction parameters"
+    # The internal exception text must not leak to the client.
+    assert "n_samples" not in r.text
+    assert "array shape" not in r.text
+
+
+def test_reduce_rejects_unknown_metric_with_422(app_with_loaded_stub):
+    # The metric is allowlisted at the schema level (Literal), so an
+    # unknown metric is rejected as a 422 before the handler runs —
+    # never passed through to UMAP.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "metric": "bogus",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_reduce_rejects_out_of_range_knobs_with_422(app_with_loaded_stub):
+    # n_neighbors and min_dist are bounded at the schema level.
+    client = TestClient(app_with_loaded_stub)
+    for bad in ({"n_neighbors": 0}, {"n_neighbors": 9999}, {"min_dist": -0.1}, {"min_dist": 2.0}):
+        r = client.post(
+            "/reduce",
+            json={
+                "track_ids": ["t1"],
+                "dim": 2,
+                "vectors_b64": _pack([[1.0, 2.0]]),
+                **bad,
+            },
+        )
+        assert r.status_code == 422, f"expected 422 for {bad}, got {r.status_code}"
 
 
 def test_reduce_rejects_bad_n_components(app_with_loaded_stub):
