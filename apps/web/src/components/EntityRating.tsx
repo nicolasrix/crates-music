@@ -2,11 +2,12 @@
 // the recommendation thumbs (RecommendationFeedback). This rates *the entity
 // itself*: a like boosts it (and its tracks) in recommendations and adds it
 // to the Liked page; a dislike excludes it from play entirely (its tracks are
-// dropped from recommendations and the player auto-skips them). The boost is
-// weighted server-side track > album > artist. Heart / HeartCrack icons keep
-// it visually separate from the ThumbsUp/ThumbsDown rec-feedback.
+// dropped from recommendations and the player skips them when the queue next
+// lands on one). The boost is weighted server-side track > album > artist.
+// ThumbsUp / ThumbsDown read as a clear two-way verdict — a filled-in dislike
+// no longer looks like a like (the old Heart/HeartCrack pair did).
 
-import { Heart, HeartCrack } from "lucide-react";
+import { ThumbsUp, ThumbsDown } from "lucide-react";
 import { useEntityRating } from "../player/useRatings";
 import type { EntityKind } from "../api/library";
 
@@ -26,7 +27,7 @@ const LIKE_HINT: Record<EntityKind, string> = {
 };
 
 const DISLIKE_HINT: Record<EntityKind, string> = {
-  track: "dislike — excluded from recommendations and auto-skipped",
+  track: "dislike — excluded from recommendations and skipped when it next comes up",
   album: "dislike — excludes this album from play and recommendations",
   artist: "dislike — excludes this artist from play and recommendations",
 };
@@ -54,7 +55,7 @@ export function EntityRating({
         disabled={pending || !id}
         onClick={() => set("like")}
       >
-        <Heart size={14} strokeWidth={1.75} fill={rating === "like" ? "currentColor" : "none"} />
+        <ThumbsUp size={14} strokeWidth={1.75} fill={rating === "like" ? "currentColor" : "none"} />
       </button>
       <button
         type="button"
@@ -65,7 +66,7 @@ export function EntityRating({
         disabled={pending || !id}
         onClick={() => set("dislike")}
       >
-        <HeartCrack
+        <ThumbsDown
           size={14}
           strokeWidth={1.75}
           fill={rating === "dislike" ? "currentColor" : "none"}

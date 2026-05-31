@@ -89,6 +89,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Advance direction: +1 normally, -1 only while stepping backward
   // (prev / media previoustrack). Reset to +1 by forward moves.
   const advanceDirRef = useRef<1 | -1>(1);
+  // The last track id this effect classified. Auto-skip fires only when the
+  // *current* track id changes (a genuine advance onto a new track) — not
+  // when the effect re-runs because `ratings` changed. That distinction is
+  // what lets you dislike the song that's playing right now without it being
+  // yanked out from under you.
+  const lastClassifiedRef = useRef<string | null>(null);
 
   // Declared *before* the src-set effect below so, on a track change, this
   // runs first: it can set pendingSkipRef and redirect the cursor before the
@@ -96,14 +102,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!currentTrackId) return;
     // Fail open while ratings are unknown — never skip a track we can't
-    // yet classify.
+    // yet classify. (Ref left untouched so a genuine advance pending here is
+    // still evaluated once ratings load.)
     if (ratings === undefined) return;
+    // Did the queue just advance onto a *new* track? Only then do we consider
+    // auto-skipping. A re-run with the same current track (e.g. the user just
+    // disliked the song that's playing) must leave playback alone — the
+    // dislike still removes it from recommendations and skips it the next time
+    // the queue would land on it.
+    const advanced = currentTrackId !== lastClassifiedRef.current;
+    lastClassifiedRef.current = currentTrackId;
     // Direct single-track click overrides the skip (consume the marker).
     if (directPlayRef.current === currentTrackId) {
       directPlayRef.current = null;
       pendingSkipRef.current = null;
       return;
     }
+    // In-place dislike of the currently-playing track: don't yank it.
+    if (!advanced) return;
     // Disliked at the track, album, or artist level. Album/artist need the
     // queue item's hydrated metadata (album_id / artist_id), which we read
     // from the sync layer's trackMeta map.
