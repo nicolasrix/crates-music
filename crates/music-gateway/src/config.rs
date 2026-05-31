@@ -211,12 +211,57 @@ pub enum ConfigError {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path)?;
+        // The config holds the bearer token and the upstream Navidrome
+        // password in cleartext, so it should be owner-only (chmod 600).
+        // Warn — but don't refuse to boot — if it's group/world-accessible;
+        // failing hard here would be a footgun on a fresh deploy.
+        #[cfg(unix)]
+        warn_if_world_readable(path);
         let cfg = toml::from_str(&raw)?;
         Ok(cfg)
     }
 
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         Ok(toml::from_str(s)?)
+    }
+}
+
+/// True if any group or "other" permission bit is set — i.e. the file is
+/// readable (or worse) by someone other than its owner. `0o077` masks the
+/// group+other rwx bits; owner bits (`0o700`) are intentionally ignored.
+#[cfg(unix)]
+fn mode_is_group_or_world_accessible(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// Log a warning if the config file is accessible beyond its owner. Best
+/// effort: a stat failure is downgraded to debug rather than escalated,
+/// since the file was just read successfully.
+#[cfg(unix)]
+fn warn_if_world_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode();
+            if mode_is_group_or_world_accessible(mode) {
+                tracing::warn!(
+                    path = %path.display(),
+                    mode = format!("{:o}", mode & 0o777),
+                    "gateway config is group/world-accessible but holds the \
+                     bearer token and upstream password in cleartext; \
+                     restrict it with: chmod 600 {}",
+                    path.display(),
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "could not stat gateway config for a permission check",
+            );
+        }
     }
 }
 
@@ -258,6 +303,21 @@ mod tests {
         let embedder_dbg = format!("{embedder:?}");
         assert!(!embedder_dbg.contains("embedder-secret"));
         assert!(embedder_dbg.contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_predicate_flags_group_and_world_access() {
+        // Owner-only is fine.
+        assert!(!mode_is_group_or_world_accessible(0o600));
+        assert!(!mode_is_group_or_world_accessible(0o400));
+        assert!(!mode_is_group_or_world_accessible(0o700));
+        // Any group or other bit trips it.
+        assert!(mode_is_group_or_world_accessible(0o640)); // group read
+        assert!(mode_is_group_or_world_accessible(0o604)); // other read
+        assert!(mode_is_group_or_world_accessible(0o644));
+        assert!(mode_is_group_or_world_accessible(0o660));
+        assert!(mode_is_group_or_world_accessible(0o666));
     }
 
     #[test]
