@@ -104,11 +104,17 @@ override when running CLaMP 3.
 |---|---|---|---|---|
 | `embedding_dim` | usize | no | `512` | Must match the embedder backend's output dim. CLAP = 512, CLaMP 3 = 768. The ANN sidecar is not migratable across a dim change — wipe `gateway-state.ann` + `.ann.keys` when changing it. |
 | `whitening_enabled` | bool | no | `true` | All-but-the-Top whitening of the content ANN. De-cones the anisotropic CLaMP 3 vectors and enables cross-modal text-station centering. |
+| `preference_enabled` | bool | no | `false` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. |
+| `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. |
+| `affinity_half_life_days` | f32 | no | `30.0` | Half-life of the per-track affinity decayed counter. Older signal fades toward zero with this half-life so taste can drift. |
 
 ```toml
 [recommend]
-embedding_dim     = 768   # CLaMP 3; default 512 (CLAP)
-whitening_enabled = true
+embedding_dim          = 768   # CLaMP 3; default 512 (CLAP)
+whitening_enabled      = true
+preference_enabled     = false # tilt ranking by like/skip/play affinity
+preference_weight      = 0.15
+affinity_half_life_days = 30.0
 ```
 
 ## CLI config (`~/.config/crates-music/config.toml`)

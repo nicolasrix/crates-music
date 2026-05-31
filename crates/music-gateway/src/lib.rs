@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod embedder;
 pub mod events;
 pub mod ingest;
+pub mod library_rating;
 pub mod oauth;
 pub mod proxy;
 pub mod ratelimit;

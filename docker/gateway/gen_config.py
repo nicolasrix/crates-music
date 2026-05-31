@@ -24,9 +24,17 @@ Optional env (with defaults):
     EMBEDDER_TIMEOUT_SECONDS    30 (only used if EMBEDDER_URL set)
     EMBEDDER_BEARER_TOKEN       (unset/empty → no bearer_token field;
                                  only used if EMBEDDER_URL set)
-    RECOMMEND_EMBEDDING_DIM     (unset → no [recommend] section, gateway
-                                 defaults to 512 for CLAP; set to 768 for
-                                 the CLaMP 3 embedder)
+    RECOMMEND_EMBEDDING_DIM     (unset → gateway defaults to 512 for CLAP;
+                                 set to 768 for the CLaMP 3 embedder)
+    RECOMMEND_PREFERENCE_ENABLED        (bool; gateway default false — turns
+                                         on per-track feedback re-scoring)
+    RECOMMEND_PREFERENCE_WEIGHT         (float >= 0; gateway default 0.15)
+    RECOMMEND_AFFINITY_HALF_LIFE_DAYS   (float > 0; gateway default 30)
+    RECOMMEND_LIKE_BONUS                (float >= 0; gateway default 0.15 —
+                                         always-on durable-like boost)
+
+The [recommend] section is emitted when any RECOMMEND_* key above is set;
+each field is omitted individually when its env var is unset.
 """
 
 from __future__ import annotations
@@ -124,6 +132,23 @@ def build_config(env: Mapping[str, str]) -> str:
                 f"RECOMMEND_EMBEDDING_DIM must be positive, got {embedding_dim}"
             )
 
+    # Preference-affinity knobs (recommend re-scoring by per-track feedback).
+    # All optional and independent of the dim; an unset key is omitted so the
+    # gateway applies its own default. preference_enabled defaults to FALSE
+    # gateway-side, so the feature stays dark until explicitly switched on
+    # here — affinity is captured regardless, only the read is gated.
+    preference_enabled = _parse_bool(env, "RECOMMEND_PREFERENCE_ENABLED")
+    preference_weight = _parse_float(
+        env, "RECOMMEND_PREFERENCE_WEIGHT", non_negative=True
+    )
+    affinity_half_life = _parse_float(
+        env, "RECOMMEND_AFFINITY_HALF_LIFE_DAYS", positive=True
+    )
+    # Durable-like boost. Always-on server-side (independent of
+    # preference_enabled), so this knob just tunes the magnitude; an unset
+    # key omits the field and the gateway applies its own default.
+    like_bonus = _parse_float(env, "RECOMMEND_LIKE_BONUS", non_negative=True)
+
     parts: list[str] = []
 
     parts.append("[server]")
@@ -168,9 +193,22 @@ def build_config(env: Mapping[str, str]) -> str:
             parts.append(f"bearer_token = {_str(embedder_bearer)}")
         parts.append("")
 
+    recommend_lines: list[str] = []
     if embedding_dim is not None:
+        recommend_lines.append(f"embedding_dim = {embedding_dim}")
+    if preference_enabled is not None:
+        recommend_lines.append(
+            f"preference_enabled = {'true' if preference_enabled else 'false'}"
+        )
+    if preference_weight is not None:
+        recommend_lines.append(f"preference_weight = {preference_weight}")
+    if affinity_half_life is not None:
+        recommend_lines.append(f"affinity_half_life_days = {affinity_half_life}")
+    if like_bonus is not None:
+        recommend_lines.append(f"like_bonus = {like_bonus}")
+    if recommend_lines:
         parts.append("[recommend]")
-        parts.append(f"embedding_dim = {embedding_dim}")
+        parts.extend(recommend_lines)
         parts.append("")
 
     return "\n".join(parts) + "\n"
@@ -186,6 +224,45 @@ def _str(value: str) -> str:
         )
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _parse_bool(env: Mapping[str, str], key: str) -> bool | None:
+    """Parse a boolean env var. Empty/unset → None (omit the field).
+    Accepts true/false/1/0/yes/no (case-insensitive); anything else is a
+    fail-fast ConfigError rather than a silent default."""
+    raw = env.get(key, "").strip().lower()
+    if raw == "":
+        return None
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    raise ConfigError(
+        f"{key} must be a boolean (true/false), got {env.get(key)!r}"
+    )
+
+
+def _parse_float(
+    env: Mapping[str, str],
+    key: str,
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> float | None:
+    """Parse a float env var. Empty/unset → None (omit the field).
+    `positive` requires > 0; `non_negative` requires >= 0."""
+    raw = env.get(key, "").strip()
+    if raw == "":
+        return None
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ConfigError(f"{key} must be a number: {e}") from e
+    if positive and value <= 0:
+        raise ConfigError(f"{key} must be positive, got {value}")
+    if non_negative and value < 0:
+        raise ConfigError(f"{key} must be non-negative, got {value}")
+    return value
 
 
 def main(argv: list[str]) -> int:

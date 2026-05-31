@@ -35,7 +35,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
-use crate::state::AppState;
+use crate::state::{AppState, PreferenceParams};
 use crate::whitening_text;
 
 const MAX_N: usize = 100;
@@ -123,10 +123,29 @@ pub async fn next(
         return Err((StatusCode::NOT_FOUND, "seed not embedded"));
     };
 
-    let results = state
+    // `/next` is the raw acoustic top-K path (no MMR). We always over-fetch
+    // and re-rank by `similarity + bonus` (durable-like boost, always-on,
+    // plus the gated decayed-affinity preference), then truncate — so a
+    // track the listener loves that sits just outside the raw top-N can be
+    // pulled in. The bonus map is empty only when nothing in the pool is
+    // liked *and* preference is off, in which case the stable sort is a
+    // no-op and results are the plain acoustic top-N.
+    //
+    // The seed itself is always excluded; disliked tracks are hard-excluded
+    // here too (always-on, independent of preference).
+    let rescore = rescore_ctx(&state);
+    let mut exclude: Vec<TrackId> = vec![seed_id.clone()];
+    exclude.extend(disliked_exclusions(&state).await);
+    let fetch_n = n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
+    let mut results = state
         .ann()
-        .query_excluding(&vector, n, std::slice::from_ref(&seed_id))
+        .query_excluding(&vector, fetch_n, &exclude)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
+
+    let ids: Vec<TrackId> = results.iter().map(|r| r.track_id.clone()).collect();
+    let bonuses = affinity_bonuses(&rescore, &ids).await;
+    rescore_ann_by_preference(&mut results, &bonuses);
+    results.truncate(n);
     tracing::Span::current().record("results", results.len());
 
     Ok(Json(RecommendNextResponse {
@@ -141,6 +160,25 @@ pub async fn next(
             })
             .collect(),
     }))
+}
+
+/// Stable re-rank of raw ANN results by `similarity + preference bonus`,
+/// descending. Used by the non-MMR `/next` path. The sort is stable, so
+/// candidates that tie on the blended score keep their ANN
+/// (similarity-descending) order — preference only reorders genuine
+/// near-ties, never reshuffles the relevance backbone.
+fn rescore_ann_by_preference(
+    results: &mut [music_recommend::ann::AnnQueryResult],
+    bonuses: &HashMap<TrackId, f32>,
+) {
+    results.sort_by(|a, b| {
+        let blended = |r: &music_recommend::ann::AnnQueryResult| {
+            r.similarity + bonuses.get(&r.track_id).copied().unwrap_or(0.0)
+        };
+        blended(b)
+            .partial_cmp(&blended(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 // --- /v1/recommend/station -------------------------------------------
@@ -214,10 +252,11 @@ pub async fn station(
     // Text path: whiten via the cross-modal text mean so the query lands
     // in the same whitened space as the stored audio vectors. Falls back
     // to the audio transform (and to identity) when whitening / text_mean
-    // aren't installed.
+    // aren't installed. Disliked tracks are hard-excluded (always-on).
+    let exclude: Vec<TrackId> = disliked_exclusions(&state).await.into_iter().collect();
     let results = state
         .ann()
-        .query_text(&embed.vector, n)
+        .query_text(&embed.vector, n, &exclude)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
     tracing::Span::current().record("results", results.len());
 
@@ -666,6 +705,9 @@ pub async fn from_seeds(
             }
         }
     }
+    // Disliked tracks are hard-excluded from all candidate generation
+    // (always-on, independent of preference).
+    exclude.extend(disliked_exclusions(&state).await);
 
     // Per-seed ANN queries. Each seed lookup is short and CPU-bound,
     // and the ANN takes its own internal RwLock; running these in
@@ -709,6 +751,7 @@ pub async fn from_seeds(
         internal_top_n,
     );
 
+    let rescore = rescore_ctx(&state);
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(
@@ -717,6 +760,7 @@ pub async fn from_seeds(
                 qc,
                 aggregated,
                 top_n,
+                &rescore,
             )
             .await
         }
@@ -845,6 +889,8 @@ pub async fn from_any(
             queue_excludes.extend(downvoted);
         }
     }
+    // Disliked tracks are hard-excluded (always-on, independent of preference).
+    queue_excludes.extend(disliked_exclusions(&state).await);
 
     // Try candidates in order, return first one with an ANN entry. Mirrors
     // the TS `startStationFromAny` semantics exactly: first-wins.
@@ -873,9 +919,18 @@ pub async fn from_any(
             .query_excluding(&vector, internal_n, &excludes_for_query)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
+        let rescore = rescore_ctx(&state);
         let (filtered, filter_stats) = match &req.queue_context {
             Some(qc) => {
-                apply_queue_filter_to_ann(state.metadata_store(), state.ann(), qc, results, n).await
+                apply_queue_filter_to_ann(
+                    state.metadata_store(),
+                    state.ann(),
+                    qc,
+                    results,
+                    n,
+                    &rescore,
+                )
+                .await
             }
             None => (results, FilterStats::default()),
         };
@@ -1039,13 +1094,13 @@ async fn group_similar_by(
         .map(|&i| seed_track_ids[i].as_str())
         .collect();
 
-    // Exclude every seed track from ANN candidates. A seed self-ranks
-    // at 1.0 and would trivially dominate any group containing it.
-    let seed_set: HashSet<TrackId> = seed_track_ids
+    // Exclude every seed track (self-ranks at 1.0, would dominate its own
+    // group) plus all disliked tracks (always-on; dupes in the slice are ok).
+    let mut seed_excl_vec: Vec<TrackId> = seed_track_ids
         .iter()
         .map(|s| TrackId::from(s.as_str()))
         .collect();
-    let seed_excl_vec: Vec<TrackId> = seed_set.iter().cloned().collect();
+    seed_excl_vec.extend(disliked_exclusions(state).await);
 
     let mut seeds_indexed = 0usize;
     let mut all_hits: Vec<music_recommend::ann::AnnQueryResult> = Vec::new();
@@ -1560,6 +1615,122 @@ impl CandidateLike for music_recommend::ann::AnnQueryResult {
 /// float ops, still well under the 1.5 ms budget.
 const MMR_POOL_BUFFER_FACTOR: usize = 2;
 
+/// Everything [`walk_mmr`] needs to turn each candidate's stored
+/// affinity into a relevance bonus. Built from [`AppState`] only when the
+/// preference feature is enabled (see [`preference_lookup`]); `None`
+/// throughout means "preference off / cold start → no bonus".
+struct PreferenceLookup<'a> {
+    store: &'a music_recommend::TrackAffinityStore,
+    params: PreferenceParams,
+    now_ms: i64,
+}
+
+/// Resolve the preference lookup for this request, or `None` when the
+/// feature is disabled. Stamps a single `now_ms` so every candidate in
+/// the call decays to the same instant.
+fn preference_lookup(state: &AppState) -> Option<PreferenceLookup<'_>> {
+    state.preference_params().map(|params| PreferenceLookup {
+        store: state.track_affinity(),
+        params,
+        now_ms: now_unix_ms(),
+    })
+}
+
+/// Everything the recommend rescoring needs, built once per request:
+/// the *gated* decayed-affinity preference lookup (`None` when the
+/// feature is off) plus the *always-on* durable-like boost. Disliked
+/// tracks are handled separately (hard-excluded upstream), so only the
+/// likes feed scoring here.
+struct Rescore<'a> {
+    pref: Option<PreferenceLookup<'a>>,
+    ratings: &'a music_recommend::RatingStore,
+    like_bonus: f32,
+}
+
+/// Build the per-request rescoring context. The like boost is always
+/// present (explicit ratings apply regardless of `preference_enabled`);
+/// only the decayed-affinity preference half is config-gated.
+fn rescore_ctx(state: &AppState) -> Rescore<'_> {
+    Rescore {
+        pref: preference_lookup(state),
+        ratings: state.ratings(),
+        like_bonus: state.like_bonus(),
+    }
+}
+
+/// All disliked track ids, fetched once per recommend request — the
+/// always-on hard exclusion (not gated by `preference_enabled`). A lookup
+/// failure degrades to "exclude nothing" rather than failing the request:
+/// the durable rating is still stored and the exclusion just doesn't apply
+/// this round.
+async fn disliked_exclusions(state: &AppState) -> HashSet<TrackId> {
+    match state.ratings().disliked_ids().await {
+        Ok(set) => set,
+        Err(err) => {
+            tracing::warn!(error = %err, "dislike lookup failed; recommending without dislike exclusion");
+            HashSet::new()
+        }
+    }
+}
+
+/// Per-candidate additive relevance bonus keyed by track id, merging two
+/// independent channels:
+///
+/// * **durable like-boost** — always-on. Every liked candidate earns
+///   `+like_bonus`. Independent of `preference_enabled`, so a fresh
+///   install with likes but the preference feature off still surfaces a
+///   non-empty map (which keeps `presort_by_preference`'s `is_empty()`
+///   short-circuit from firing).
+/// * **decayed-affinity preference** (`β · affinity`) — only when the
+///   feature is enabled.
+///
+/// Absent entries are an implicit `0.0`. Either lookup failing degrades to
+/// "no bonus from that channel" rather than failing the request — scoring
+/// is an enhancement, not a correctness requirement.
+async fn affinity_bonuses(
+    rescore: &Rescore<'_>,
+    candidate_ids: &[TrackId],
+) -> HashMap<TrackId, f32> {
+    let mut out: HashMap<TrackId, f32> = HashMap::new();
+
+    // Always-on durable-like boost.
+    match rescore
+        .ratings
+        .liked_bonus_many(candidate_ids, rescore.like_bonus)
+        .await
+    {
+        Ok(map) => {
+            for (id, bonus) in map {
+                *out.entry(id).or_insert(0.0) += bonus;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "like lookup failed; recommending without like boost");
+        }
+    }
+
+    // Gated decayed-affinity preference bonus.
+    if let Some(p) = &rescore.pref {
+        match p
+            .store
+            .affinity_many(candidate_ids, p.now_ms, p.params.half_life_ms)
+            .await
+        {
+            Ok(map) => {
+                for (id, aff) in map {
+                    *out.entry(id).or_insert(0.0) +=
+                        music_recommend::preference_bonus(aff, p.params.weight);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "affinity lookup failed; recommending without preference bonus");
+            }
+        }
+    }
+
+    out
+}
+
 /// Diversity-mode-aware slate selection. Owns the `match` over
 /// [`DiversityMode`] so the two HTTP handlers don't each re-implement
 /// the dispatch.
@@ -1569,24 +1740,59 @@ async fn apply_queue_filter_generic<C: CandidateLike>(
     qc: &QueueContext,
     candidates: Vec<C>,
     top_n: usize,
+    rescore: &Rescore<'_>,
 ) -> (Vec<C>, FilterStats) {
     let candidate_ids: Vec<TrackId> = candidates.iter().map(|c| c.track_id().clone()).collect();
     let (filter, metadata) = build_filter_with_metadata(metadata_store, qc, &candidate_ids).await;
     let cfg = qc.config();
 
     match cfg.diversity_mode {
-        DiversityMode::HardCap => walk_hard_cap(candidates, &metadata, filter, top_n),
-        DiversityMode::Mmr => walk_mmr(
-            candidates,
-            &metadata,
-            filter,
-            ann,
-            cfg.mmr_lambda,
-            cfg.artist_penalty_weight,
-            top_n,
-        ),
+        // HardCap admits in relevance order, so preference is applied by
+        // pre-sorting the pool by `sim + bonus` before the walk. (Empty
+        // bonuses → stable sort is a no-op → identical to legacy order.)
+        DiversityMode::HardCap => {
+            let bonuses = affinity_bonuses(rescore, &candidate_ids).await;
+            let candidates = presort_by_preference(candidates, &bonuses);
+            walk_hard_cap(candidates, &metadata, filter, top_n)
+        }
+        // MMR folds the bonus directly into its relevance term.
+        DiversityMode::Mmr => {
+            let bonuses = affinity_bonuses(rescore, &candidate_ids).await;
+            walk_mmr(
+                candidates,
+                &metadata,
+                filter,
+                ann,
+                cfg.mmr_lambda,
+                cfg.artist_penalty_weight,
+                top_n,
+                &bonuses,
+            )
+        }
+        // Off is the deliberate raw-input A/B baseline — left untouched
+        // by preference so it stays a clean control.
         DiversityMode::Off => walk_off(candidates, &filter, top_n),
     }
+}
+
+/// Stable re-rank of a candidate pool by `sim + preference bonus`,
+/// descending — the HardCap path's preference lever. An empty bonus map
+/// (feature off / cold start / none of these candidates engaged) short-
+/// circuits to preserve the incoming ANN/aggregate order exactly.
+fn presort_by_preference<C: CandidateLike>(
+    mut candidates: Vec<C>,
+    bonuses: &HashMap<TrackId, f32>,
+) -> Vec<C> {
+    if bonuses.is_empty() {
+        return candidates;
+    }
+    candidates.sort_by(|a, b| {
+        let blended = |c: &C| c.sim() + bonuses.get(c.track_id()).copied().unwrap_or(0.0);
+        blended(b)
+            .partial_cmp(&blended(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates
 }
 
 /// Hard-cap (legacy) path: walk candidates in input/relevance order,
@@ -1631,6 +1837,8 @@ fn walk_hard_cap<C: CandidateLike>(
 /// the post-rerank filter, so there's no extra DB hit. A candidate with
 /// no cached metadata gets `artist_key = None` and pays no penalty —
 /// which is what the filter would do for the same case anyway.
+#[allow(clippy::too_many_arguments)] // diversity knobs + the bonus map;
+// bundling them adds ceremony without cutting coupling.
 fn walk_mmr<C: CandidateLike>(
     candidates: Vec<C>,
     metadata: &HashMap<TrackId, music_recommend::TrackMetadata>,
@@ -1639,6 +1847,7 @@ fn walk_mmr<C: CandidateLike>(
     lambda: f32,
     artist_penalty_weight: f32,
     top_n: usize,
+    affinity_bonuses: &HashMap<TrackId, f32>,
 ) -> (Vec<C>, FilterStats) {
     // 1. Drop excluded candidates up front. No point spending the
     //    vector lookup on tracks the user already has queued.
@@ -1657,6 +1866,7 @@ fn walk_mmr<C: CandidateLike>(
             sim_to_seed: c.sim(),
             vector: ann.get_vector(c.track_id()).ok().flatten(),
             artist_key: metadata.get(c.track_id()).map(QueueFilter::artist_key_for),
+            relevance_bonus: affinity_bonuses.get(c.track_id()).copied().unwrap_or(0.0),
         })
         .collect();
 
@@ -1726,11 +1936,12 @@ async fn apply_queue_filter_to_aggregate(
     qc: &QueueContext,
     candidates: Vec<music_recommend::aggregate::AggregatedResult>,
     top_n: usize,
+    rescore: &Rescore<'_>,
 ) -> (
     Vec<music_recommend::aggregate::AggregatedResult>,
     FilterStats,
 ) {
-    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n, rescore).await
 }
 
 /// Apply the [`QueueFilter`] to ANN `from-any` results. Same shape as
@@ -1741,8 +1952,9 @@ async fn apply_queue_filter_to_ann(
     qc: &QueueContext,
     candidates: Vec<music_recommend::ann::AnnQueryResult>,
     top_n: usize,
+    rescore: &Rescore<'_>,
 ) -> (Vec<music_recommend::ann::AnnQueryResult>, FilterStats) {
-    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n).await
+    apply_queue_filter_generic(metadata_store, ann, qc, candidates, top_n, rescore).await
 }
 
 /// Look up the seed's embedding. The ANN owns query-time state, so we

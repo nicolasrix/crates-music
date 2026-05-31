@@ -4,6 +4,8 @@
 // fill tints to match the page the user is on.
 
 import {
+  Heart,
+  HeartCrack,
   ListMusic,
   Pause,
   Play,
@@ -24,6 +26,7 @@ import { useSync } from "../sync/SyncContext";
 import { useAutoplay } from "./AutoplayContext";
 import { usePlayer } from "./PlayerContext";
 import { useRecommendationFeedback } from "./useRecommendationFeedback";
+import { useTrackRating } from "./useRatings";
 import { VolumeControl } from "./VolumeControl";
 
 export function PlayerBar() {
@@ -140,6 +143,7 @@ export function PlayerBar() {
       </div>
 
       <div className="right-cluster">
+        <TrackRating trackId={nowPlaying.id} />
         <RecommendationFeedback trackId={nowPlaying.id} />
         <VolumeControl />
         <Link
@@ -255,6 +259,53 @@ function Scrubber() {
         <div className="thumb" style={{ left: `${pct}%` }} />
       </div>
       <span className="time">{fmtDuration(duration)}</span>
+    </div>
+  );
+}
+
+// Durable per-song like/dislike pill — distinct from the recommendation
+// thumbs below. This rates *the song itself*: a like boosts it in
+// recommendations and adds it to "Liked songs"; a dislike hard-excludes it
+// from recommendations and makes the player auto-skip past it. Always
+// shown (no gating) since any track can be rated. Heart / HeartCrack icons
+// keep it visually separate from the ThumbsUp/ThumbsDown rec-feedback.
+function TrackRating({ trackId }: { trackId: string }) {
+  const { rating, pending, set } = useTrackRating(trackId);
+  return (
+    <div className="rec-feedback" role="group" aria-label="like or dislike this song">
+      <span className="rec-feedback__label" aria-hidden="true">
+        rate song
+      </span>
+      <button
+        type="button"
+        className={`rec-feedback__btn up ${rating === "like" ? "is-active" : ""}`}
+        aria-label="like this song"
+        aria-pressed={rating === "like"}
+        title="like — boosts recommendations and adds to Liked songs"
+        disabled={pending}
+        onClick={() => set("like")}
+      >
+        <Heart
+          size={14}
+          strokeWidth={1.75}
+          fill={rating === "like" ? "currentColor" : "none"}
+        />
+      </button>
+      <button
+        type="button"
+        className={`rec-feedback__btn down ${rating === "dislike" ? "is-active" : ""}`}
+        aria-label="dislike this song"
+        aria-pressed={rating === "dislike"}
+        title="dislike — excluded from recommendations and auto-skipped"
+        disabled={pending}
+        onClick={() => set("dislike")}
+      >
+        <HeartCrack
+          size={14}
+          strokeWidth={1.75}
+          fill={rating === "dislike" ? "currentColor" : "none"}
+        />
+      </button>
     </div>
   );
 }

@@ -82,11 +82,14 @@ pub enum DiversityMode {
     Off,
 }
 
-/// Knobs controlling filter strictness. Defaults wire up the MMR path
-/// with a soft artist-diversity penalty — same-artist candidates pay a
-/// per-occurrence cost in the MMR score, but no hard cap rejects them.
-/// That's the post-Smada behaviour: when only same-artist neighbours
-/// exist in CLAP space, the queue still fills instead of starving.
+/// Knobs controlling filter strictness. The default
+/// [`DiversityMode::HardCap`] keeps the candidate stream in its
+/// similarity order and only drops tracks when the per-artist cap or
+/// title dedup fires; with `max_per_artist == 0` (also the default)
+/// nothing is rejected for artist reasons, so the queue fills instead
+/// of starving when only same-artist neighbours exist in CLAP space.
+/// The MMR-specific knobs below (`mmr_lambda`, `artist_penalty_weight`)
+/// are inert unless `diversity_mode` is switched to [`DiversityMode::Mmr`].
 #[derive(Clone, Copy, Debug)]
 pub struct QueueFilterConfig {
     /// Selection algorithm for the slate. See [`DiversityMode`].

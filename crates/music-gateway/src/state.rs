@@ -14,7 +14,9 @@ use music_recommend::EventStore;
 use music_recommend::FeedbackStore;
 use music_recommend::PlayHistoryStore;
 use music_recommend::ProjectionStore;
+use music_recommend::RatingStore;
 use music_recommend::SessionStore;
+use music_recommend::TrackAffinityStore;
 use music_recommend::WhiteningStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::MetadataStore;
@@ -36,6 +38,17 @@ pub struct AppState {
     inner: Arc<Inner>,
 }
 
+/// Resolved user-preference re-scoring parameters. Built by
+/// [`AppState::preference_params`] only when the feature is enabled; the
+/// recommend path treats its absence as "preference off → no-op".
+#[derive(Clone, Copy, Debug)]
+pub struct PreferenceParams {
+    /// MMR affinity weight `β`.
+    pub weight: f32,
+    /// Affinity decay half-life in milliseconds.
+    pub half_life_ms: i64,
+}
+
 #[derive(Debug)]
 struct Inner {
     config: Config,
@@ -50,6 +63,12 @@ struct Inner {
     event_store: EventStore,
     play_history: PlayHistoryStore,
     feedback: FeedbackStore,
+    track_affinity: TrackAffinityStore,
+    /// Durable per-track like/dislike — the user's explicit taste. A
+    /// separate channel from `track_affinity` (that one decays; ratings
+    /// don't). Drives always-on dislike-exclusion and like-boost in the
+    /// recommend path, regardless of `preference_enabled`.
+    ratings: RatingStore,
     projection: ProjectionStore,
     sessions: SessionStore,
     ann: Arc<AnnIndex>,
@@ -114,6 +133,8 @@ impl AppState {
         let event_store = EventStore::new(embedding_store.pool().clone());
         let play_history = PlayHistoryStore::new(embedding_store.pool().clone());
         let feedback = FeedbackStore::new(embedding_store.pool().clone());
+        let track_affinity = TrackAffinityStore::new(embedding_store.pool().clone());
+        let ratings = RatingStore::new(embedding_store.pool().clone());
         let projection = ProjectionStore::new(embedding_store.pool().clone());
         let sessions = SessionStore::new(embedding_store.pool().clone());
         let whitening_store = WhiteningStore::new(embedding_store.pool().clone());
@@ -131,6 +152,8 @@ impl AppState {
                 event_store,
                 play_history,
                 feedback,
+                track_affinity,
+                ratings,
                 projection,
                 sessions,
                 ann,
@@ -211,6 +234,47 @@ impl AppState {
 
     pub fn feedback(&self) -> &FeedbackStore {
         &self.inner.feedback
+    }
+
+    pub fn track_affinity(&self) -> &TrackAffinityStore {
+        &self.inner.track_affinity
+    }
+
+    pub fn ratings(&self) -> &RatingStore {
+        &self.inner.ratings
+    }
+
+    /// Additive relevance bonus applied to a liked candidate when
+    /// rescoring recommendations. Always-on (not gated by
+    /// `preference_enabled`); from the `[recommend] like_bonus` config
+    /// knob, defaulting to [`music_recommend::LIKE_BONUS`].
+    pub fn like_bonus(&self) -> f32 {
+        self.inner.config.recommend.like_bonus
+    }
+
+    /// Affinity decay half-life (ms) from config. Available regardless of
+    /// `preference_enabled`: the affinity counter is captured on every
+    /// play / skip / vote so the feature has full history the moment it's
+    /// switched on. Only the *read* (the MMR bonus) is gated — see
+    /// [`Self::preference_params`].
+    pub fn affinity_half_life_ms(&self) -> i64 {
+        music_recommend::half_life_days_to_ms(self.inner.config.recommend.affinity_half_life_days)
+    }
+
+    /// Resolved user-preference re-scoring parameters, or `None` when the
+    /// feature is disabled in config. `Some` carries the MMR affinity
+    /// weight `β` and the decay half-life in milliseconds — everything a
+    /// recommend handler needs to turn a stored affinity into a relevance
+    /// bonus. Centralised here so handlers don't re-read config knobs.
+    pub fn preference_params(&self) -> Option<PreferenceParams> {
+        let r = &self.inner.config.recommend;
+        if !r.preference_enabled {
+            return None;
+        }
+        Some(PreferenceParams {
+            weight: r.preference_weight,
+            half_life_ms: music_recommend::half_life_days_to_ms(r.affinity_half_life_days),
+        })
     }
 
     pub fn projection(&self) -> &ProjectionStore {

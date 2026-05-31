@@ -271,3 +271,87 @@ def test_recommend_embedding_dim_rejects_non_positive() -> None:
     env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "0"}
     with pytest.raises(ConfigError, match="positive"):
         build_config(env)
+
+
+# --- [recommend] preference knobs -----------------------------------------
+#
+# Optional and independent of the dim. Each field is omitted when its env
+# var is unset (gateway applies its own default: preference_enabled=false,
+# weight=0.15, half_life=30 days). The section appears if ANY key is set.
+
+
+def test_preference_section_emitted_without_embedding_dim() -> None:
+    env = _minimum_env() | {"RECOMMEND_PREFERENCE_ENABLED": "true"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["preference_enabled"] is True
+    assert "embedding_dim" not in parsed["recommend"]
+
+
+def test_preference_enabled_false_is_emitted() -> None:
+    env = _minimum_env() | {"RECOMMEND_PREFERENCE_ENABLED": "false"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["preference_enabled"] is False
+
+
+def test_preference_knobs_emitted_together() -> None:
+    env = _minimum_env() | {
+        "RECOMMEND_EMBEDDING_DIM": "768",
+        "RECOMMEND_PREFERENCE_ENABLED": "1",
+        "RECOMMEND_PREFERENCE_WEIGHT": "0.25",
+        "RECOMMEND_AFFINITY_HALF_LIFE_DAYS": "45",
+    }
+    parsed = tomllib.loads(build_config(env))
+    rec = parsed["recommend"]
+    assert rec["embedding_dim"] == 768
+    assert rec["preference_enabled"] is True
+    assert rec["preference_weight"] == pytest.approx(0.25)
+    assert rec["affinity_half_life_days"] == pytest.approx(45.0)
+
+
+def test_preference_knobs_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "preference_enabled" not in parsed["recommend"]
+    assert "preference_weight" not in parsed["recommend"]
+
+
+def test_preference_enabled_rejects_non_boolean() -> None:
+    env = _minimum_env() | {"RECOMMEND_PREFERENCE_ENABLED": "maybe"}
+    with pytest.raises(ConfigError, match="RECOMMEND_PREFERENCE_ENABLED"):
+        build_config(env)
+
+
+def test_preference_weight_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_PREFERENCE_WEIGHT": "-0.1"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)
+
+
+def test_affinity_half_life_rejects_non_positive() -> None:
+    env = _minimum_env() | {"RECOMMEND_AFFINITY_HALF_LIFE_DAYS": "0"}
+    with pytest.raises(ConfigError, match="positive"):
+        build_config(env)
+
+
+def test_affinity_half_life_rejects_non_numeric() -> None:
+    env = _minimum_env() | {"RECOMMEND_AFFINITY_HALF_LIFE_DAYS": "soon"}
+    with pytest.raises(ConfigError, match="must be a number"):
+        build_config(env)
+
+
+def test_like_bonus_emitted_when_set() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS": "0.3"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["like_bonus"] == pytest.approx(0.3)
+
+
+def test_like_bonus_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "like_bonus" not in parsed["recommend"]
+
+
+def test_like_bonus_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS": "-0.5"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)

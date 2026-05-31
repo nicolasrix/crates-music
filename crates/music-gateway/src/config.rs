@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
@@ -155,7 +155,7 @@ fn default_embedder_timeout_secs() -> u64 {
 /// Recommender configuration. The embedding dim has to be fixed at boot
 /// because the ANN index commits to its dim on open — a mismatch between
 /// the config and the on-disk ANN file will fail loudly at startup.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecommendConfig {
     /// Shared dim of the audio + text embedding space. Must match what
     /// the embedder sidecar produces. LAION-CLAP is 512; CLaMP 3 is 768.
@@ -172,6 +172,36 @@ pub struct RecommendConfig {
     /// triggers a one-time ANN rebuild at the next boot.
     #[serde(default = "default_whitening_enabled")]
     pub whitening_enabled: bool,
+
+    /// User-preference re-scoring. When true, the MMR relevance term is
+    /// tilted by each candidate's affinity (likes/plays raise it,
+    /// dislikes/skips lower it) — see `music_recommend::preference`.
+    /// Default false: the feature ships dark until explicitly enabled,
+    /// and a fresh install with no listening history is a no-op anyway
+    /// (every affinity is 0).
+    #[serde(default = "default_preference_enabled")]
+    pub preference_enabled: bool,
+
+    /// Weight `β` on the affinity bonus: `relevance += β · affinity`,
+    /// with `affinity ∈ [-1, 1]`. Kept on the order of the artist
+    /// penalty (~0.15) so preference reorders near-ties without
+    /// overriding a clear acoustic-relevance gap. Clamped `>= 0` at use.
+    #[serde(default = "default_preference_weight")]
+    pub preference_weight: f32,
+
+    /// Half-life (days) of the affinity decayed counter. Older signal
+    /// fades toward zero with this half-life, so taste can drift.
+    #[serde(default = "default_affinity_half_life_days")]
+    pub affinity_half_life_days: f32,
+
+    /// Additive relevance bonus a *liked* track earns when rescoring
+    /// recommendations (`relevance += like_bonus`). Unlike
+    /// `preference_weight` this is always-on — durable likes/dislikes are
+    /// an explicit signal that applies regardless of `preference_enabled`.
+    /// Same order as the preference weight: enough to pull a liked track in
+    /// from just outside the raw top-N without swamping acoustic similarity.
+    #[serde(default = "default_like_bonus")]
+    pub like_bonus: f32,
 }
 
 impl Default for RecommendConfig {
@@ -179,6 +209,10 @@ impl Default for RecommendConfig {
         Self {
             embedding_dim: default_embedding_dim(),
             whitening_enabled: default_whitening_enabled(),
+            preference_enabled: default_preference_enabled(),
+            preference_weight: default_preference_weight(),
+            affinity_half_life_days: default_affinity_half_life_days(),
+            like_bonus: default_like_bonus(),
         }
     }
 }
@@ -189,6 +223,22 @@ fn default_embedding_dim() -> usize {
 
 fn default_whitening_enabled() -> bool {
     true
+}
+
+fn default_preference_enabled() -> bool {
+    false
+}
+
+fn default_preference_weight() -> f32 {
+    0.15
+}
+
+fn default_affinity_half_life_days() -> f32 {
+    30.0
+}
+
+fn default_like_bonus() -> f32 {
+    music_recommend::LIKE_BONUS
 }
 
 impl Default for OauthConfig {

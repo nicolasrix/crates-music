@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use music_core::TrackId;
-use music_gateway::build_router;
+use music_gateway::{Config, build_router};
 use music_recommend::TrackMetadata;
 use music_recommend::normalize_title;
 use serde_json::{Value, json};
@@ -1977,4 +1977,150 @@ mod refit_whitening {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+}
+
+// --- user-preference re-scoring (affinity → /next) -------------------
+//
+// These exercise the full server path: ANN retrieval → affinity lookup →
+// relevance re-rank. Feedback is written through the real
+// `POST /v1/recommend/feedback` endpoint so the write wiring is covered
+// too. Whitening is identity in tests (boot-time fit doesn't run), so the
+// reported similarities are raw cosines and the ordering is predictable.
+
+/// Unit vector in the e0–e1 plane with cosine `first` to the seed (e0).
+fn graded(first: f32) -> Vec<f32> {
+    let mut v = vec![0.0_f32; DIM];
+    v[0] = first;
+    v[1] = (1.0 - first * first).max(0.0).sqrt();
+    v
+}
+
+/// `test_config` with the preference feature enabled at a weight strong
+/// enough to make the re-ranking unambiguous in assertions.
+fn preference_config() -> Config {
+    let mut c = test_config();
+    c.recommend.preference_enabled = true;
+    c.recommend.preference_weight = 0.5;
+    c
+}
+
+async fn post_feedback(app: axum::Router, track_id: &str, vote: &str) -> StatusCode {
+    let body = json!({"track_id": track_id, "vote": vote, "session_id": "sess-1"}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/recommend/feedback")
+        .header("authorization", format!("Bearer {TEST_BEARER}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+async fn next_ids(app: axum::Router, uri: &str) -> Vec<String> {
+    let resp = app.oneshot(auth_get(uri)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    body["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Seed t0 plus three candidates of decreasing acoustic similarity.
+fn seed_and_graded_candidates(state: &music_gateway::AppState) {
+    let ann = state.ann();
+    ann.upsert(&TrackId::from("t0"), &graded(1.0)).unwrap(); // seed
+    ann.upsert(&TrackId::from("t1"), &graded(0.95)).unwrap(); // most similar
+    ann.upsert(&TrackId::from("t2"), &graded(0.90)).unwrap();
+    ann.upsert(&TrackId::from("t3"), &graded(0.80)).unwrap(); // least similar
+}
+
+#[tokio::test]
+async fn next_demotes_a_disliked_track_when_preference_enabled() {
+    let state = build_state(preference_config()).await;
+    seed_and_graded_candidates(&state);
+
+    // Control: with no feedback, the most-similar candidate leads.
+    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
+    assert_eq!(ids[0], "t1", "most-similar candidate should lead with no feedback");
+
+    // Thumbs-down t1 via the real endpoint.
+    let status = post_feedback(build_router(state.clone()), "t1", "down").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // t1's negative affinity sinks it below the others; t2 now leads and
+    // the disliked t1 falls to the back.
+    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
+    assert_eq!(ids[0], "t2", "disliked t1 must no longer lead");
+    assert_eq!(ids.last().map(String::as_str), Some("t1"), "disliked t1 sinks to last");
+}
+
+#[tokio::test]
+async fn next_promotes_a_liked_track_when_preference_enabled() {
+    let state = build_state(preference_config()).await;
+    seed_and_graded_candidates(&state);
+
+    // Like the *least* similar candidate; the bonus should lift it past
+    // the acoustic leader.
+    let status = post_feedback(build_router(state.clone()), "t3", "up").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
+    assert_eq!(ids[0], "t3", "liked t3 should climb above the acoustic leader");
+}
+
+#[tokio::test]
+async fn next_ignores_feedback_when_preference_disabled() {
+    // Default config has preference_enabled = false. Even a strong
+    // dislike must not perturb the pure-similarity ordering.
+    let state = build_state(test_config()).await;
+    seed_and_graded_candidates(&state);
+
+    let status = post_feedback(build_router(state.clone()), "t1", "down").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
+    assert_eq!(ids, vec!["t1", "t2", "t3"], "ordering unchanged when preference is off");
+}
+
+#[tokio::test]
+async fn from_seeds_demotes_disliked_track_in_hardcap_mode() {
+    // Exercises the preference pre-sort on the *default* (HardCap) filter
+    // path — the one the queue-refill clients actually use. A
+    // `queue_context` must be present for the filter (and thus the
+    // pre-sort) to run at all.
+    let state = build_state(preference_config()).await;
+    seed_and_graded_candidates(&state);
+
+    let status = post_feedback(build_router(state.clone()), "t1", "down").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = build_router(state.clone());
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "per_seed_n": 20,
+            "top_n": 5,
+            "queue_context": {}
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<String> = body["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect();
+
+    assert_ne!(ids.first().map(String::as_str), Some("t1"), "disliked t1 must not lead");
+    let pos = |id: &str| ids.iter().position(|x| x == id);
+    assert!(
+        pos("t1") > pos("t2"),
+        "disliked t1 ranked below t2 (ids = {ids:?})"
+    );
 }
