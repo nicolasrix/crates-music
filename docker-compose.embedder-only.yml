@@ -34,10 +34,14 @@ services:
     container_name: crates-embedder
     environment:
       EMBEDDER_BACKEND: ${EMBEDDER_BACKEND:-stub}
-      # Shared secret enforced on /embed/* and /reduce. When unset the
-      # embedder accepts unauthenticated requests — only do that on a
-      # trusted LAN.
-      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+      # Shared secret enforced on /embed/* and /reduce. REQUIRED here:
+      # this file publishes the embedder on the host network (see `ports`
+      # below), so it's reachable by every LAN peer — without a token the
+      # inference + /reduce endpoints would be open to the whole LAN.
+      # Generate with `openssl rand -hex 32` and match it on the gateway.
+      # (The local-only stub path stays tokenless — that's docker-compose.yml,
+      # which keeps the embedder compose-internal via `expose`.)
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:?set EMBEDDER_BEARER_TOKEN in .env (openssl rand -hex 32) — this embedder is published on the LAN}
     # Expose on the host network so the gateway box can reach us. The
     # base docker-compose.yml uses `expose:` (intra-compose only); in
     # split-host mode we need the port published on the host.
