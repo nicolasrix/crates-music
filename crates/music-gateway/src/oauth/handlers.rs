@@ -161,21 +161,25 @@ pub async fn login_post(
         ));
     }
 
-    // Gateway must be bootstrapped first.
+    // Uniform failure: an unauthenticated caller must not be able to
+    // tell "gateway not bootstrapped" from "wrong password" — both
+    // return an identical 401. When no master password is stored we
+    // still burn an Argon2id verify (`verify_absent`) so the two paths
+    // are timing-indistinguishable as well as response-identical. The
+    // one-time setup URL printed at startup is how the operator
+    // bootstraps; the login form never needs to disclose that state.
     let phc = state
         .oauth()
         .master_password_hash()
         .await
-        .map_err(internal)?
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "gateway not yet configured — visit /oauth/setup first".to_string(),
-        ))?;
-
-    let ok = password::verify(&form.password, &phc).map_err(internal)?;
+        .map_err(internal)?;
+    let ok = match phc {
+        Some(phc) => password::verify(&form.password, &phc).map_err(internal)?,
+        None => password::verify_absent(&form.password),
+    };
     if !ok {
         state.login_limiter().record_failure(ip);
-        return Err((StatusCode::UNAUTHORIZED, "invalid password".to_string()));
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
     }
     state.login_limiter().record_success(ip);
 

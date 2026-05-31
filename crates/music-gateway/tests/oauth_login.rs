@@ -57,23 +57,55 @@ async fn get_login_renders_form() {
 }
 
 #[tokio::test]
-async fn post_login_without_master_password_returns_503() {
-    // Gateway not bootstrapped → can't accept logins.
-    let oauth = OauthStore::open_in_memory().await.unwrap();
-    let state =
-        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
-    let app = build_router(state);
+async fn post_login_without_master_password_returns_401_like_wrong_password() {
+    // Bootstrap state must not leak: an un-configured gateway answers a
+    // login attempt with the *same* 401 + body as a wrong password, so a
+    // caller can't tell whether setup has happened.
+    let unconfigured = {
+        let oauth = OauthStore::open_in_memory().await.unwrap();
+        let state =
+            common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+        build_router(state)
+            .oneshot(
+                Request::post("/oauth/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("password=anything-very-long"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
 
-    let resp = app
-        .oneshot(
-            Request::post("/oauth/login")
-                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from("password=anything-very-long"))
-                .unwrap(),
-        )
+    let wrong_password = {
+        let oauth = OauthStore::open_in_memory().await.unwrap();
+        bootstrap(&oauth, "the-real-password").await;
+        let state =
+            common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+        build_router(state)
+            .oneshot(
+                Request::post("/oauth/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("password=anything-very-long"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(unconfigured.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+
+    let unconfigured_body = unconfigured.into_body().collect().await.unwrap().to_bytes();
+    let wrong_password_body = wrong_password
+        .into_body()
+        .collect()
         .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        unconfigured_body, wrong_password_body,
+        "the two failure modes must be byte-identical"
+    );
 }
 
 #[tokio::test]
