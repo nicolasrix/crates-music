@@ -24,6 +24,8 @@ import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 import { evaluateScrobble, type ScrobbleState } from "./scrobble";
 import { evaluateSkip } from "./skip";
+import { nextPlayableIndex } from "./autoSkip";
+import { useRatingsMap } from "./useRatings";
 
 interface PlayerCtx {
   /** The currently-playing item's metadata, if known. */
@@ -68,6 +70,62 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const nowPlaying: Track | null =
     currentTrackId !== undefined ? trackMeta.get(currentTrackId) ?? null : null;
 
+  // --- Dislike auto-skip --------------------------------------------------
+  //
+  // When the queue *advances onto* a disliked track (album play, next,
+  // natural end, autoplay refill — all of which funnel through
+  // now_playing_index → currentTrackId), skip past it to the next playable
+  // track in the advance direction. A *direct* single-track click is an
+  // override: primePlayback records the primed id in directPlayRef and the
+  // effect lets it play even if disliked.
+  const ratings = useRatingsMap();
+  // The track the user explicitly chose to play — exempt from auto-skip.
+  const directPlayRef = useRef<string | null>(null);
+  // The disliked track we're actively skipping past. Dedups the WS echo
+  // (the effect re-fires on the same id) and signals the src-set effect to
+  // not bother loading audio for a track we're leaving immediately.
+  const pendingSkipRef = useRef<string | null>(null);
+  // Advance direction: +1 normally, -1 only while stepping backward
+  // (prev / media previoustrack). Reset to +1 by forward moves.
+  const advanceDirRef = useRef<1 | -1>(1);
+
+  // Declared *before* the src-set effect below so, on a track change, this
+  // runs first: it can set pendingSkipRef and redirect the cursor before the
+  // src-set effect would otherwise load the disliked track's audio.
+  useEffect(() => {
+    if (!currentTrackId) return;
+    // Fail open while ratings are unknown — never skip a track we can't
+    // yet classify.
+    if (ratings === undefined) return;
+    // Direct single-track click overrides the skip (consume the marker).
+    if (directPlayRef.current === currentTrackId) {
+      directPlayRef.current = null;
+      pendingSkipRef.current = null;
+      return;
+    }
+    const disliked = (id: string | undefined) =>
+      id !== undefined && ratings.get(id) === "dislike";
+    if (!disliked(currentTrackId)) {
+      pendingSkipRef.current = null;
+      return;
+    }
+    // Already skipping this exact track — the WS echo re-fired the effect.
+    if (pendingSkipRef.current === currentTrackId) return;
+    pendingSkipRef.current = currentTrackId;
+    const i = now_playing_index;
+    if (i === null) return;
+    const target = nextPlayableIndex(i, advanceDirRef.current, queue.items.length, (idx) =>
+      disliked(queue.items[idx]?.track_id),
+    );
+    if (target !== null) {
+      submit({ type: "set_now_playing", index: target });
+    } else {
+      // No playable track in this direction — stop rather than sit on a
+      // disliked one.
+      submit({ type: "set_playing", is_playing: false });
+    }
+  }, [currentTrackId, ratings, now_playing_index, queue.items, submit]);
+
   // Swap src when the now-playing track changes. The track id (not the
   // index) is the right dependency: reordering the queue under the
   // cursor is a no-op for playback.
@@ -90,6 +148,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
+    // We're skipping past this (disliked) track — the auto-skip effect has
+    // already redirected the cursor. Don't load or play its audio; the next
+    // track-change frame will set src for the track we land on.
+    if (pendingSkipRef.current === currentTrackId) return;
     scrobbleStateRef.current = {
       trackDurationMs: 0,
       elapsedMs: 0,
@@ -294,12 +356,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     ms.setActionHandler("pause", () => submit({ type: "set_playing", is_playing: false }));
     ms.setActionHandler("nexttrack", () => {
       if (i !== null && i + 1 < total) {
+        advanceDirRef.current = 1;
         maybeEmitSkip(leaving);
         submit({ type: "set_now_playing", index: i + 1 });
       }
     });
     ms.setActionHandler("previoustrack", () => {
       if (i !== null && i > 0) {
+        advanceDirRef.current = -1;
         maybeEmitSkip(leaving);
         submit({ type: "set_now_playing", index: i - 1 });
       }
@@ -326,6 +390,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handler = () => {
       const i = now_playing_index;
       if (i === null) return;
+      advanceDirRef.current = 1;
       const nextIndex = i + 1;
       if (nextIndex < queue.items.length) {
         submit({ type: "set_now_playing", index: nextIndex });
@@ -349,12 +414,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       togglePlay: () => submit({ type: "set_playing", is_playing: !is_playing }),
       next: () => {
         if (i !== null && i + 1 < queue.items.length) {
+          advanceDirRef.current = 1;
           maybeEmitSkip(currentTrackId);
           submit({ type: "set_now_playing", index: i + 1 });
         }
       },
       prev: () => {
         if (i !== null && i > 0) {
+          advanceDirRef.current = -1;
           maybeEmitSkip(currentTrackId);
           submit({ type: "set_now_playing", index: i - 1 });
         }
@@ -362,6 +429,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       primePlayback: (track) => {
         const a = audioRef.current;
         if (!a) return;
+        // A direct click on this track is an override: mark it exempt from
+        // dislike auto-skip so it plays even if disliked. Forward is the
+        // default advance direction for anything that follows it.
+        directPlayRef.current = track.id;
+        advanceDirRef.current = 1;
         // Picking a different track abandons the current one — report the
         // skip *before* clobbering src below (which resets currentTime).
         // Restarting the same track is not a skip.

@@ -15,6 +15,7 @@ import { Rum } from "./pages/diagnostics/Rum";
 import { Tracing } from "./pages/diagnostics/Tracing";
 import { Home } from "./pages/Home";
 import { LatentSpace } from "./pages/LatentSpace";
+import { LikedSongs } from "./pages/LikedSongs";
 import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
@@ -87,6 +88,7 @@ function Routed({ path }: { path: string }) {
   if (path === "/search/albums") return <SearchBucket bucket="albums" />;
   if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
+  if (path === "/liked") return <LikedSongs />;
   if (path === "/station") return <Station />;
   if (path === "/diagnostics") return <DiagnosticsHome />;
   if (path === "/diagnostics/recommender") return <Recommender />;
