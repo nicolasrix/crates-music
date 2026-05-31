@@ -49,6 +49,11 @@ const MAX_EXCLUDE: usize = 1000;
 /// by `MIN_UPCOMING + history` (handful of items). 400 protects the
 /// SQLite IN-clause and request payload.
 const MAX_QUEUE: usize = 400;
+/// Hard cap on `track_ids` to /v1/recommend/enqueue. Each id is a SQLite
+/// write in a loop; an unbounded array lets an authenticated client flood
+/// the ingest queue and stall normal ingest. A full-library re-embed is
+/// driven by the ingest worker, not a single enqueue call.
+const MAX_ENQUEUE_IDS: usize = 1000;
 const DEFAULT_SAMPLE_SIZE: usize = 8;
 const DEFAULT_PER_SEED_N: usize = 20;
 const DEFAULT_TOP_N: usize = 20;
@@ -246,6 +251,9 @@ pub async fn enqueue(
     let Ok(Json(req)) = payload else {
         return (StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
     };
+    if req.track_ids.len() > MAX_ENQUEUE_IDS {
+        return (StatusCode::BAD_REQUEST, "too many track_ids").into_response();
+    }
     // Dedupe inside a single request. The store's INSERT OR IGNORE
     // handles cross-request idempotency on (track_id, model_version).
     let unique: HashSet<&str> = req.track_ids.iter().map(String::as_str).collect();

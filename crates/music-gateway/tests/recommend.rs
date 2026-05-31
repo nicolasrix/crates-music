@@ -198,6 +198,32 @@ async fn recommend_enqueue_is_idempotent() {
     );
 }
 
+#[tokio::test]
+async fn recommend_enqueue_rejects_oversized_track_ids() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+
+    // MAX_ENQUEUE_IDS is 1000; 1001 must 400 before any SQLite write.
+    let track_ids: Vec<String> = (0..1001).map(|i| format!("t{i}")).collect();
+    let body = json!({ "track_ids": track_ids }).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/recommend/enqueue")
+        .header("authorization", format!("Bearer {TEST_BEARER}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let counts = state
+        .embedding_store()
+        .counts(state.recommend_model_version())
+        .await
+        .unwrap();
+    assert_eq!(counts.not_started, 0, "rejected batch must not enqueue");
+}
+
 // --- /v1/recommend/from-seeds ---
 //
 // Aggregation correctness lives in the music-recommend unit tests
