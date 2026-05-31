@@ -1033,6 +1033,15 @@ fn ensure_trailing_slash(s: &str) -> String {
 pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        // Do not follow redirects. This client talks only to the trusted
+        // upstream Navidrome with the gateway's credentials attached to
+        // every request. If a (compromised or misconfigured) upstream
+        // answered with a 3xx to an attacker-controlled host, reqwest's
+        // default policy would replay the request — and its query string,
+        // which carries `u`/`t`/`s` auth params — to that location.
+        // Surfacing the 3xx to the client instead keeps the credentials
+        // from ever leaving the gateway↔Navidrome hop.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("rustls reqwest client should always build")
 }
