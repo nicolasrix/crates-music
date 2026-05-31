@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import os
 import re
 from typing import Annotated, Mapping
@@ -27,6 +28,10 @@ from pydantic import BaseModel, Field
 
 from embedder import reduce as reduce_module
 from embedder.protocol import Embedder
+
+# Propagates to uvicorn's handlers; no handler attached here so importing
+# the app doesn't reconfigure logging for the host process.
+_log = logging.getLogger("embedder")
 
 # Upper bounds on request size. The only caller of these endpoints is the
 # gateway (single-user, ~10⁴ tracks), so these are guardrails against a
@@ -157,6 +162,29 @@ def _require_env(name: str, backend: str) -> str:
     return val
 
 
+def _auth_disabled_warning(backend: str, token: str | None) -> str | None:
+    """Return a warning message if a non-stub backend runs without a
+    bearer token, else None.
+
+    Fail-open (no token → no auth) is intentional for the `stub`/dev
+    backend, where the sidecar is typically only reachable on loopback.
+    But a real model backend is the split-host deployment shape, where
+    the sidecar is reachable across the LAN — there, a missing token
+    silently exposes the inference + file-opening endpoints to every
+    peer. We can't know the network topology from inside the process, so
+    we don't hard-fail (that would break a working loopback deployment on
+    a restart that happened to drop the env var); we make the
+    misconfiguration impossible to miss in the logs instead.
+    """
+    if token is None and backend != "stub":
+        return (
+            f"EMBEDDER_BEARER_TOKEN is unset but EMBEDDER_BACKEND={backend!r}: "
+            "/embed/* and /reduce are UNAUTHENTICATED. Set EMBEDDER_BEARER_TOKEN "
+            "for any split-host (LAN-reachable) deployment."
+        )
+    return None
+
+
 def _default_embedder() -> Embedder:
     """Construct the default backend per the EMBEDDER_BACKEND env var.
 
@@ -254,6 +282,12 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
     # var doesn't quietly accept everyone with `Bearer `.
     token = os.environ.get("EMBEDDER_BEARER_TOKEN", "").strip()
     app.state.bearer_token = token or None
+    # Fail loud (but don't hard-fail) when a real backend is exposed with
+    # auth off — the common split-host footgun is dropping the env var.
+    backend = os.environ.get("EMBEDDER_BACKEND", "stub").lower()
+    warning = _auth_disabled_warning(backend, app.state.bearer_token)
+    if warning is not None:
+        _log.warning(warning)
 
     @app.get("/healthz", response_model=HealthResponse)
     def healthz(emb: EmbedderDep, response: Response) -> HealthResponse:

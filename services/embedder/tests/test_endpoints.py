@@ -9,10 +9,12 @@ server respects the model_loaded flag.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
-from embedder.app import build_app, get_embedder
+from embedder.app import _auth_disabled_warning, build_app, get_embedder
 from embedder.stub import DEFAULT_DIM as STUB_DIM, StubEmbedder
 
 
@@ -492,11 +494,14 @@ def test_auth_reduce_401_without_bearer(secured_app, monkeypatch, tmp_path):
     assert r.status_code == 401, r.text
 
 
-def test_auth_no_token_set_allows_everything(monkeypatch):
-    # Default behaviour: env var absent → no enforcement, calls pass
-    # through. Single-host deployments don't need to set anything.
+def test_auth_no_token_stub_backend_allows_everything(monkeypatch, caplog):
+    # Default dev behaviour: stub backend + no token → no enforcement,
+    # calls pass through, and NO warning is emitted (loopback dev is the
+    # intended fail-open case).
     monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
-    app = build_app()
+    monkeypatch.delenv("EMBEDDER_BACKEND", raising=False)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app()
     stub = StubEmbedder(model_version="stub-v1", loaded=True)
     app.dependency_overrides[get_embedder] = lambda: stub
     client = TestClient(app)
@@ -506,6 +511,30 @@ def test_auth_no_token_set_allows_everything(monkeypatch):
         headers={"content-type": "application/octet-stream"},
     )
     assert r.status_code == 200, r.text
+    assert not any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_no_token_real_backend_warns(monkeypatch, caplog):
+    # Canary: a real model backend with no token is the split-host
+    # footgun — auth is silently off. We don't hard-fail (loopback
+    # deployments stay working), but the warning must be impossible to
+    # miss. Inject a stub so no model/torch load happens; the warning
+    # keys off EMBEDDER_BACKEND, not the injected embedder.
+    monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("EMBEDDER_BACKEND", "clamp3")
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app(embedder=stub)
+    assert app.state.bearer_token is None
+    assert any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_disabled_warning_decision():
+    # Pure decision helper: warn only for a non-stub backend with no token.
+    assert _auth_disabled_warning("stub", None) is None
+    assert _auth_disabled_warning("clamp3", "secret") is None
+    assert _auth_disabled_warning("clap", None) is not None
+    assert _auth_disabled_warning("clamp3", None) is not None
 
 
 def test_vectors_are_l2_normalized(app_with_loaded_stub):
