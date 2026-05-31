@@ -37,16 +37,14 @@ async fn readyz(app: axum::Router) -> (StatusCode, Value) {
     (status, body)
 }
 
-fn mount_navidrome_ping_ok(server: &MockServer) -> impl std::future::Future<Output = ()> + '_ {
-    async move {
-        Mock::given(m_method("GET"))
-            .and(m_path("/rest/ping"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "subsonic-response": { "status": "ok", "version": "1.16.1" }
-            })))
-            .mount(server)
-            .await;
-    }
+async fn mount_navidrome_ping_ok(server: &MockServer) {
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "subsonic-response": { "status": "ok", "version": "1.16.1" }
+        })))
+        .mount(server)
+        .await;
 }
 
 async fn mount_embedder_loaded(server: &MockServer) {

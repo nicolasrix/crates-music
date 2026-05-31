@@ -103,8 +103,7 @@ impl SyncStore {
     pub async fn apply(&self, op: &SyncOp) -> Result<u64, ApplyError> {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0);
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
         let mut guard = self.inner.write().await;
         // Capture the active session before apply — StopSession and
         // Clear both null `session_anchor`, so we wouldn't be able to
@@ -122,7 +121,7 @@ impl SyncStore {
             version,
         });
         drop(guard);
-        self.mirror_session_lifecycle(op, &active_before, now_ms)
+        self.mirror_session_lifecycle(op, active_before.as_ref(), now_ms)
             .await;
         Ok(version)
     }
@@ -134,7 +133,7 @@ impl SyncStore {
     async fn mirror_session_lifecycle(
         &self,
         op: &SyncOp,
-        active_before: &Option<SessionId>,
+        active_before: Option<&SessionId>,
         now_ms: i64,
     ) {
         let Some(sessions) = &self.sessions else {
@@ -160,11 +159,11 @@ impl SyncStore {
             }
             SyncOp::StopSession | SyncOp::Clear => {
                 // Clear also nulls the anchor — mirror the implicit stop.
-                if let Some(sid) = active_before {
-                    if let Err(err) = sessions.stop(sid, now_ms).await {
-                        tracing::warn!(error = %err, session_id = %sid.as_str(),
-                            "recommend_sessions.stop failed; in-memory anchor still applied");
-                    }
+                if let Some(sid) = active_before
+                    && let Err(err) = sessions.stop(sid, now_ms).await
+                {
+                    tracing::warn!(error = %err, session_id = %sid.as_str(),
+                        "recommend_sessions.stop failed; in-memory anchor still applied");
                 }
             }
             _ => {}

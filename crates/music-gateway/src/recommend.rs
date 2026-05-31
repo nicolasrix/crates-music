@@ -619,17 +619,12 @@ pub async fn from_seeds(
     if let Some(sid) = req.session_id.as_deref()
         && !sid.is_empty()
     {
-        match state.feedback().downvoted_in_session(sid).await {
-            Ok(downvoted) => {
-                for id in downvoted {
-                    exclude.insert(id);
-                }
-            }
-            Err(_) => {
-                // Don't fail the recommend request on a feedback lookup
-                // failure — surface fewer "fresh" candidates rather
-                // than nothing. The user's vote is durably stored; the
-                // exclusion just doesn't apply this round.
+        // A feedback lookup failure shouldn't fail the recommend request —
+        // surface fewer "fresh" candidates rather than nothing. The user's
+        // vote is durably stored; the exclusion just doesn't apply this round.
+        if let Ok(downvoted) = state.feedback().downvoted_in_session(sid).await {
+            for id in downvoted {
+                exclude.insert(id);
             }
         }
     }

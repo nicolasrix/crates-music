@@ -97,7 +97,7 @@ impl SyncState {
                     });
                 }
                 let anchor_track = items[*anchor_index].track_id.clone();
-                self.playback.queue.items = items.clone();
+                self.playback.queue.items.clone_from(items);
                 self.playback.now_playing_index = Some(*anchor_index);
                 self.playback.position_ms = 0;
                 self.playback.is_playing = true;

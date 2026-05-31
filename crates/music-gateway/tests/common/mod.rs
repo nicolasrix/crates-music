@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use music_cache::Cache;
 use music_gateway::Config;
-use music_gateway::config::{CacheConfig, OauthConfig, ServerConfig, UpstreamConfig};
+use music_gateway::config::{
+    CacheConfig, OauthConfig, RecommendConfig, ServerConfig, UpstreamConfig,
+};
 use music_gateway::diagnostics::TraceStore;
 use music_gateway::embedder::EmbedderHandle;
 use music_gateway::oauth::{OauthStore, SetupToken};
@@ -61,7 +63,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         },
         cache: CacheConfig::default(),
         oauth: OauthConfig::default(),
-        recommend: Default::default(),
+        recommend: RecommendConfig::default(),
         embedder: None,
     }
 }

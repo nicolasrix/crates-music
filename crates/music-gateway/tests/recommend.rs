@@ -1743,7 +1743,7 @@ mod station {
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn fake_embed_response(vector: Vec<f32>) -> Value {
+    fn fake_embed_response(vector: &[f32]) -> Value {
         json!({
             "vector": vector,
             "dim": vector.len(),
@@ -1777,7 +1777,9 @@ mod station {
         Mock::given(method("POST"))
             .and(path("/embed/text"))
             .and(body_json(json!({ "text": "sunny afternoon" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fake_embed_response(unit_at(3))))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(fake_embed_response(&unit_at(3))),
+            )
             .mount(&server)
             .await;
 

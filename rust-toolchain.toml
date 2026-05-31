@@ -1,3 +1,7 @@
+# Pinned to a concrete version (not "stable") so fmt/clippy output is
+# reproducible across contributor machines — a floating "stable" drifts as
+# each box's toolchain advances and silently introduces new lint/format
+# diffs. Bump deliberately, paired with a `cargo fmt` + clippy pass.
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]

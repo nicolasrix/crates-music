@@ -30,7 +30,7 @@ use tokio::time::Instant;
 /// Polling cadence. SQLite reads here are cheap (one COUNT(*) on an
 /// indexed column); this is the latency tax between "embedding lands"
 /// and "auto-recompute fires."
-const CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const CHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Below this many new embeddings since the last projection, skip —
 /// UMAP wall-clock cost is dominated by setup, not the marginal point,
@@ -273,6 +273,10 @@ async fn run_one_reduce(
 /// State threaded through the loop. Held out as a struct so
 /// `decide_action` is pure and unit-testable without spinning up a real
 /// SQLite/embedder pair.
+// The `last_` prefix is semantic here — each field is the last-observed
+// value of a distinct quantity — so the shared-prefix pedantic lint is a
+// false positive.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LoopState {
     last_reduced_count: u64,
@@ -318,8 +322,7 @@ async fn initial_baseline(store: &ProjectionStore, model_version: &ModelVersion)
             .iter()
             .filter(|v| v.proj_version.starts_with("auto-"))
             .max_by_key(|v| v.created_at_ms)
-            .map(|v| u64::try_from(v.point_count.max(0)).unwrap_or(0))
-            .unwrap_or(0),
+            .map_or(0, |v| u64::try_from(v.point_count.max(0)).unwrap_or(0)),
         Err(e) => {
             tracing::warn!(error = %e, "auto-projection: initial baseline query failed");
             0
@@ -330,8 +333,7 @@ async fn initial_baseline(store: &ProjectionStore, model_version: &ModelVersion)
 fn now_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis())
 }
 
 #[cfg(test)]
@@ -356,7 +358,7 @@ mod tests {
             7,
             Duration::from_secs(90),
             10,
-            t0 + Duration::from_secs(60),
+            t0 + Duration::from_mins(1),
         );
         assert_eq!(action, Action::UpdateBaseline);
     }
@@ -399,7 +401,7 @@ mod tests {
             12,
             Duration::from_secs(90),
             10,
-            t0 + Duration::from_secs(120),
+            t0 + Duration::from_mins(2),
         );
         assert_eq!(action, Action::Reduce);
     }
@@ -430,7 +432,7 @@ mod tests {
             50,
             Duration::from_secs(90),
             10,
-            t0 + Duration::from_secs(3600),
+            t0 + Duration::from_hours(1),
         );
         assert_eq!(action, Action::Wait);
     }
@@ -446,7 +448,7 @@ mod tests {
             80,
             Duration::from_secs(90),
             10,
-            t0 + Duration::from_secs(3600),
+            t0 + Duration::from_hours(1),
         );
         // Count differs from last_seen → UpdateBaseline first.
         assert_eq!(action, Action::UpdateBaseline);

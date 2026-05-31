@@ -999,7 +999,7 @@ fn print_table(r: &Report) {
         opt(r.drop_.min),
         opt(r.drop_.max),
     );
-    println!("admit_dist (1-sim)        {}", opt(r.admit.mean_distance),);
+    println!("admit_dist (1-sim)        {}", opt(r.admit.mean_distance));
     println!();
     println!(
         "tax/call    {:>4} {} {} {}     -    {}",

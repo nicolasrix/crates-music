@@ -216,8 +216,7 @@ impl EventStore {
         // Build a parameterised "WHERE session_id IN (?, ?, …)". sqlx
         // doesn't expand `Vec` natively for SQLite — inline the right
         // number of placeholders by hand.
-        let placeholders = std::iter::repeat("?")
-            .take(session_ids.len())
+        let placeholders = std::iter::repeat_n("?", session_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(

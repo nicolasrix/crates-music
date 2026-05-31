@@ -108,7 +108,7 @@ impl SessionStore {
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(row_to_session))
+        Ok(row.as_ref().map(row_to_session))
     }
 
     /// Full row by id, regardless of open/closed state. Used by the
@@ -122,7 +122,7 @@ impl SessionStore {
         .bind(session_id.as_str())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(row_to_session))
+        Ok(row.as_ref().map(row_to_session))
     }
 
     /// Newest-first by `started_ms`. Drives the diagnostics history
@@ -138,11 +138,11 @@ impl SessionStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(row_to_session).collect())
+        Ok(rows.iter().map(row_to_session).collect())
     }
 }
 
-fn row_to_session(r: sqlx::sqlite::SqliteRow) -> SessionRow {
+fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> SessionRow {
     SessionRow {
         session_id: SessionId::from(r.get::<String, _>("session_id")),
         anchor_track_id: TrackId::from(r.get::<String, _>("anchor_track_id")),
