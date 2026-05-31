@@ -98,6 +98,44 @@ async fn post_login_with_wrong_password_returns_401_and_no_cookie() {
 }
 
 #[tokio::test]
+async fn repeated_wrong_passwords_lock_out_with_429() {
+    let oauth = OauthStore::open_in_memory().await.unwrap();
+    bootstrap(&oauth, "right-password-here").await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+    let app = build_router(state);
+
+    let bad = || {
+        Request::post("/oauth/login")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("password=nope"))
+            .unwrap()
+    };
+
+    // Five failures are each answered 401 (the limiter trips ON the
+    // fifth but doesn't block the request that caused it).
+    for _ in 0..5 {
+        let resp = app.clone().oneshot(bad()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // The sixth attempt is locked out — even with the *correct* password,
+    // proving the gate runs before password verification.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/oauth/login")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=right-password-here"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(extract_set_cookie(resp.headers()).is_none());
+}
+
+#[tokio::test]
 async fn post_login_with_correct_password_sets_cookie_and_redirects() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
     bootstrap(&oauth, "right-password-here").await;

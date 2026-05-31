@@ -296,6 +296,17 @@ pub struct RefitWhiteningResponse {
 pub async fn refit_whitening(
     State(state): State<AppState>,
 ) -> Result<Json<RefitWhiteningResponse>, (StatusCode, &'static str)> {
+    // Serialise refits: a single permit means a second concurrent caller
+    // gets a fast 429 instead of duplicating the whole-corpus fit and
+    // racing on the persisted transform. The permit is held for the
+    // duration of this handler (dropped on return).
+    let _permit = state.refit_gate().try_acquire().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "a whitening refit is already in progress",
+        )
+    })?;
+
     let model_version = state.recommend_model_version().clone();
     let corpus = state
         .embedding_store()

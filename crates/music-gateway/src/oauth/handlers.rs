@@ -5,9 +5,11 @@
 
 use std::time::Duration;
 
+use std::net::{IpAddr, SocketAddr};
+
 use axum::Form;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -140,9 +142,25 @@ pub async fn login_get(Query(q): Query<LoginQuery>) -> Html<String> {
 /// cookie, and redirects (303 See Other).
 pub async fn login_post(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     Query(q): Query<LoginQuery>,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Peer address as the limiter key. Falls back to an unspecified
+    // address when connection info is absent (e.g. unit tests via
+    // `oneshot`), which buckets such callers together — fine, they share
+    // one throttle. See `LoginLimiter` for the reverse-proxy caveat.
+    let ip = connect.map_or(IpAddr::from([0, 0, 0, 0]), |ci| ci.0.ip());
+    if let Err(remaining) = state.login_limiter().check(ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many login attempts; retry in {}s",
+                remaining.as_secs() + 1
+            ),
+        ));
+    }
+
     // Gateway must be bootstrapped first.
     let phc = state
         .oauth()
@@ -156,8 +174,10 @@ pub async fn login_post(
 
     let ok = password::verify(&form.password, &phc).map_err(internal)?;
     if !ok {
+        state.login_limiter().record_failure(ip);
         return Err((StatusCode::UNAUTHORIZED, "invalid password".to_string()));
     }
+    state.login_limiter().record_success(ip);
 
     let issued = state
         .oauth()

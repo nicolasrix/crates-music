@@ -1959,4 +1959,22 @@ mod refit_whitening {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
+
+    #[tokio::test]
+    async fn returns_429_when_a_refit_is_already_running() {
+        let state = build_state(test_config()).await;
+        seed_done(&state, DIM).await;
+
+        // Hold the single refit permit to simulate an in-flight refit;
+        // the handler's `try_acquire` must then fail fast with 429
+        // rather than queue or duplicate the work.
+        let _held = state.refit_gate().try_acquire().unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(auth_post("/v1/recommend/refit_whitening", &json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 }
