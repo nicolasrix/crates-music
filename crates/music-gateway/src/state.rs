@@ -252,6 +252,20 @@ impl AppState {
         self.inner.config.recommend.like_bonus
     }
 
+    /// Additive relevance bonus a candidate earns for belonging to a liked
+    /// *album*. Always-on; from `[recommend] like_bonus_album`. Lower than
+    /// [`Self::like_bonus`] (track > album > artist contribution order).
+    pub fn like_bonus_album(&self) -> f32 {
+        self.inner.config.recommend.like_bonus_album
+    }
+
+    /// Additive relevance bonus a candidate earns for belonging to a liked
+    /// *artist*. Always-on; from `[recommend] like_bonus_artist`. The
+    /// smallest of the three boosts.
+    pub fn like_bonus_artist(&self) -> f32 {
+        self.inner.config.recommend.like_bonus_artist
+    }
+
     /// Affinity decay half-life (ms) from config. Available regardless of
     /// `preference_enabled`: the affinity counter is captured on every
     /// play / skip / vote so the feature has full history the moment it's

@@ -31,7 +31,11 @@ Optional env (with defaults):
     RECOMMEND_PREFERENCE_WEIGHT         (float >= 0; gateway default 0.15)
     RECOMMEND_AFFINITY_HALF_LIFE_DAYS   (float > 0; gateway default 30)
     RECOMMEND_LIKE_BONUS                (float >= 0; gateway default 0.15 —
-                                         always-on durable-like boost)
+                                         always-on liked-track boost)
+    RECOMMEND_LIKE_BONUS_ALBUM          (float >= 0; gateway default 0.06 —
+                                         liked-album boost)
+    RECOMMEND_LIKE_BONUS_ARTIST         (float >= 0; gateway default 0.03 —
+                                         liked-artist boost)
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
@@ -145,9 +149,17 @@ def build_config(env: Mapping[str, str]) -> str:
         env, "RECOMMEND_AFFINITY_HALF_LIFE_DAYS", positive=True
     )
     # Durable-like boost. Always-on server-side (independent of
-    # preference_enabled), so this knob just tunes the magnitude; an unset
-    # key omits the field and the gateway applies its own default.
+    # preference_enabled), so these knobs just tune the magnitude; an unset
+    # key omits the field and the gateway applies its own default. The three
+    # tiers follow the contribution hierarchy track > album > artist
+    # (gateway defaults 0.15 / 0.06 / 0.03).
     like_bonus = _parse_float(env, "RECOMMEND_LIKE_BONUS", non_negative=True)
+    like_bonus_album = _parse_float(
+        env, "RECOMMEND_LIKE_BONUS_ALBUM", non_negative=True
+    )
+    like_bonus_artist = _parse_float(
+        env, "RECOMMEND_LIKE_BONUS_ARTIST", non_negative=True
+    )
 
     parts: list[str] = []
 
@@ -206,6 +218,10 @@ def build_config(env: Mapping[str, str]) -> str:
         recommend_lines.append(f"affinity_half_life_days = {affinity_half_life}")
     if like_bonus is not None:
         recommend_lines.append(f"like_bonus = {like_bonus}")
+    if like_bonus_album is not None:
+        recommend_lines.append(f"like_bonus_album = {like_bonus_album}")
+    if like_bonus_artist is not None:
+        recommend_lines.append(f"like_bonus_artist = {like_bonus_artist}")
     if recommend_lines:
         parts.append("[recommend]")
         parts.extend(recommend_lines)

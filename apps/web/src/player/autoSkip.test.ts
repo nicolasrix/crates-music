@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextPlayableIndex } from "./autoSkip";
+import { isDislikedEntity, nextPlayableIndex, type DislikeMap } from "./autoSkip";
 
 // Queue of 5; dislike a set of indices and walk from `start`.
 function walk(
@@ -41,5 +41,55 @@ describe("nextPlayableIndex", () => {
   it("stops at the forward bound rather than wrapping", () => {
     // last index disliked, nothing after → null (no wrap to the front).
     expect(walk(4, 1, 5, [4])).toBeNull();
+  });
+});
+
+describe("isDislikedEntity", () => {
+  const maps = (
+    tracks: [string, "like" | "dislike"][],
+    albums: [string, "like" | "dislike"][],
+    artists: [string, "like" | "dislike"][],
+  ): { tracks: DislikeMap; albums: DislikeMap; artists: DislikeMap } => ({
+    tracks: new Map(tracks),
+    albums: new Map(albums),
+    artists: new Map(artists),
+  });
+
+  it("is false for an undefined track id", () => {
+    expect(isDislikedEntity(undefined, undefined, maps([], [], []))).toBe(false);
+  });
+
+  it("detects a directly disliked track", () => {
+    expect(
+      isDislikedEntity("t1", { albumId: "al1", artistId: "ar1" }, maps([["t1", "dislike"]], [], [])),
+    ).toBe(true);
+  });
+
+  it("detects a track whose album is disliked", () => {
+    expect(
+      isDislikedEntity("t1", { albumId: "al1", artistId: "ar1" }, maps([], [["al1", "dislike"]], [])),
+    ).toBe(true);
+  });
+
+  it("detects a track whose artist is disliked", () => {
+    expect(
+      isDislikedEntity("t1", { albumId: "al1", artistId: "ar1" }, maps([], [], [["ar1", "dislike"]])),
+    ).toBe(true);
+  });
+
+  it("is false when the track and its (known) parents are all neutral or liked", () => {
+    expect(
+      isDislikedEntity(
+        "t1",
+        { albumId: "al1", artistId: "ar1" },
+        maps([["t1", "like"]], [["al1", "like"]], []),
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores parent dislikes when the parent ids are unknown (unhydrated)", () => {
+    // A disliked album, but this queue item isn't hydrated so we don't know
+    // its album_id — it can't be skipped on lookahead (converges on landing).
+    expect(isDislikedEntity("t1", undefined, maps([], [["al1", "dislike"]], []))).toBe(false);
   });
 });

@@ -202,6 +202,19 @@ pub struct RecommendConfig {
     /// from just outside the raw top-N without swamping acoustic similarity.
     #[serde(default = "default_like_bonus")]
     pub like_bonus: f32,
+
+    /// Additive relevance bonus a candidate earns for belonging to a
+    /// *liked album*. Always-on, same channel as `like_bonus`. Lower than
+    /// `like_bonus` so a directly-liked track always outranks a same-album
+    /// sibling — the track > album > artist contribution hierarchy.
+    #[serde(default = "default_like_bonus_album")]
+    pub like_bonus_album: f32,
+
+    /// Additive relevance bonus a candidate earns for belonging to a
+    /// *liked artist*. The smallest of the three (broadest signal).
+    /// `like_bonus_album + like_bonus_artist` is kept below `like_bonus`.
+    #[serde(default = "default_like_bonus_artist")]
+    pub like_bonus_artist: f32,
 }
 
 impl Default for RecommendConfig {
@@ -213,6 +226,8 @@ impl Default for RecommendConfig {
             preference_weight: default_preference_weight(),
             affinity_half_life_days: default_affinity_half_life_days(),
             like_bonus: default_like_bonus(),
+            like_bonus_album: default_like_bonus_album(),
+            like_bonus_artist: default_like_bonus_artist(),
         }
     }
 }
@@ -239,6 +254,14 @@ fn default_affinity_half_life_days() -> f32 {
 
 fn default_like_bonus() -> f32 {
     music_recommend::LIKE_BONUS
+}
+
+fn default_like_bonus_album() -> f32 {
+    music_recommend::LIKE_BONUS_ALBUM
+}
+
+fn default_like_bonus_artist() -> f32 {
+    music_recommend::LIKE_BONUS_ARTIST
 }
 
 impl Default for OauthConfig {
