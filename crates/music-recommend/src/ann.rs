@@ -339,9 +339,18 @@ impl AnnIndex {
     /// Text-query search (stations). Whitens via the cross-modal text mean
     /// so a raw text embedding lands in the same whitened space as the
     /// stored audio vectors — without this, audio-fit whitening collapses
-    /// text queries together. No exclusion list: stations seed from text,
-    /// not a track id.
-    pub fn query_text(&self, query: &[f32], k: usize) -> Result<Vec<AnnQueryResult>, AnnError> {
+    /// text queries together.
+    ///
+    /// `exclude` drops tracks from the result (disliked tracks, primarily).
+    /// `search_whitened` over-fetches by `exclude.len()` so a station still
+    /// returns `k` results after filtering — post-filtering on top of a
+    /// plain top-k would under-return.
+    pub fn query_text(
+        &self,
+        query: &[f32],
+        k: usize,
+        exclude: &[TrackId],
+    ) -> Result<Vec<AnnQueryResult>, AnnError> {
         if query.len() != self.dim {
             return Err(AnnError::DimMismatch {
                 expected: self.dim,
@@ -352,7 +361,7 @@ impl AnnIndex {
             return Ok(Vec::new());
         }
         let query = self.whiten_text(query)?;
-        self.search_whitened(&query, k, &[])
+        self.search_whitened(&query, k, exclude)
     }
 
     /// Core HNSW search over an already-whitened query vector. Shared by
@@ -705,12 +714,30 @@ mod tests {
             .map(|r| r.track_id)
             .collect();
         let text: Vec<_> = ann
-            .query_text(&probe, 5)
+            .query_text(&probe, 5, &[])
             .unwrap()
             .into_iter()
             .map(|r| r.track_id)
             .collect();
         assert_eq!(audio, text);
+    }
+
+    #[test]
+    fn query_text_excludes_listed_tracks() {
+        // A disliked track must never come back from a station, even when
+        // it would otherwise rank in the top-k. Over-fetch keeps the
+        // result at `k` after the excluded one is dropped.
+        let data = corpus();
+        let ann = AnnIndex::open_in_memory(4, 16).unwrap();
+        fill(&ann, &data);
+        let probe = vec![3.0_f32, 0.5, 0.2, 0.0];
+        let baseline = ann.query_text(&probe, 5, &[]).unwrap();
+        let banned = baseline[0].track_id.clone();
+        let filtered = ann
+            .query_text(&probe, 5, std::slice::from_ref(&banned))
+            .unwrap();
+        assert!(filtered.iter().all(|r| r.track_id != banned));
+        assert_eq!(filtered.len(), 5, "over-fetch should backfill to k");
     }
 
     #[test]

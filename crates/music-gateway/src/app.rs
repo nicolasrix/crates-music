@@ -6,7 +6,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::StatusCode,
     middleware::from_fn_with_state,
-    routing::{any, get, post},
+    routing::{any, get, post, put},
 };
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
@@ -16,6 +16,7 @@ use crate::admin;
 use crate::auth::require_bearer;
 use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
+use crate::library_rating;
 use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
 use crate::readyz;
@@ -42,6 +43,10 @@ use crate::sync::handlers as sync_handlers;
 /// forward bodies for Navidrome and must not inherit this limit.
 const MAX_V1_BODY_BYTES: usize = 1024 * 1024;
 
+// A flat, declarative route table — the `too_many_lines` lint fires once
+// the list crosses 100 entries' worth of lines, but splitting a route
+// registry across helpers hurts readability more than it helps.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(healthz))
@@ -72,6 +77,8 @@ pub fn build_router(state: AppState) -> Router {
             post(recommend::refit_whitening),
         )
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
+        .route("/v1/library/rating", put(library_rating::put_rating))
+        .route("/v1/library/ratings", get(library_rating::list_ratings))
         .route("/v1/events", post(events::submit))
         .route(
             "/v1/admin/cache/invalidate",
@@ -140,8 +147,7 @@ pub fn build_router(state: AppState) -> Router {
             get(diagnostics_handlers::recommend_sessions),
         )
         // Coarse body cap on the JSON API only — see MAX_V1_BODY_BYTES.
-        // Scoped to this sub-router so it does NOT reach the /rest proxy
-        // below once the two are merged.
+        // Scoped here so it does NOT reach the /rest proxy once merged.
         .layer(DefaultBodyLimit::max(MAX_V1_BODY_BYTES));
 
     let rest = Router::new()

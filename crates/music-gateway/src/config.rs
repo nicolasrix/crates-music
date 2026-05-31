@@ -193,6 +193,15 @@ pub struct RecommendConfig {
     /// fades toward zero with this half-life, so taste can drift.
     #[serde(default = "default_affinity_half_life_days")]
     pub affinity_half_life_days: f32,
+
+    /// Additive relevance bonus a *liked* track earns when rescoring
+    /// recommendations (`relevance += like_bonus`). Unlike
+    /// `preference_weight` this is always-on — durable likes/dislikes are
+    /// an explicit signal that applies regardless of `preference_enabled`.
+    /// Same order as the preference weight: enough to pull a liked track in
+    /// from just outside the raw top-N without swamping acoustic similarity.
+    #[serde(default = "default_like_bonus")]
+    pub like_bonus: f32,
 }
 
 impl Default for RecommendConfig {
@@ -203,6 +212,7 @@ impl Default for RecommendConfig {
             preference_enabled: default_preference_enabled(),
             preference_weight: default_preference_weight(),
             affinity_half_life_days: default_affinity_half_life_days(),
+            like_bonus: default_like_bonus(),
         }
     }
 }
@@ -225,6 +235,10 @@ fn default_preference_weight() -> f32 {
 
 fn default_affinity_half_life_days() -> f32 {
     30.0
+}
+
+fn default_like_bonus() -> f32 {
+    music_recommend::LIKE_BONUS
 }
 
 impl Default for OauthConfig {

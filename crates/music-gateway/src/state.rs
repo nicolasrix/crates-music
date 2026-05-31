@@ -13,9 +13,10 @@ use music_cache::Cache;
 use music_recommend::EventStore;
 use music_recommend::FeedbackStore;
 use music_recommend::PlayHistoryStore;
-use music_recommend::TrackAffinityStore;
 use music_recommend::ProjectionStore;
+use music_recommend::RatingStore;
 use music_recommend::SessionStore;
+use music_recommend::TrackAffinityStore;
 use music_recommend::WhiteningStore;
 use music_recommend::ann::AnnIndex;
 use music_recommend::metadata::MetadataStore;
@@ -63,6 +64,11 @@ struct Inner {
     play_history: PlayHistoryStore,
     feedback: FeedbackStore,
     track_affinity: TrackAffinityStore,
+    /// Durable per-track like/dislike — the user's explicit taste. A
+    /// separate channel from `track_affinity` (that one decays; ratings
+    /// don't). Drives always-on dislike-exclusion and like-boost in the
+    /// recommend path, regardless of `preference_enabled`.
+    ratings: RatingStore,
     projection: ProjectionStore,
     sessions: SessionStore,
     ann: Arc<AnnIndex>,
@@ -128,6 +134,7 @@ impl AppState {
         let play_history = PlayHistoryStore::new(embedding_store.pool().clone());
         let feedback = FeedbackStore::new(embedding_store.pool().clone());
         let track_affinity = TrackAffinityStore::new(embedding_store.pool().clone());
+        let ratings = RatingStore::new(embedding_store.pool().clone());
         let projection = ProjectionStore::new(embedding_store.pool().clone());
         let sessions = SessionStore::new(embedding_store.pool().clone());
         let whitening_store = WhiteningStore::new(embedding_store.pool().clone());
@@ -146,6 +153,7 @@ impl AppState {
                 play_history,
                 feedback,
                 track_affinity,
+                ratings,
                 projection,
                 sessions,
                 ann,
@@ -230,6 +238,18 @@ impl AppState {
 
     pub fn track_affinity(&self) -> &TrackAffinityStore {
         &self.inner.track_affinity
+    }
+
+    pub fn ratings(&self) -> &RatingStore {
+        &self.inner.ratings
+    }
+
+    /// Additive relevance bonus applied to a liked candidate when
+    /// rescoring recommendations. Always-on (not gated by
+    /// `preference_enabled`); from the `[recommend] like_bonus` config
+    /// knob, defaulting to [`music_recommend::LIKE_BONUS`].
+    pub fn like_bonus(&self) -> f32 {
+        self.inner.config.recommend.like_bonus
     }
 
     /// Affinity decay half-life (ms) from config. Available regardless of
