@@ -420,8 +420,10 @@ def test_reduce_does_not_require_model_loaded(
 #
 # When EMBEDDER_BEARER_TOKEN is set in the environment the embedder
 # requires `Authorization: Bearer <token>` on /embed/* and /reduce.
-# /healthz stays open — boot probes shouldn't need to be told the
-# secret, and a 200 from /healthz doesn't leak compute time.
+# /healthz stays reachable for liveness probes — boot probes shouldn't
+# need the secret — but it redacts the descriptive fields
+# (model_version, dim, device) for unauthenticated callers so a LAN peer
+# can't fingerprint the model/hardware.
 
 
 @pytest.fixture
@@ -434,9 +436,45 @@ def secured_app(monkeypatch):
 
 
 def test_auth_healthz_stays_open_when_token_set(secured_app):
+    # Liveness must not require the secret — Docker HEALTHCHECK / readiness
+    # probes hit /healthz without a bearer.
     client = TestClient(secured_app)
     r = client.get("/healthz")
     assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["model_loaded"] is True
+
+
+def test_auth_healthz_redacts_descriptive_fields_without_bearer(secured_app):
+    # An unauthenticated peer must not be able to fingerprint the model
+    # or hardware: model_version / dim / device are withheld.
+    client = TestClient(secured_app)
+    body = client.get("/healthz").json()
+    assert "model_version" not in body
+    assert "dim" not in body
+    assert "device" not in body
+
+
+def test_auth_healthz_full_body_with_correct_bearer(secured_app):
+    # The gateway boot probe carries the bearer, so split-host deploys
+    # still get the descriptive fields they read at startup.
+    client = TestClient(secured_app)
+    body = client.get(
+        "/healthz", headers={"Authorization": "Bearer shared-secret"}
+    ).json()
+    assert body["model_version"] == "stub-v1"
+    assert body["dim"] == STUB_DIM
+    assert body["device"] == "cpu"
+
+
+def test_auth_healthz_redacts_with_wrong_bearer(secured_app):
+    # A wrong token is treated like no token for /healthz — liveness
+    # only, no fingerprinting. (It's a hard 401 on the compute endpoints.)
+    client = TestClient(secured_app)
+    r = client.get("/healthz", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 200
+    assert "model_version" not in r.json()
 
 
 def test_auth_embed_audio_401_without_bearer(secured_app):

@@ -1,7 +1,9 @@
 """FastAPI app surface.
 
 Endpoints:
-- GET  /healthz       — liveness + model_loaded probe (reports backend dim)
+- GET  /healthz       — liveness + model_loaded probe; descriptive fields
+                        (model_version, dim, device) only for authenticated
+                        callers when a bearer token is configured
 - POST /embed/audio   — raw bytes → dim-shaped float vector
 - POST /embed/text    — JSON {text} → dim-shaped float vector
 
@@ -24,6 +26,7 @@ from typing import Annotated, Mapping
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from embedder import reduce as reduce_module
@@ -238,23 +241,21 @@ def get_embedder(request: Request) -> Embedder:
 EmbedderDep = Annotated[Embedder, Depends(get_embedder)]
 
 
-def _require_bearer(request: Request) -> None:
-    """FastAPI dependency guarding privileged endpoints.
+def _check_bearer(request: Request) -> bool:
+    """Return whether the request is authorized for privileged data.
 
-    If `app.state.bearer_token` is None (the default — no
-    `EMBEDDER_BEARER_TOKEN` in the env at build time), this is a
-    no-op. When configured, requires `Authorization: Bearer <token>`
-    on the incoming request and raises 401 otherwise.
+    True when no token is configured (`app.state.bearer_token is None` —
+    auth disabled, the same-host/dev default) or the `Authorization`
+    header carries the configured token. False otherwise.
 
-    Deliberately not applied to /healthz — boot probes shouldn't need
-    to be told the secret, and 200/503 on /healthz doesn't reveal
-    anything compute-y. /embed/* and /reduce both fan out to the
-    model and/or open caller-supplied files, so they're the actual
-    privileged surface.
+    Does not raise: callers decide what a failure means. `_require_bearer`
+    turns it into a 401 for the inference/compute endpoints; `/healthz`
+    turns it into a downgraded (liveness-only) body so the probe still
+    works without the secret.
     """
     token = request.app.state.bearer_token
     if token is None:
-        return
+        return True
     header = request.headers.get("authorization", "")
     expected = f"Bearer {token}"
     # Constant-time compare: avoids leaking token length / common-prefix
@@ -262,7 +263,20 @@ def _require_bearer(request: Request) -> None:
     # negligible either way; this is the cheap correct thing.
     import hmac
 
-    if not hmac.compare_digest(header, expected):
+    return hmac.compare_digest(header, expected)
+
+
+def _require_bearer(request: Request) -> None:
+    """FastAPI dependency guarding privileged endpoints.
+
+    No-op when auth is disabled (no `EMBEDDER_BEARER_TOKEN`). When a
+    token is configured, requires `Authorization: Bearer <token>` and
+    raises 401 otherwise. /embed/* and /reduce both fan out to the
+    model and/or do nontrivial compute, so they're the privileged
+    surface; /healthz is handled separately (it stays reachable for
+    liveness probes but redacts descriptive fields when unauthenticated).
+    """
+    if not _check_bearer(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -289,18 +303,29 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
     if warning is not None:
         _log.warning(warning)
 
-    @app.get("/healthz", response_model=HealthResponse)
-    def healthz(emb: EmbedderDep, response: Response) -> HealthResponse:
+    @app.get("/healthz")
+    def healthz(emb: EmbedderDep, request: Request) -> Response:
         loaded = emb.loaded
-        if not loaded:
-            response.status_code = 503
-        return HealthResponse(
-            status="ok" if loaded else "loading",
-            model_loaded=loaded,
-            model_version=emb.model_version,
-            dim=emb.dim,
-            device=emb.device,
-        )
+        status_code = 200 if loaded else 503
+        status = "ok" if loaded else "loading"
+        # Liveness (status + model_loaded) is safe for any LAN peer —
+        # it's exactly what the Docker HEALTHCHECK (`curl --fail`) and the
+        # gateway boot probe need to see 200/503. The descriptive fields
+        # (model_version, dim, device) fingerprint the model + hardware,
+        # so they're returned only to an authenticated caller. The gateway
+        # probe carries the bearer by default, so split-host deploys still
+        # see them; an unauthenticated peer gets liveness only.
+        if _check_bearer(request):
+            payload = HealthResponse(
+                status=status,
+                model_loaded=loaded,
+                model_version=emb.model_version,
+                dim=emb.dim,
+                device=emb.device,
+            ).model_dump()
+        else:
+            payload = {"status": status, "model_loaded": loaded}
+        return JSONResponse(content=payload, status_code=status_code)
 
     @app.post("/embed/audio")
     async def embed_audio(req: Request, emb: EmbedderDep, _: BearerDep) -> Response:
@@ -408,8 +433,6 @@ def _build_embed_response(result, model_version: str, dim: int) -> Response:
     endpoints share the same envelope + header logic. `dim` comes from
     the backend so a CLAP and CLaMP 3 deployment can share this code.
     """
-    from fastapi.responses import JSONResponse
-
     payload = EmbedResponse(
         vector=[float(x) for x in result.vector.tolist()],
         dim=dim,

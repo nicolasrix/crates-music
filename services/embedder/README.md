@@ -12,7 +12,7 @@ rather than a re-export to ONNX.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/healthz` | — | `{status, model_loaded, model_version, dim, device}` (200 if loaded, 503 otherwise) |
+| GET | `/healthz` | — | `{status, model_loaded[, model_version, dim, device]}` (200 if loaded, 503 otherwise) |
 | POST | `/embed/audio` | raw bytes (`application/octet-stream`) | `{vector: [f32; dim], dim, model_version}` |
 | POST | `/embed/text` | `{"text": "..."}` JSON | `{vector: [f32; dim], dim, model_version}` |
 
@@ -20,6 +20,14 @@ Vectors are L2-normalized so cosine similarity = dot product. The
 vector dimension is reported per-backend on `/healthz` rather than
 fixed by the service; the gateway pins it via the `[recommend]
 embedding_dim` config field at boot time.
+
+When `EMBEDDER_BEARER_TOKEN` is set (split-host deployments), the
+descriptive `/healthz` fields (`model_version`, `dim`, `device`) are
+returned only to callers that present the bearer — an unauthenticated
+LAN peer gets just `{status, model_loaded}`, enough for a liveness
+probe but not enough to fingerprint the model or hardware. The gateway
+boot probe carries the bearer by default, so it still reads `dim` at
+startup.
 
 ## Backends
 
