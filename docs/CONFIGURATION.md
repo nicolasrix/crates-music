@@ -128,10 +128,19 @@ password = "wonderland"
 [gateway]
 url          = "https://gateway.local:8443"
 bearer_token = "<same token as gateway.toml>"
+# ca_cert_path = "/home/alice/.local/share/mkcert/rootCA.pem"
+# insecure_tls = false
 ```
 
 `[server]` is kept so you can flip to direct-to-Navidrome mode (no
 gateway) for diagnostics. `[gateway]` takes precedence when present.
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `url` | string | yes | Gateway base URL (e.g. `https://gateway.local:8443`). |
+| `bearer_token` | string | yes | Must match `gateway.toml`'s `bearer_token`. |
+| `ca_cert_path` | path | no | PEM file holding the CA that issued the gateway's TLS cert — typically the mkcert root CA (`mkcert -CAROOT`/`rootCA.pem`). Added as an *extra* trust anchor on top of the system store, so the CLI verifies a `gateway.local` cert **without** installing the CA system-wide. When unset, only the system trust store is used. |
+| `insecure_tls` | bool | no | Escape hatch: disable TLS verification entirely (default `false`). This re-exposes the bearer token to a MITM, so it's only for throwaway/debug setups — prefer `ca_cert_path`. The CLI prints a loud warning when it's on. |
 
 Cache directory follows the same XDG layout under
 `$XDG_CACHE_HOME/crates-music/`.

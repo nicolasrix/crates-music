@@ -266,7 +266,13 @@ first time it connects.
 2. **Reverse proxy with public TLS.** Put Caddy or Traefik in front
    of the gateway. The internal gateway can still use a self-signed
    cert (the proxy terminates real TLS). You'll want to point
-   `OAUTH_WEB_REDIRECT_URIS` at the public URL.
+   `OAUTH_WEB_REDIRECT_URIS` at the public URL. The bundled
+   `docker/caddy/Caddyfile` (used by `docker-compose.prod.yml`) already
+   sets the browser security headers: a Content-Security-Policy tuned to
+   the SPA, `X-Frame-Options: DENY` + `frame-ancestors 'none'`
+   (clickjacking), HSTS (`max-age=1y`), `X-Content-Type-Options`, and
+   `Referrer-Policy`. If you front the gateway with your own proxy
+   instead, replicate those headers.
 
 mDNS / `/etc/hosts` on each client device is the path for option 1
 (`gateway.local` → the gateway IP). Mobile devices on Android can

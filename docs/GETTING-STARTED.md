@@ -121,7 +121,12 @@ cargo run -p music-cli -- albums list
 
 You should see your Navidrome's albums. If you get a TLS error,
 either `mkcert -install` didn't take effect, or `gateway.local` isn't
-in your hosts file.
+in your hosts file. As an alternative to installing the CA
+system-wide, point `[gateway].ca_cert_path` at the mkcert root CA
+(`mkcert -CAROOT`/`rootCA.pem`) — the CLI trusts it as an extra anchor
+for this connection without touching your system trust store. (The
+`insecure_tls = true` escape hatch disables verification entirely and
+is debug-only — it re-exposes the bearer token to a MITM.)
 
 ## 6. Start the web app
 
