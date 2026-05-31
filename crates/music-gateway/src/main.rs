@@ -330,9 +330,25 @@ async fn load_or_fit_whitening(
     let store = WhiteningStore::new(embedding_store.pool().clone());
 
     // 1. Audio transform: load the cached fit, or fit one from the corpus.
-    let mut whitening = if let Some(w) =
-        store.get(model_version).await.context("loading whitening")?
-    {
+    //    A cached transform fitted at a different dim (e.g. after a
+    //    CLAP→CLaMP 3 swap) is non-migratable — discard it and refit rather
+    //    than crash later in `set_whitening`'s dim guard. The same applies to
+    //    the ANN sidecar; see the model-bump cutover notes in CLAUDE.md.
+    let cached = match store.get(model_version).await.context("loading whitening")? {
+        Some(w) if w.dim() == embedding_dim => Some(w),
+        Some(stale) => {
+            tracing::warn!(
+                model = %model_version,
+                stored = stale.dim(),
+                expected = embedding_dim,
+                "recommend: cached whitening has stale dim — refitting from corpus"
+            );
+            None
+        }
+        None => None,
+    };
+
+    let mut whitening = if let Some(w) = cached {
         tracing::info!(model = %model_version, k = w.k(), "recommend: loaded cached whitening");
         w
     } else {

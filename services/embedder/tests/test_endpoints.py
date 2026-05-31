@@ -125,6 +125,20 @@ def test_embed_audio_rejects_empty_body(app_with_loaded_stub):
     assert "empty" in r.json()["detail"].lower()
 
 
+def test_embed_audio_rejects_oversized_body(app_with_loaded_stub, monkeypatch):
+    # Guardrail against a runaway payload exhausting embedder memory.
+    # Shrink the cap so the test stays cheap rather than allocating 64 MiB.
+    monkeypatch.setattr("embedder.app.MAX_AUDIO_BYTES", 8)
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/embed/audio",
+        content=b"way more than eight bytes",
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 413
+    assert "too large" in r.json()["detail"].lower()
+
+
 def test_embed_audio_returns_503_when_not_loaded(app_with_unloaded_stub):
     client = TestClient(app_with_unloaded_stub)
     r = client.post(
@@ -327,11 +341,12 @@ def test_reduce_returns_503_when_umap_extra_missing(
 
 
 def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
-    # Bad knobs (n_components ∉ {2,3}, an unknown metric, n_neighbors ≥ N)
+    # Knobs only the reducer can validate (an unknown metric, n_neighbors ≥ N)
     # raise ValueError from the reducer — a caller bug, surfaced as 400
-    # rather than an opaque 500.
+    # rather than an opaque 500. (Out-of-range n_components is rejected
+    # earlier by Pydantic as 422 — see test_reduce_rejects_bad_n_components.)
     def fake_project_matrix(track_ids, matrix, **kwargs):
-        raise ValueError("n_components must be 2 or 3 (got 5)")
+        raise ValueError("unknown metric 'bogus'")
 
     monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
@@ -342,11 +357,42 @@ def test_reduce_returns_400_on_bad_params(app_with_loaded_stub, monkeypatch):
             "track_ids": ["t1"],
             "dim": 2,
             "vectors_b64": _pack([[1.0, 2.0]]),
-            "n_components": 5,
+            "metric": "bogus",
         },
     )
     assert r.status_code == 400
-    assert "n_components" in r.json()["detail"]
+    assert "metric" in r.json()["detail"]
+
+
+def test_reduce_rejects_bad_n_components(app_with_loaded_stub):
+    # n_components is bounded to {2, 3} at the schema level, so an
+    # out-of-range value is a 422 validation error before the handler runs.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "n_components": 5,
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_reduce_rejects_malformed_base64(app_with_loaded_stub):
+    # Non-base64 garbage in vectors_b64 is a caller bug → 400, not a 500.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": "!!!not base64!!!",
+        },
+    )
+    assert r.status_code == 400
+    assert "base64" in r.json()["detail"]
 
 
 def test_reduce_does_not_require_model_loaded(

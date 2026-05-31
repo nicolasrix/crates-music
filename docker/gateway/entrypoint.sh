@@ -85,8 +85,12 @@ export GATEWAY_CACHE_DB="${GATEWAY_CACHE_DB:-$DATA_DIR/state/gateway-cache.sqlit
 
 # 5. Render gateway.toml. gen_config.py exits non-zero on bad input,
 #    which `set -e` propagates — no need to check explicitly.
+#    The file holds the Navidrome password and bearer tokens in plaintext,
+#    so lock it down explicitly rather than relying on the inherited umask
+#    (the bind-mounted /data could otherwise expose it to host processes).
 CONFIG_FILE="$DATA_DIR/config/gateway.toml"
 python3 "$GEN_CONFIG_PATH" "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE"
 
 # 6. Hand off to the gateway. `exec` so the gateway becomes PID 1
 #    (or whatever the supervisor passed us as), receiving signals

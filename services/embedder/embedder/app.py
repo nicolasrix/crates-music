@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import os
 import re
 from typing import Annotated, Mapping
@@ -26,6 +27,15 @@ from pydantic import BaseModel, Field
 
 from embedder import reduce as reduce_module
 from embedder.protocol import Embedder
+
+# Upper bounds on request size. The only caller of these endpoints is the
+# gateway (single-user, ~10⁴ tracks), so these are guardrails against a
+# gateway bug or a hostile LAN peer exhausting memory — deliberately loose,
+# not tight limits.
+MAX_AUDIO_BYTES = 64 * 1024 * 1024  # 64 MiB — CLaMP 3 reads the first ~120 s
+MAX_REDUCE_ROWS = 50_000  # well above a single-user library
+MAX_REDUCE_DIM = 4096  # CLAP=512, CLaMP 3=768
+MAX_TEXT_CHARS = 4096  # station queries are short
 
 # Server-Timing metric names must be HTTP tokens (RFC 7230). Anything
 # outside this set means the backend gave us a bad name; we drop the
@@ -69,7 +79,11 @@ class HealthResponse(BaseModel):
 
 
 class EmbedTextRequest(BaseModel):
-    text: str = Field(..., description="Free-form text. Empty string is allowed.")
+    text: str = Field(
+        ...,
+        max_length=MAX_TEXT_CHARS,
+        description="Free-form text. Empty string is allowed.",
+    )
 
 
 class EmbedResponse(BaseModel):
@@ -91,9 +105,13 @@ class ReduceRequest(BaseModel):
     """
 
     track_ids: list[str] = Field(
-        ..., description="One id per matrix row, defining row order."
+        ...,
+        max_length=MAX_REDUCE_ROWS,
+        description="One id per matrix row, defining row order.",
     )
-    dim: int = Field(..., gt=0, description="Embedding dimensionality D.")
+    dim: int = Field(
+        ..., gt=0, le=MAX_REDUCE_DIM, description="Embedding dimensionality D."
+    )
     vectors_b64: str = Field(
         ...,
         description="base64 of N*D little-endian float32, row-major "
@@ -102,7 +120,7 @@ class ReduceRequest(BaseModel):
     n_neighbors: int = reduce_module.DEFAULT_N_NEIGHBORS
     min_dist: float = reduce_module.DEFAULT_MIN_DIST
     random_state: int = reduce_module.DEFAULT_RANDOM_STATE
-    n_components: int = 2
+    n_components: int = Field(2, ge=2, le=3)
     metric: str = reduce_module.DEFAULT_METRIC
 
 
@@ -124,6 +142,21 @@ class ReduceResponse(BaseModel):
 # --- backend selection ------------------------------------------------------
 
 
+def _require_env(name: str, backend: str) -> str:
+    """Read a required env var, raising a clear startup error if absent.
+
+    `_default_embedder` runs at import time (`app = build_app()`), so a
+    bare `os.environ[...]` KeyError would abort the worker with an opaque
+    traceback. This names the missing var and the backend that needs it.
+    """
+    val = os.environ.get(name)
+    if not val:
+        raise RuntimeError(
+            f"{name} must be set when EMBEDDER_BACKEND={backend!r}"
+        )
+    return val
+
+
 def _default_embedder() -> Embedder:
     """Construct the default backend per the EMBEDDER_BACKEND env var.
 
@@ -143,20 +176,28 @@ def _default_embedder() -> Embedder:
         from embedder.stub import DEFAULT_DIM, StubEmbedder
 
         dim_override = os.environ.get("EMBEDDER_STUB_DIM")
-        dim = int(dim_override) if dim_override else DEFAULT_DIM
+        if dim_override:
+            try:
+                dim = int(dim_override)
+            except ValueError:
+                raise RuntimeError(
+                    f"EMBEDDER_STUB_DIM={dim_override!r} is not a valid integer"
+                ) from None
+        else:
+            dim = DEFAULT_DIM
         return StubEmbedder(model_version="stub-v1", loaded=True, dim=dim)
     if backend == "clap":
         # Lazy import: only pull torch / laion-clap when actually requested.
         from embedder.clap_backend import ClapEmbedder
 
-        ckpt = os.environ["CLAP_CHECKPOINT"]
+        ckpt = _require_env("CLAP_CHECKPOINT", backend)
         return ClapEmbedder(checkpoint_path=ckpt)
     if backend == "clamp3":
         # Lazy import: only pull torch / transformers when requested.
         from embedder.clamp3_backend import Clamp3Embedder
 
-        ckpt = os.environ["CLAMP3_CHECKPOINT"]
-        mert = os.environ["MERT_FOLDER"]
+        ckpt = _require_env("CLAMP3_CHECKPOINT", backend)
+        mert = _require_env("MERT_FOLDER", backend)
         return Clamp3Embedder(checkpoint_path=ckpt, mert_folder=mert)
     raise RuntimeError(f"unknown EMBEDDER_BACKEND={backend!r}")
 
@@ -237,9 +278,17 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         # need.
         if not emb.loaded:
             raise HTTPException(status_code=503, detail="model not loaded")
+        # Reject oversized payloads up front: trust the declared
+        # Content-Length when present, then re-check the buffered length
+        # in case the header lied (chunked / no length).
+        declared = req.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=413, detail="audio payload too large")
         body = await req.body()
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="empty body")
+        if len(body) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=413, detail="audio payload too large")
         result = await asyncio.to_thread(emb.embed_audio, body)
         return _build_embed_response(result, emb.model_version, emb.dim)
 
@@ -257,7 +306,12 @@ def build_app(embedder: Embedder | None = None) -> FastAPI:
         # (the gateway owns reading vectors and persisting projections),
         # so intentionally no `emb.loaded` guard.
         n = len(payload.track_ids)
-        raw = base64.b64decode(payload.vectors_b64)
+        try:
+            raw = base64.b64decode(payload.vectors_b64, validate=True)
+        except (ValueError, binascii.Error) as e:
+            raise HTTPException(
+                status_code=400, detail=f"invalid base64 in vectors_b64: {e}"
+            ) from e
         expected = n * payload.dim * 4
         if len(raw) != expected:
             raise HTTPException(
