@@ -567,6 +567,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
-        assert!(s.proj_versions_for_model(&mv("m1")).await.unwrap().is_empty());
+        assert!(
+            s.proj_versions_for_model(&mv("m1"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

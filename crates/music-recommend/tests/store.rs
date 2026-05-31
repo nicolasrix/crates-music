@@ -314,24 +314,21 @@ async fn list_done_embeddings_returns_done_rows_ordered_by_track_id() {
 
     // Two done rows (inserted out of track_id order), one still queued
     // (must be excluded), and one under a different model_version.
-    for (track, vec) in [
-        ("t-b", vec![3.0_f32, 4.0]),
-        ("t-a", vec![1.0_f32, 2.0]),
-    ] {
+    for (track, vec) in [("t-b", vec![3.0_f32, 4.0]), ("t-a", vec![1.0_f32, 2.0])] {
         let k = key(track, "clap-v1");
         store.enqueue(&k).await.unwrap();
         store.claim_next(&model).await.unwrap();
-        store
-            .mark_done(&Embedding::new(k, vec))
-            .await
-            .unwrap();
+        store.mark_done(&Embedding::new(k, vec)).await.unwrap();
     }
     // Not-yet-embedded: enqueued but not done.
     store.enqueue(&key("t-c", "clap-v1")).await.unwrap();
     // Different model: done, but must not appear in clap-v1's list.
     let other = key("t-d", "clap-v2");
     store.enqueue(&other).await.unwrap();
-    store.claim_next(&ModelVersion::from("clap-v2")).await.unwrap();
+    store
+        .claim_next(&ModelVersion::from("clap-v2"))
+        .await
+        .unwrap();
     store
         .mark_done(&Embedding::new(other, vec![9.0_f32, 9.0]))
         .await

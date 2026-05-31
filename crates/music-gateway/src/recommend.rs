@@ -293,7 +293,12 @@ pub async fn refit_whitening(
         .embedding_store()
         .list_done_embeddings(&model_version)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "listing embeddings failed"))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "listing embeddings failed",
+            )
+        })?;
     if corpus.is_empty() {
         return Err((StatusCode::CONFLICT, "no embeddings to fit on"));
     }
@@ -301,8 +306,12 @@ pub async fn refit_whitening(
     let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
     let dim = vectors[0].len();
     let k = default_k(dim);
-    let mut whitening = Whitening::fit(&vectors, k)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "fitting whitening failed"))?;
+    let mut whitening = Whitening::fit(&vectors, k).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fitting whitening failed",
+        )
+    })?;
 
     // Cross-modal text mean (best-effort): center text station queries by
     // the text-modality mean so they don't collapse against audio. Needs
@@ -323,7 +332,12 @@ pub async fn refit_whitening(
         .whitening_store()
         .upsert(&model_version, &whitening, n_samples, fitted_at_ms)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "persisting whitening failed"))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "persisting whitening failed",
+            )
+        })?;
 
     let resp = RefitWhiteningResponse {
         model_version: model_version.as_str().to_string(),
@@ -340,7 +354,12 @@ pub async fn refit_whitening(
     state
         .ann()
         .set_whitening(Some(Arc::new(whitening)))
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "installing whitening failed"))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "installing whitening failed",
+            )
+        })?;
     rebuild_ann_from_store(state.embedding_store(), state.ann(), &model_version)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "rebuilding ANN failed"))?;

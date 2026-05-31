@@ -18,6 +18,7 @@ use music_gateway::ingest::{
     SubsonicAudioFetcher, SubsonicMetadataFetcher, spawn_ingest_worker, spawn_metadata_backfill,
 };
 use music_gateway::oauth::{NewClient, OauthStore, SetupToken};
+use music_gateway::whitening_text;
 use music_gateway::{AppState, Config, build_router};
 use music_recommend::ann::AnnIndex;
 use music_recommend::ingest::{
@@ -27,7 +28,6 @@ use music_recommend::metadata::MetadataStore;
 use music_recommend::projection::ProjectionStore;
 use music_recommend::store::EmbeddingStore;
 use music_recommend::types::ModelVersion;
-use music_gateway::whitening_text;
 use music_recommend::whitening::{Whitening, default_k};
 use music_recommend::whitening_store::WhiteningStore;
 use std::time::Duration;
@@ -247,8 +247,8 @@ async fn boot_recommender(
         anyhow::bail!("recommend.embedding_dim must be > 0");
     }
     let ann_path = state_db.with_extension("ann");
-    let ann = AnnIndex::open(&ann_path, embedding_dim, ANN_CONNECTIVITY)
-        .context("opening ANN index")?;
+    let ann =
+        AnnIndex::open(&ann_path, embedding_dim, ANN_CONNECTIVITY).context("opening ANN index")?;
     let model_version = embedder
         .last_health()
         .map_or_else(|| ModelVersion::from("default"), |h| h.model_version);
@@ -334,7 +334,11 @@ async fn load_or_fit_whitening(
     //    CLAP→CLaMP 3 swap) is non-migratable — discard it and refit rather
     //    than crash later in `set_whitening`'s dim guard. The same applies to
     //    the ANN sidecar; see the model-bump cutover notes in CLAUDE.md.
-    let cached = match store.get(model_version).await.context("loading whitening")? {
+    let cached = match store
+        .get(model_version)
+        .await
+        .context("loading whitening")?
+    {
         Some(w) if w.dim() == embedding_dim => Some(w),
         Some(stale) => {
             tracing::warn!(
@@ -358,7 +362,8 @@ async fn load_or_fit_whitening(
         }
         let vectors: Vec<Vec<f32>> = corpus.into_iter().map(|e| e.vector).collect();
         let k = default_k(embedding_dim);
-        let w = Whitening::fit(&vectors, k).map_err(|e| anyhow::anyhow!("fitting whitening: {e}"))?;
+        let w =
+            Whitening::fit(&vectors, k).map_err(|e| anyhow::anyhow!("fitting whitening: {e}"))?;
         store
             .upsert(model_version, &w, vectors.len(), now_unix_ms())
             .await
@@ -392,7 +397,9 @@ async fn load_or_fit_whitening(
                         tracing::info!(model = %model_version, "recommend: fitted + persisted cross-modal text mean");
                         whitening = updated;
                     }
-                    Err(e) => tracing::warn!(error = %e, "recommend: text mean dim mismatch; stations stay audio-centered"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "recommend: text mean dim mismatch; stations stay audio-centered");
+                    }
                 },
                 Err(e) => tracing::warn!(
                     error = %e,

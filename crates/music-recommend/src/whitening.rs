@@ -287,7 +287,12 @@ fn top_eigenvector(centered: &[Vec<f64>], dim: usize, rng: &mut SmallRng) -> Opt
         // Alignment with the previous iterate; |·| because the sign can
         // oscillate without affecting the eigenvector (or the projection
         // that uses it).
-        let align = cv.iter().zip(v.iter()).map(|(&a, &b)| a * b).sum::<f64>().abs();
+        let align = cv
+            .iter()
+            .zip(v.iter())
+            .map(|(&a, &b)| a * b)
+            .sum::<f64>()
+            .abs();
         v = cv;
         if (align - prev_align).abs() < POWER_CONVERGE_TOL && align > 1.0 - POWER_CONVERGE_TOL {
             break;
@@ -459,9 +464,7 @@ mod tests {
         assert!(Whitening::from_parts(vec![1.0, 2.0], vec![vec![1.0]], None).is_err());
         assert!(Whitening::from_parts(vec![], vec![], None).is_err());
         // text_mean dimensionality is validated too.
-        assert!(
-            Whitening::from_parts(vec![1.0, 2.0], vec![], Some(vec![0.1, 0.2])).is_ok()
-        );
+        assert!(Whitening::from_parts(vec![1.0, 2.0], vec![], Some(vec![0.1, 0.2])).is_ok());
         assert!(Whitening::from_parts(vec![1.0, 2.0], vec![], Some(vec![0.1])).is_err());
     }
 
@@ -474,7 +477,10 @@ mod tests {
         assert!(!w.has_text_mean());
         let probe = vec![3.0_f32, 9.0, -1.0];
         // No text mean fitted → text path mirrors the audio path.
-        assert_eq!(w.transform_text(&probe).unwrap(), w.transform(&probe).unwrap());
+        assert_eq!(
+            w.transform_text(&probe).unwrap(),
+            w.transform(&probe).unwrap()
+        );
     }
 
     #[test]
@@ -510,7 +516,10 @@ mod tests {
         let b2 = w.transform_text(&t2).unwrap();
         let cos_tm: f32 = b1.iter().zip(&b2).map(|(x, y)| x * y).sum();
 
-        assert!(cos_no_tm > 0.99, "expected collapse without text mean: {cos_no_tm}");
+        assert!(
+            cos_no_tm > 0.99,
+            "expected collapse without text mean: {cos_no_tm}"
+        );
         assert!(
             cos_tm < cos_no_tm - 0.5,
             "text mean should separate queries: no_tm={cos_no_tm} tm={cos_tm}"

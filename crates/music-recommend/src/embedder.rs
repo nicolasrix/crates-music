@@ -188,10 +188,9 @@ impl EmbedderClient {
             // sensible token avoids — but a junk token here would
             // surface as a clear "invalid header" error at startup,
             // not a silent miss at first request time.
-            let mut header_value =
-                reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
-                    EmbedderError::InvalidResponse(format!("bearer_token has invalid bytes: {e}"))
-                })?;
+            let mut header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
+                EmbedderError::InvalidResponse(format!("bearer_token has invalid bytes: {e}"))
+            })?;
             header_value.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, header_value);
             builder = builder.default_headers(headers);

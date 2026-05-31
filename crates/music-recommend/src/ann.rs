@@ -494,7 +494,11 @@ impl AnnIndex {
         // the whole corpus (≤10⁴ vectors) would stall every concurrent query
         // and upsert for the duration of the rebuild. Snapshot the transform
         // once (clone the Arc, drop the guard) so the prep loop is lock-free.
-        let whitening = self.whitening.read().map_err(|_| AnnError::Poisoned)?.clone();
+        let whitening = self
+            .whitening
+            .read()
+            .map_err(|_| AnnError::Poisoned)?
+            .clone();
         let prepared: Vec<(TrackId, Vec<f32>)> = pairs
             .into_iter()
             .map(|(id, v)| {
@@ -651,7 +655,12 @@ mod tests {
 
         let raw = AnnIndex::open_in_memory(4, 16).unwrap();
         fill(&raw, &data);
-        let raw_sims: Vec<f32> = raw.query(seed, 10).unwrap().iter().map(|r| r.similarity).collect();
+        let raw_sims: Vec<f32> = raw
+            .query(seed, 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.similarity)
+            .collect();
         // Raw vectors share a dominant axis-0 component → all near-parallel.
         assert!(
             raw_sims.iter().all(|&s| s > 0.95),
@@ -689,7 +698,12 @@ mod tests {
             .unwrap();
         fill(&ann, &data);
         let probe = vec![3.0_f32, 0.5, 0.2, 0.0];
-        let audio: Vec<_> = ann.query(&probe, 5).unwrap().into_iter().map(|r| r.track_id).collect();
+        let audio: Vec<_> = ann
+            .query(&probe, 5)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect();
         let text: Vec<_> = ann
             .query_text(&probe, 5)
             .unwrap()
