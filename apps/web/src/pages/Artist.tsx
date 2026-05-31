@@ -11,6 +11,7 @@ import { AlbumCard } from "../components/AlbumCard";
 import { ArtistHeroCard } from "../components/ArtistHeroCard";
 import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
+import { EntityRating } from "../components/EntityRating";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import type { Artist as ArtistType } from "../api/types";
@@ -76,6 +77,7 @@ export function Artist({ id }: { id: string }) {
             <button className="play-disc" aria-label="play artist" title="play artist (top tracks)">
               <Play size={20} fill="currentColor" strokeWidth={0} />
             </button>
+            <EntityRating kind="artist" id={artist.id} />
           </div>
         </div>
       </div>

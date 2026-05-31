@@ -355,3 +355,32 @@ def test_like_bonus_rejects_negative() -> None:
     env = _minimum_env() | {"RECOMMEND_LIKE_BONUS": "-0.5"}
     with pytest.raises(ConfigError, match="non-negative"):
         build_config(env)
+
+
+def test_like_bonus_album_and_artist_emitted_when_set() -> None:
+    env = _minimum_env() | {
+        "RECOMMEND_LIKE_BONUS_ALBUM": "0.06",
+        "RECOMMEND_LIKE_BONUS_ARTIST": "0.03",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["like_bonus_album"] == pytest.approx(0.06)
+    assert parsed["recommend"]["like_bonus_artist"] == pytest.approx(0.03)
+
+
+def test_like_bonus_album_and_artist_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "like_bonus_album" not in parsed["recommend"]
+    assert "like_bonus_artist" not in parsed["recommend"]
+
+
+def test_like_bonus_album_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS_ALBUM": "-0.1"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)
+
+
+def test_like_bonus_artist_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_LIKE_BONUS_ARTIST": "-0.1"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)

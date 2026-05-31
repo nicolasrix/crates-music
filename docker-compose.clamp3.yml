@@ -73,7 +73,11 @@ services:
       # RECOMMEND_PREFERENCE_ENABLED: "true"
       # RECOMMEND_PREFERENCE_WEIGHT: "0.15"
       # RECOMMEND_AFFINITY_HALF_LIFE_DAYS: "30"
-      # Durable per-track like/dislike is always-on (dislikes excluded, likes
-      # boosted) regardless of the preference flag. This only tunes the like
-      # boost magnitude; default 0.15.
+      # Durable like/dislike for tracks, albums, and artists is always-on
+      # (a disliked entity's tracks are excluded from play, likes boost)
+      # regardless of the preference flag. These only tune the like boost
+      # magnitude, in the contribution hierarchy track > album > artist;
+      # defaults 0.15 / 0.06 / 0.03.
       # RECOMMEND_LIKE_BONUS: "0.15"
+      # RECOMMEND_LIKE_BONUS_ALBUM: "0.06"
+      # RECOMMEND_LIKE_BONUS_ARTIST: "0.03"

@@ -30,7 +30,9 @@ use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
 use music_recommend::types::ModelVersion;
-use music_recommend::{EmbeddingKey, EmbeddingStore, Whitening, ann::AnnIndex, default_k};
+use music_recommend::{
+    EmbeddingKey, EmbeddingStore, RatedKind, Whitening, ann::AnnIndex, default_k,
+};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
@@ -133,7 +135,7 @@ pub async fn next(
     //
     // The seed itself is always excluded; disliked tracks are hard-excluded
     // here too (always-on, independent of preference).
-    let rescore = rescore_ctx(&state);
+    let rescore = rescore_ctx(&state).await;
     let mut exclude: Vec<TrackId> = vec![seed_id.clone()];
     exclude.extend(disliked_exclusions(&state).await);
     let fetch_n = n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
@@ -751,7 +753,7 @@ pub async fn from_seeds(
         internal_top_n,
     );
 
-    let rescore = rescore_ctx(&state);
+    let rescore = rescore_ctx(&state).await;
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(
@@ -919,7 +921,7 @@ pub async fn from_any(
             .query_excluding(&vector, internal_n, &excludes_for_query)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
-        let rescore = rescore_ctx(&state);
+        let rescore = rescore_ctx(&state).await;
         let (filtered, filter_stats) = match &req.queue_context {
             Some(qc) => {
                 apply_queue_filter_to_ann(
@@ -1644,31 +1646,111 @@ fn preference_lookup(state: &AppState) -> Option<PreferenceLookup<'_>> {
 struct Rescore<'a> {
     pref: Option<PreferenceLookup<'a>>,
     ratings: &'a music_recommend::RatingStore,
+    metadata: &'a MetadataStore,
     like_bonus: f32,
+    /// Liked album/artist ids, fetched once per request. A candidate whose
+    /// `album_id` / `artist_id` is in these sets earns the corresponding
+    /// additive bonus on top of any direct track like (track > album >
+    /// artist; the bonuses stack).
+    liked_albums: HashSet<String>,
+    liked_artists: HashSet<String>,
+    album_bonus: f32,
+    artist_bonus: f32,
 }
 
 /// Build the per-request rescoring context. The like boost is always
 /// present (explicit ratings apply regardless of `preference_enabled`);
-/// only the decayed-affinity preference half is config-gated.
-fn rescore_ctx(state: &AppState) -> Rescore<'_> {
+/// only the decayed-affinity preference half is config-gated. The liked
+/// album/artist sets are read once here; a lookup failure degrades to an
+/// empty set (no album/artist boost this round) rather than failing.
+async fn rescore_ctx(state: &AppState) -> Rescore<'_> {
+    let ratings = state.ratings();
+    let liked_albums = liked_set(ratings, RatedKind::Album).await;
+    let liked_artists = liked_set(ratings, RatedKind::Artist).await;
     Rescore {
         pref: preference_lookup(state),
-        ratings: state.ratings(),
+        ratings,
+        metadata: state.metadata_store(),
         like_bonus: state.like_bonus(),
+        liked_albums,
+        liked_artists,
+        album_bonus: state.like_bonus_album(),
+        artist_bonus: state.like_bonus_artist(),
     }
 }
 
-/// All disliked track ids, fetched once per recommend request — the
-/// always-on hard exclusion (not gated by `preference_enabled`). A lookup
-/// failure degrades to "exclude nothing" rather than failing the request:
-/// the durable rating is still stored and the exclusion just doesn't apply
-/// this round.
-async fn disliked_exclusions(state: &AppState) -> HashSet<TrackId> {
-    match state.ratings().disliked_ids().await {
-        Ok(set) => set,
+/// Liked entity ids of a kind as a membership set, degrading to empty on
+/// error (the album/artist boost is an enhancement, not a correctness
+/// requirement).
+async fn liked_set(ratings: &music_recommend::RatingStore, kind: RatedKind) -> HashSet<String> {
+    match ratings.liked_ids(kind).await {
+        Ok(ids) => ids.into_iter().collect(),
         Err(err) => {
-            tracing::warn!(error = %err, "dislike lookup failed; recommending without dislike exclusion");
+            tracing::warn!(error = %err, kind = kind.as_str(), "liked-parent lookup failed; recommending without its boost");
             HashSet::new()
+        }
+    }
+}
+
+/// All track ids excluded by a dislike, fetched once per recommend request
+/// — the always-on hard exclusion (not gated by `preference_enabled`). The
+/// union of three sources:
+///
+/// * disliked **tracks** (directly),
+/// * every cached track of a disliked **album**,
+/// * every cached track of a disliked **artist**.
+///
+/// A disliked album/artist thus excludes the whole entity from play, the
+/// "dislike excludes from play entirely" semantic. Any lookup failing
+/// degrades to "exclude nothing from that source" rather than failing the
+/// request: the durable ratings are still stored and the exclusion just
+/// doesn't fully apply this round.
+async fn disliked_exclusions(state: &AppState) -> HashSet<TrackId> {
+    let ratings = state.ratings();
+    let mut excluded: HashSet<TrackId> = HashSet::new();
+
+    // Disliked tracks, directly.
+    match ratings.disliked_ids(RatedKind::Track).await {
+        Ok(ids) => excluded.extend(ids.into_iter().map(TrackId::from)),
+        Err(err) => {
+            tracing::warn!(error = %err, "disliked-track lookup failed; recommending without track dislike exclusion");
+        }
+    }
+
+    // Disliked albums / artists → expand to their member tracks via the
+    // metadata cache (indexed on album_id / artist_id).
+    let metadata = state.metadata_store();
+    expand_disliked_parents(ratings, RatedKind::Album, metadata, &mut excluded).await;
+    expand_disliked_parents(ratings, RatedKind::Artist, metadata, &mut excluded).await;
+
+    excluded
+}
+
+/// Fold the tracks of every disliked album-or-artist (per `kind`) into
+/// `excluded`. Each step degrades to a warn-and-skip on error.
+async fn expand_disliked_parents(
+    ratings: &music_recommend::RatingStore,
+    kind: RatedKind,
+    metadata: &MetadataStore,
+    excluded: &mut HashSet<TrackId>,
+) {
+    let parent_ids = match ratings.disliked_ids(kind).await {
+        Ok(ids) if !ids.is_empty() => ids.into_iter().collect::<Vec<_>>(),
+        Ok(_) => return,
+        Err(err) => {
+            tracing::warn!(error = %err, kind = kind.as_str(), "disliked-parent lookup failed; skipping its exclusion");
+            return;
+        }
+    };
+    let tracks = match kind {
+        RatedKind::Album => metadata.track_ids_for_albums(&parent_ids).await,
+        RatedKind::Artist => metadata.track_ids_for_artists(&parent_ids).await,
+        RatedKind::Track => return,
+    };
+    match tracks {
+        Ok(ids) => excluded.extend(ids),
+        Err(err) => {
+            tracing::warn!(error = %err, kind = kind.as_str(), "disliked-parent track expansion failed; skipping its exclusion");
         }
     }
 }
@@ -1706,6 +1788,33 @@ async fn affinity_bonuses(
         }
         Err(err) => {
             tracing::warn!(error = %err, "like lookup failed; recommending without like boost");
+        }
+    }
+
+    // Always-on liked-album / liked-artist boost. A candidate belonging to
+    // a liked album earns `album_bonus`; to a liked artist, `artist_bonus`;
+    // these stack with each other and with a direct track like. Skipped
+    // entirely when nothing is liked at those levels (the common case),
+    // avoiding the metadata fetch.
+    if !rescore.liked_albums.is_empty() || !rescore.liked_artists.is_empty() {
+        match rescore.metadata.get_many(candidate_ids).await {
+            Ok(meta) => {
+                for (id, m) in &meta {
+                    if let Some(album_id) = &m.album_id
+                        && rescore.liked_albums.contains(album_id)
+                    {
+                        *out.entry(id.clone()).or_insert(0.0) += rescore.album_bonus;
+                    }
+                    if let Some(artist_id) = &m.artist_id
+                        && rescore.liked_artists.contains(artist_id)
+                    {
+                        *out.entry(id.clone()).or_insert(0.0) += rescore.artist_bonus;
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "metadata lookup failed; recommending without album/artist boost");
+            }
         }
     }
 

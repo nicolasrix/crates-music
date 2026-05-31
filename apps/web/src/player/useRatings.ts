@@ -1,9 +1,9 @@
-// TanStack-Query-backed access to the gateway's durable per-track
-// like/dislike. The QueryClient is already the app-wide shared store, so a
-// dedicated React Context would add nothing — `useQuery` on a fixed key
-// gives every consumer (the PlayerBar control, the Liked-songs page, the
-// auto-skip effect) the same map, and a `useQuery` read inside an effect is
-// synchronous against the current cache.
+// TanStack-Query-backed access to the gateway's durable like/dislike for
+// tracks, albums, and artists. The QueryClient is already the app-wide
+// shared store, so a dedicated React Context would add nothing — `useQuery`
+// on a fixed key gives every consumer (the rating controls, the Liked page,
+// the auto-skip effect) the same maps, and a `useQuery` read inside an
+// effect is synchronous against the current cache.
 //
 // staleTime is short and refetchOnWindowFocus is on so a rating made on
 // another device shows up here within a focus cycle. Recommender
@@ -12,55 +12,91 @@
 
 import { useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getRatings, putRating, type Rating } from "../api/library";
+import {
+  getRatings,
+  putRating,
+  type EntityKind,
+  type Rating,
+  type RatingRow,
+} from "../api/library";
 
 export const RATINGS_KEY = ["library", "ratings"] as const;
 
-/** track_id → verdict. Absence from the map is neutral. */
+/** entity id → verdict. Absence from the map is neutral. */
 export type RatingMap = Map<string, "like" | "dislike">;
 
-function toMap(rows: { track_id: string; rating: "like" | "dislike" }[]): RatingMap {
-  return new Map(rows.map((r) => [r.track_id, r.rating]));
+/** The ratings split by kind. One fetch, three lookup maps. */
+export interface RatingMaps {
+  tracks: RatingMap;
+  albums: RatingMap;
+  artists: RatingMap;
 }
 
-/** The current ratings map, or `undefined` while the first fetch is in
+function toMaps(rows: RatingRow[]): RatingMaps {
+  const maps: RatingMaps = {
+    tracks: new Map(),
+    albums: new Map(),
+    artists: new Map(),
+  };
+  for (const r of rows) {
+    if (r.kind === "track") maps.tracks.set(r.id, r.rating);
+    else if (r.kind === "album") maps.albums.set(r.id, r.rating);
+    else maps.artists.set(r.id, r.rating);
+  }
+  return maps;
+}
+
+function mapForKind(maps: RatingMaps, kind: EntityKind): RatingMap {
+  return kind === "track" ? maps.tracks : kind === "album" ? maps.albums : maps.artists;
+}
+
+/** The current ratings maps, or `undefined` while the first fetch is in
  *  flight (callers should fail *open* on `undefined` — never auto-skip a
  *  track we don't yet know the rating of). */
-export function useRatingsMap(): RatingMap | undefined {
+export function useRatingsMaps(): RatingMaps | undefined {
   const q = useQuery({
     queryKey: RATINGS_KEY,
-    queryFn: async () => toMap(await getRatings()),
+    queryFn: async () => toMaps(await getRatings()),
     staleTime: 30_000,
     refetchOnWindowFocus: true,
   });
   return q.data;
 }
 
-export interface TrackRatingState {
+export interface EntityRatingState {
   rating: Rating;
   pending: boolean;
   /** Set a verdict. Passing the *current* verdict toggles it off (clear). */
   set: (next: "like" | "dislike") => void;
 }
 
-/** Tri-state rating control for one track, with an optimistic PUT that
- *  patches the shared map immediately and rolls back on failure. */
-export function useTrackRating(trackId: string | undefined): TrackRatingState {
+/** Tri-state rating control for one entity (track / album / artist), with an
+ *  optimistic PUT that patches the shared maps immediately and rolls back on
+ *  failure. */
+export function useEntityRating(
+  kind: EntityKind,
+  id: string | undefined,
+): EntityRatingState {
   const qc = useQueryClient();
-  const map = useRatingsMap();
-  const current: Rating = trackId ? (map?.get(trackId) ?? null) : null;
+  const maps = useRatingsMaps();
+  const current: Rating = id ? (maps && mapForKind(maps, kind).get(id)) ?? null : null;
 
   const mutation = useMutation({
-    mutationFn: ({ id, rating }: { id: string; rating: Rating }) =>
-      putRating(id, rating),
-    onMutate: async ({ id, rating }) => {
+    mutationFn: ({ entityId, rating }: { entityId: string; rating: Rating }) =>
+      putRating(kind, entityId, rating),
+    onMutate: async ({ entityId, rating }) => {
       // Cancel in-flight refetches so they don't clobber the optimistic
       // patch, then snapshot for rollback.
       await qc.cancelQueries({ queryKey: RATINGS_KEY });
-      const prev = qc.getQueryData<RatingMap>(RATINGS_KEY);
-      const next = new Map(prev ?? []);
-      if (rating === null) next.delete(id);
-      else next.set(id, rating);
+      const prev = qc.getQueryData<RatingMaps>(RATINGS_KEY);
+      const next: RatingMaps = {
+        tracks: new Map(prev?.tracks ?? []),
+        albums: new Map(prev?.albums ?? []),
+        artists: new Map(prev?.artists ?? []),
+      };
+      const target = mapForKind(next, kind);
+      if (rating === null) target.delete(entityId);
+      else target.set(entityId, rating);
       qc.setQueryData(RATINGS_KEY, next);
       return { prev };
     },
@@ -75,12 +111,12 @@ export function useTrackRating(trackId: string | undefined): TrackRatingState {
   const { mutate } = mutation;
   const set = useCallback(
     (next: "like" | "dislike") => {
-      if (!trackId) return;
+      if (!id) return;
       // Toggle-off: clicking the already-active verdict clears it.
       const target: Rating = current === next ? null : next;
-      mutate({ id: trackId, rating: target });
+      mutate({ entityId: id, rating: target });
     },
-    [trackId, current, mutate],
+    [id, current, mutate],
   );
 
   return { rating: current, pending: mutation.isPending, set };

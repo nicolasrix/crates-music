@@ -16,6 +16,7 @@ import {
 import { AlbumHeroCard } from "../components/AlbumHeroCard";
 import { AlbumTable } from "../components/AlbumTable";
 import { ArtistHeroCard } from "../components/ArtistHeroCard";
+import { EntityRating } from "../components/EntityRating";
 import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
@@ -167,6 +168,7 @@ export function Album({ id }: { id: string }) {
             <button className="icon-btn" aria-label="more" title="more">
               <MoreHorizontal size={18} strokeWidth={1.5} />
             </button>
+            <EntityRating kind="album" id={album.id} />
           </div>
           <StationStatus status={stationStatus} />
         </div>

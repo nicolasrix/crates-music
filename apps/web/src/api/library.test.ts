@@ -34,12 +34,12 @@ describe("putRating", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => vi.restoreAllMocks());
 
-  it("PUTs {track_id, rating} with the bearer token", async () => {
+  it("PUTs {kind, id, rating} with the bearer token", async () => {
     seedTokens();
     const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
-    await putRating("t0", "dislike");
+    await putRating("track", "t0", "dislike");
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -49,7 +49,22 @@ describe("putRating", () => {
       `Bearer ${ACCESS}`,
     );
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
-    expect(body).toEqual({ track_id: "t0", rating: "dislike" });
+    expect(body).toEqual({ kind: "track", id: "t0", rating: "dislike" });
+  });
+
+  it("carries the kind for album / artist ratings", async () => {
+    seedTokens();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await putRating("album", "al0", "like");
+    await putRating("artist", "ar0", "dislike");
+
+    const bodies = fetchSpy.mock.calls.map(
+      (c) => JSON.parse((c[1] as RequestInit).body as string) as Record<string, unknown>,
+    );
+    expect(bodies[0]).toEqual({ kind: "album", id: "al0", rating: "like" });
+    expect(bodies[1]).toEqual({ kind: "artist", id: "ar0", rating: "dislike" });
   });
 
   it("sends rating: null to clear", async () => {
@@ -57,17 +72,17 @@ describe("putRating", () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
-    await putRating("t0", null);
+    await putRating("track", "t0", null);
 
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
-    expect(body).toEqual({ track_id: "t0", rating: null });
+    expect(body).toEqual({ kind: "track", id: "t0", rating: null });
   });
 
   it("throws on a non-2xx response", async () => {
     seedTokens();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 500 })));
-    await expect(putRating("t0", "like")).rejects.toThrow(/rating HTTP 500/);
+    await expect(putRating("track", "t0", "like")).rejects.toThrow(/rating HTTP 500/);
   });
 });
 
@@ -78,8 +93,9 @@ describe("getRatings", () => {
   it("GETs and unwraps the { ratings } envelope", async () => {
     seedTokens();
     const rows = [
-      { track_id: "t1", rating: "like" },
-      { track_id: "t2", rating: "dislike" },
+      { kind: "track", id: "t1", rating: "like" },
+      { kind: "album", id: "al2", rating: "dislike" },
+      { kind: "artist", id: "ar3", rating: "like" },
     ];
     const fetchSpy = vi
       .fn()

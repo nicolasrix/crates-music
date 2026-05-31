@@ -24,8 +24,8 @@ import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 import { evaluateScrobble, type ScrobbleState } from "./scrobble";
 import { evaluateSkip } from "./skip";
-import { nextPlayableIndex } from "./autoSkip";
-import { useRatingsMap } from "./useRatings";
+import { isDislikedEntity, nextPlayableIndex } from "./autoSkip";
+import { useRatingsMaps } from "./useRatings";
 
 interface PlayerCtx {
   /** The currently-playing item's metadata, if known. */
@@ -75,10 +75,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // When the queue *advances onto* a disliked track (album play, next,
   // natural end, autoplay refill — all of which funnel through
   // now_playing_index → currentTrackId), skip past it to the next playable
-  // track in the advance direction. A *direct* single-track click is an
-  // override: primePlayback records the primed id in directPlayRef and the
-  // effect lets it play even if disliked.
-  const ratings = useRatingsMap();
+  // track in the advance direction. "Disliked" spans the track itself *or*
+  // its album *or* its artist (mirrors the server's exclusion union). A
+  // *direct* single-track click is an override: primePlayback records the
+  // primed id in directPlayRef and the effect lets it play even if disliked.
+  const ratings = useRatingsMaps();
   // The track the user explicitly chose to play — exempt from auto-skip.
   const directPlayRef = useRef<string | null>(null);
   // The disliked track we're actively skipping past. Dedups the WS echo
@@ -103,8 +104,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       pendingSkipRef.current = null;
       return;
     }
+    // Disliked at the track, album, or artist level. Album/artist need the
+    // queue item's hydrated metadata (album_id / artist_id), which we read
+    // from the sync layer's trackMeta map.
     const disliked = (id: string | undefined) =>
-      id !== undefined && ratings.get(id) === "dislike";
+      isDislikedEntity(id, id !== undefined ? trackMeta.get(id) : undefined, ratings);
     if (!disliked(currentTrackId)) {
       pendingSkipRef.current = null;
       return;
@@ -124,7 +128,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       // disliked one.
       submit({ type: "set_playing", is_playing: false });
     }
-  }, [currentTrackId, ratings, now_playing_index, queue.items, submit]);
+  }, [currentTrackId, ratings, trackMeta, now_playing_index, queue.items, submit]);
 
   // Swap src when the now-playing track changes. The track id (not the
   // index) is the right dependency: reordering the queue under the
