@@ -25,8 +25,13 @@ must match it.
 
 ### `GET /healthz`
 
-Returns 200 if the model is loaded, 503 otherwise. Not behind the bearer
-gate — boot probes shouldn't need the secret, and 200/503 leaks nothing.
+Returns 200 if the model is loaded, 503 otherwise. Always reachable
+without the bearer — boot probes shouldn't need the secret. When a token
+*is* configured, though, the descriptive fields (`model_version`, `dim`,
+`device`) are returned only to an authenticated caller; an unauthenticated
+peer gets just `{status, model_loaded}`, so a LAN peer can't fingerprint
+the model or hardware. The gateway boot probe carries the bearer, so it
+still reads `dim` at startup.
 
 ```json
 {
@@ -114,7 +119,9 @@ installed. Pure compute — no model load, no `emb.loaded` guard.
 `EMBEDDER_BEARER_TOKEN` (optional) guards the compute endpoints for
 split-host deployments. When set, `/embed/audio`, `/embed/text`, and
 `/reduce` require `Authorization: Bearer <token>` (constant-time compare,
-401 otherwise); `/healthz` is exempt. Empty string is treated as unset, so
+401 otherwise); `/healthz` stays reachable for liveness probes but redacts
+its descriptive fields (`model_version`/`dim`/`device`) for unauthenticated
+callers. Empty string is treated as unset, so
 an accidentally-empty env var doesn't silently accept everyone with
 `Bearer `. The same token is configured on the gateway's `EMBEDDER_URL`
 client.

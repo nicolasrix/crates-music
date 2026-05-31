@@ -79,10 +79,20 @@ password = "wonderland"
 [gateway]                   # for through-the-gateway mode (default)
 url = "https://gateway.local:8443"
 bearer_token = "..."
+# ca_cert_path = "~/.local/share/mkcert/rootCA.pem"  # trust the gateway's CA
+# insecure_tls = false                               # debug-only TLS bypass
 ```
 
 If both sections are present, `[gateway]` wins. To force direct
 mode, pass `--no-gateway`.
+
+**Gateway TLS trust.** The gateway serves an mkcert-issued cert. Rather
+than running `mkcert -install` system-wide on every client, point
+`ca_cert_path` at the mkcert root CA (`mkcert -CAROOT`/`rootCA.pem`) — the
+CLI adds it as an extra trust anchor on top of the system store and
+verifies the cert normally. `insecure_tls = true` disables verification
+entirely (loud warning, re-exposes the bearer token to a MITM) and exists
+only for throwaway/debug setups — prefer `ca_cert_path`.
 
 > "[server] creds are kept so you can flip between gateway and
 > direct mode without rewriting them."
