@@ -16,14 +16,26 @@ pub struct Config {
     pub cache: CacheConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub url: String,
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Hand-rolled `Debug` so the Navidrome password is never printed in logs
+// or a panic dump. The derived impl would emit it verbatim.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub url: String,
     pub bearer_token: String,
@@ -40,6 +52,18 @@ pub struct GatewayConfig {
     /// Off by default; the CLI prints a loud warning when it's on.
     #[serde(default)]
     pub insecure_tls: bool,
+}
+
+// Hand-rolled `Debug` so the gateway bearer token is never printed.
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("url", &self.url)
+            .field("bearer_token", &"[REDACTED]")
+            .field("ca_cert_path", &self.ca_cert_path)
+            .field("insecure_tls", &self.insecure_tls)
+            .finish()
+    }
 }
 
 /// On-disk audio cache parameters. Defaults: 10 GB regular, 5 GB pinned,
@@ -97,4 +121,36 @@ impl Config {
 pub fn default_config_path() -> Option<PathBuf> {
     ProjectDirs::from("dev", "crates-music", "crates-music")
         .map(|d| d.config_dir().join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let server = ServerConfig {
+            url: "http://nav.lan:4533".to_string(),
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let gateway = GatewayConfig {
+            url: "https://gateway.local:8443".to_string(),
+            bearer_token: "super-secret-bearer".to_string(),
+            ca_cert_path: Some(PathBuf::from("/home/alice/rootCA.pem")),
+            insecure_tls: false,
+        };
+
+        let server_dbg = format!("{server:?}");
+        assert!(!server_dbg.contains("hunter2"));
+        assert!(server_dbg.contains("[REDACTED]"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(server_dbg.contains("alice"));
+
+        let gateway_dbg = format!("{gateway:?}");
+        assert!(!gateway_dbg.contains("super-secret-bearer"));
+        assert!(gateway_dbg.contains("[REDACTED]"));
+        // The CA path is not a secret and stays visible.
+        assert!(gateway_dbg.contains("rootCA.pem"));
+    }
 }

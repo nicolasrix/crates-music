@@ -24,7 +24,7 @@ pub struct Config {
     pub embedder: Option<EmbedderConfigSection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Address the gateway binds to (e.g. `0.0.0.0:8443`).
     pub listen: SocketAddr,
@@ -42,12 +42,38 @@ pub struct ServerConfig {
     pub static_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Hand-rolled `Debug` so the shared bearer token never lands in logs or a
+// panic dump. The derived impl would print it verbatim; this redacts it
+// while leaving the non-secret fields visible for diagnostics.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("listen", &self.listen)
+            .field("tls_cert", &self.tls_cert)
+            .field("tls_key", &self.tls_key)
+            .field("bearer_token", &"[REDACTED]")
+            .field("static_dir", &self.static_dir)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpstreamConfig {
     /// Base URL of the Navidrome instance (e.g. `http://nav.lan:4533`).
     pub navidrome_url: String,
     pub username: String,
     pub password: String,
+}
+
+// Hand-rolled `Debug` so the upstream Navidrome password is never printed.
+impl std::fmt::Debug for UpstreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamConfig")
+            .field("navidrome_url", &self.navidrome_url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,7 +117,7 @@ pub struct OauthClientConfig {
 /// degraded mode and never tries to embed. If present but unreachable
 /// at boot, same outcome — a warning is logged and recommend endpoints
 /// fall back to tag-only similarity.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmbedderConfigSection {
     pub url: String,
     /// Per-request timeout in seconds. Defaults to 30 — embedding a
@@ -105,6 +131,21 @@ pub struct EmbedderConfigSection {
     /// deployments where the docker bridge is the trust boundary.
     #[serde(default)]
     pub bearer_token: Option<String>,
+}
+
+// Hand-rolled `Debug` so the embedder bearer token never lands in logs.
+// Distinguishes "set" from "unset" without revealing the value.
+impl std::fmt::Debug for EmbedderConfigSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbedderConfigSection")
+            .field("url", &self.url)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 fn default_embedder_timeout_secs() -> u64 {
@@ -176,5 +217,60 @@ impl Config {
 
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         Ok(toml::from_str(s)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let server = ServerConfig {
+            listen: "0.0.0.0:8443".parse().unwrap(),
+            tls_cert: PathBuf::from("/etc/cert.pem"),
+            tls_key: PathBuf::from("/etc/key.pem"),
+            bearer_token: "super-secret-bearer".to_string(),
+            static_dir: None,
+        };
+        let upstream = UpstreamConfig {
+            navidrome_url: "http://nav.lan:4533".to_string(),
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let embedder = EmbedderConfigSection {
+            url: "http://gpu.lan:9000".to_string(),
+            timeout_seconds: 30,
+            bearer_token: Some("embedder-secret".to_string()),
+        };
+
+        let server_dbg = format!("{server:?}");
+        assert!(!server_dbg.contains("super-secret-bearer"));
+        assert!(server_dbg.contains("[REDACTED]"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(server_dbg.contains("/etc/cert.pem"));
+
+        let upstream_dbg = format!("{upstream:?}");
+        assert!(!upstream_dbg.contains("hunter2"));
+        assert!(upstream_dbg.contains("[REDACTED]"));
+        assert!(upstream_dbg.contains("alice"));
+
+        let embedder_dbg = format!("{embedder:?}");
+        assert!(!embedder_dbg.contains("embedder-secret"));
+        assert!(embedder_dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn debug_distinguishes_unset_embedder_token() {
+        let embedder = EmbedderConfigSection {
+            url: "http://gpu.lan:9000".to_string(),
+            timeout_seconds: 30,
+            bearer_token: None,
+        };
+        // Unset reads as `None`, not `[REDACTED]`, so the absence of a
+        // token stays diagnosable.
+        let dbg = format!("{embedder:?}");
+        assert!(dbg.contains("None"));
+        assert!(!dbg.contains("[REDACTED]"));
     }
 }
