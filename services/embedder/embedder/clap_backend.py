@@ -15,8 +15,11 @@ done with soundfile + librosa.resample to CLAP's expected 48 kHz mono.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import io
 import logging
+import os
 import threading
 import time
 
@@ -25,6 +28,11 @@ import numpy as np
 from embedder.protocol import EmbedResult
 
 logger = logging.getLogger(__name__)
+
+# Optional pin: when set, the checkpoint's SHA-256 must match this digest
+# or the backend refuses to start. The strongest guard against a swapped
+# or tampered .pt, since loading one unpickles (i.e. runs arbitrary code).
+_CHECKPOINT_SHA256_ENV = "CLAP_CHECKPOINT_SHA256"
 
 
 class ClapEmbedder:
@@ -52,9 +60,15 @@ class ClapEmbedder:
                 f"Underlying import error: {e}"
             ) from e
 
+        # Fail closed before the path reaches torch.load (unpickling).
+        self._checkpoint_sha256 = _verify_checkpoint(checkpoint_path)
+
         logger.info("loading CLAP checkpoint from %s", checkpoint_path)
         self._model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
-        self._model.load_ckpt(checkpoint_path)
+        # laion_clap.load_ckpt calls torch.load without weights_only; force
+        # it on so a checkpoint can't execute pickled code during load.
+        with _torch_load_weights_only():
+            self._model.load_ckpt(checkpoint_path)
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
         self._device = _detect_device()
@@ -115,10 +129,70 @@ class ClapEmbedder:
 
 def _derive_version(checkpoint_path: str) -> str:
     """Best-effort: take the checkpoint filename without extension."""
-    import os
-
     base = os.path.basename(checkpoint_path)
     return base.rsplit(".", 1)[0] or "clap"
+
+
+def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_checkpoint(path: str) -> str:
+    """Validate a checkpoint *before* it is handed to ``torch.load``.
+
+    ``torch.load`` unpickles, so a malicious ``.pt`` can run arbitrary
+    code at load time. This is the first line of defence:
+
+    - require a regular file (reject a dir / missing path / device node);
+    - log the SHA-256 so an operator can discover the digest to pin;
+    - when ``CLAP_CHECKPOINT_SHA256`` is set, refuse to load anything whose
+      digest doesn't match — a cheap, deterministic guard against a
+      swapped or tampered checkpoint.
+
+    Returns the computed digest.
+    """
+    if not os.path.isfile(path):
+        raise RuntimeError(f"CLAP checkpoint missing or not a regular file: {path}")
+    digest = _sha256_file(path)
+    logger.info("CLAP checkpoint sha256=%s (%s)", digest, path)
+    expected = os.environ.get(_CHECKPOINT_SHA256_ENV, "").strip().lower()
+    if expected and digest != expected:
+        raise RuntimeError(
+            "CLAP checkpoint sha256 mismatch — refusing to load. "
+            f"expected={expected} actual={digest}. "
+            f"Unset {_CHECKPOINT_SHA256_ENV} only if you intend to change the model."
+        )
+    return digest
+
+
+@contextlib.contextmanager
+def _torch_load_weights_only():
+    """Force ``weights_only=True`` for every ``torch.load`` inside the block.
+
+    ``laion_clap.load_ckpt`` calls ``torch.load`` without the flag; on
+    torch < 2.6 the default is ``weights_only=False`` — full unpickling,
+    i.e. remote code execution on a hostile checkpoint. Injecting the flag
+    restricts loading to plain tensors / state-dicts, which is exactly the
+    shape of a CLAP checkpoint. Restored on exit so the patch is scoped to
+    the load.
+    """
+    import torch
+
+    original = torch.load
+
+    def guarded(*args, **kwargs):
+        kwargs.setdefault("weights_only", True)
+        return original(*args, **kwargs)
+
+    torch.load = guarded
+    try:
+        yield
+    finally:
+        torch.load = original
 
 
 def _detect_device() -> str:

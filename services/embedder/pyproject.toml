@@ -24,7 +24,9 @@ clap = [
     # deps). Linux-gated because non-Linux platforms get CPU torch
     # without this triton variant.
     "pytorch-triton-rocm; sys_platform == 'linux'",
-    "laion-clap>=1.1.6",
+    # Upper-bounded so a surprise major/minor can't silently change the
+    # checkpoint-loading path (torch.load unpickles). Bump deliberately.
+    "laion-clap>=1.1.6,<1.2",
     "librosa>=0.10",
     "soundfile>=0.12",
 ]
