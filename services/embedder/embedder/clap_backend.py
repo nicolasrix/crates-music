@@ -16,7 +16,6 @@ done with soundfile + librosa.resample to CLAP's expected 48 kHz mono.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import io
 import logging
 import os
@@ -25,6 +24,7 @@ import time
 
 import numpy as np
 
+from embedder.checkpoint import verify_checkpoint
 from embedder.protocol import EmbedResult
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,11 @@ class ClapEmbedder:
             ) from e
 
         # Fail closed before the path reaches torch.load (unpickling).
-        self._checkpoint_sha256 = _verify_checkpoint(checkpoint_path)
+        self._checkpoint_sha256 = verify_checkpoint(
+            checkpoint_path,
+            sha256_env=_CHECKPOINT_SHA256_ENV,
+            label="CLAP checkpoint",
+        )
 
         logger.info("loading CLAP checkpoint from %s", checkpoint_path)
         self._model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
@@ -131,42 +135,6 @@ def _derive_version(checkpoint_path: str) -> str:
     """Best-effort: take the checkpoint filename without extension."""
     base = os.path.basename(checkpoint_path)
     return base.rsplit(".", 1)[0] or "clap"
-
-
-def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _verify_checkpoint(path: str) -> str:
-    """Validate a checkpoint *before* it is handed to ``torch.load``.
-
-    ``torch.load`` unpickles, so a malicious ``.pt`` can run arbitrary
-    code at load time. This is the first line of defence:
-
-    - require a regular file (reject a dir / missing path / device node);
-    - log the SHA-256 so an operator can discover the digest to pin;
-    - when ``CLAP_CHECKPOINT_SHA256`` is set, refuse to load anything whose
-      digest doesn't match — a cheap, deterministic guard against a
-      swapped or tampered checkpoint.
-
-    Returns the computed digest.
-    """
-    if not os.path.isfile(path):
-        raise RuntimeError(f"CLAP checkpoint missing or not a regular file: {path}")
-    digest = _sha256_file(path)
-    logger.info("CLAP checkpoint sha256=%s (%s)", digest, path)
-    expected = os.environ.get(_CHECKPOINT_SHA256_ENV, "").strip().lower()
-    if expected and digest != expected:
-        raise RuntimeError(
-            "CLAP checkpoint sha256 mismatch — refusing to load. "
-            f"expected={expected} actual={digest}. "
-            f"Unset {_CHECKPOINT_SHA256_ENV} only if you intend to change the model."
-        )
-    return digest
 
 
 @contextlib.contextmanager
