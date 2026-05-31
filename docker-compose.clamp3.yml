@@ -67,3 +67,9 @@ services:
       # gen_config.py. Must match the embedder's /healthz dim or the ANN
       # open will fail loudly at boot.
       RECOMMEND_EMBEDDING_DIM: "768"
+      # Preference re-scoring (per-track feedback tilt). Affinity is always
+      # captured; these gate/tune the read only. Default off — uncomment to
+      # enable. No ANN rebuild or re-embed; effective on gateway restart.
+      # RECOMMEND_PREFERENCE_ENABLED: "true"
+      # RECOMMEND_PREFERENCE_WEIGHT: "0.15"
+      # RECOMMEND_AFFINITY_HALF_LIFE_DAYS: "30"
