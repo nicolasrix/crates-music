@@ -249,6 +249,16 @@ export interface WeightedSeed {
   weight: number;
 }
 
+/** Anchor leash for a travelling station. `anchorIds` are the tracks the
+ *  gateway keeps every candidate within a soft cosine radius of; `tau` /
+ *  `lambda` override the server defaults for the radius + strength. Omit
+ *  (or pass an empty `anchorIds`) for a non-leashed station. */
+export interface LeashOptions {
+  anchorIds: readonly string[];
+  tau?: number;
+  lambda?: number;
+}
+
 /** Multi-seed station with per-seed weights. Wraps `from-seeds` and
  *  hydrates the result to full Track objects. Unlike
  *  `startStationFromAny`, this *aggregates* across seeds (Σ-similarity
@@ -259,12 +269,17 @@ export interface WeightedSeed {
  *
  *  When `sessionId` is supplied, the gateway adds tracks downvoted in
  *  that recommend-session to the exclusion set — keeps "I just
- *  thumbs-downed this" tracks from coming back the next refill. */
+ *  thumbs-downed this" tracks from coming back the next refill.
+ *
+ *  When `leash.anchorIds` is non-empty, the gateway demotes candidates
+ *  that drift past `tau` cosine of the nearest anchor — the boundary half
+ *  of tethered drift. */
 export async function startWeightedStation(
   seeds: readonly WeightedSeed[],
   n = 20,
   queueContext?: QueueContext,
   sessionId?: string,
+  leash?: LeashOptions,
 ): Promise<{ tracks: Track[]; allSeedsUnindexed: boolean }> {
   if (seeds.length === 0) {
     return { tracks: [], allSeedsUnindexed: false };
@@ -276,6 +291,11 @@ export async function startWeightedStation(
   };
   if (queueContext) body.queue_context = serializeQueueContext(queueContext);
   if (sessionId) body.session_id = sessionId;
+  if (leash && leash.anchorIds.length > 0) {
+    body.anchor_track_ids = [...leash.anchorIds];
+    if (leash.tau !== undefined) body.leash_tau = leash.tau;
+    if (leash.lambda !== undefined) body.leash_lambda = leash.lambda;
+  }
 
   const res = await postJson("/v1/recommend/from-seeds", body);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

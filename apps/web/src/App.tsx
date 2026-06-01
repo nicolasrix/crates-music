@@ -20,6 +20,7 @@ import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
 import { SearchBucket } from "./pages/SearchBucket";
+import { Settings } from "./pages/Settings";
 import { SignIn } from "./pages/SignIn";
 import { Station } from "./pages/Station";
 import { Tracks } from "./pages/Tracks";
@@ -90,6 +91,7 @@ function Routed({ path }: { path: string }) {
   if (path === "/queue") return <Queue />;
   if (path === "/liked") return <LikedSongs />;
   if (path === "/station") return <Station />;
+  if (path === "/settings") return <Settings />;
   if (path === "/diagnostics") return <DiagnosticsHome />;
   if (path === "/diagnostics/recommender") return <Recommender />;
   if (path === "/diagnostics/latent") return <LatentSpace />;

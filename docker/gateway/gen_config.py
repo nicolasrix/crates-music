@@ -36,6 +36,11 @@ Optional env (with defaults):
                                          liked-album boost)
     RECOMMEND_LIKE_BONUS_ARTIST         (float >= 0; gateway default 0.03 —
                                          liked-artist boost)
+    RECOMMEND_LEASH_TAU                 (float >= 0; gateway default 0.28 —
+                                         anchor-leash radius for travelling
+                                         stations)
+    RECOMMEND_LEASH_LAMBDA              (float >= 0; gateway default 16 —
+                                         anchor-leash strength; 0 disables)
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
@@ -160,6 +165,12 @@ def build_config(env: Mapping[str, str]) -> str:
     like_bonus_artist = _parse_float(
         env, "RECOMMEND_LIKE_BONUS_ARTIST", non_negative=True
     )
+    # Anchor-leash defaults for travelling autoplay stations. The web client
+    # sends per-request overrides from its Settings page; these only set the
+    # server fallback for clients that don't (CLI, old web builds). Unset →
+    # gateway defaults (tau 0.28 / lambda 16). lambda 0 disables the leash.
+    leash_tau = _parse_float(env, "RECOMMEND_LEASH_TAU", non_negative=True)
+    leash_lambda = _parse_float(env, "RECOMMEND_LEASH_LAMBDA", non_negative=True)
 
     parts: list[str] = []
 
@@ -222,6 +233,10 @@ def build_config(env: Mapping[str, str]) -> str:
         recommend_lines.append(f"like_bonus_album = {like_bonus_album}")
     if like_bonus_artist is not None:
         recommend_lines.append(f"like_bonus_artist = {like_bonus_artist}")
+    if leash_tau is not None:
+        recommend_lines.append(f"leash_tau = {leash_tau}")
+    if leash_lambda is not None:
+        recommend_lines.append(f"leash_lambda = {leash_lambda}")
     if recommend_lines:
         parts.append("[recommend]")
         parts.extend(recommend_lines)

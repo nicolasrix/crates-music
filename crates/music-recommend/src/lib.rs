@@ -16,6 +16,7 @@ pub mod embedder;
 pub mod events;
 pub mod feedback;
 pub mod ingest;
+pub mod leash;
 pub mod metadata;
 pub mod mmr;
 pub mod play_history;
@@ -34,6 +35,10 @@ pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, E
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
 pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
 pub use ingest::{MetadataFetcher, MetadataIngest};
+pub use leash::{
+    DEFAULT_LEASH_LAMBDA, DEFAULT_LEASH_TAU, LeashAdjustment, LeashCandidate, LeashParams,
+    LeashStats,
+};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };

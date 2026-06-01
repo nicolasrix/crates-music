@@ -266,6 +266,18 @@ impl AppState {
         self.inner.config.recommend.like_bonus_artist
     }
 
+    /// Default anchor-leash parameters from `[recommend] leash_tau /
+    /// leash_lambda`. The `/from-seeds` handler uses these when the request
+    /// omits its own `leash_tau` / `leash_lambda`, so ops can retune the leash
+    /// without a web rebuild. The leash only engages when the request also
+    /// supplies `anchor_track_ids`.
+    pub fn leash_params(&self) -> music_recommend::LeashParams {
+        music_recommend::LeashParams {
+            tau: self.inner.config.recommend.leash_tau,
+            lambda: self.inner.config.recommend.leash_lambda,
+        }
+    }
+
     /// Affinity decay half-life (ms) from config. Available regardless of
     /// `preference_enabled`: the affinity counter is captured on every
     /// play / skip / vote so the feature has full history the moment it's

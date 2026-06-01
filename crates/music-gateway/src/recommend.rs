@@ -31,7 +31,8 @@ use music_recommend::queue_filter::{
 };
 use music_recommend::types::ModelVersion;
 use music_recommend::{
-    EmbeddingKey, EmbeddingStore, RatedKind, Whitening, ann::AnnIndex, default_k,
+    EmbeddingKey, EmbeddingStore, LeashCandidate, LeashParams, RatedKind, Whitening, ann::AnnIndex,
+    default_k,
 };
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -484,6 +485,26 @@ pub struct FromSeedsRequest {
     /// might have been in a different mood.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Anchor-leash references. When non-empty, every aggregated candidate is
+    /// demoted by `λ·max(0, τ − sim(candidate, nearest anchor))²` (whitened
+    /// cosine) before the final top-N walk — keeping a *travelling* autoplay
+    /// station (one that re-seeds from its own recent output) within a soft
+    /// boundary of the user's anchored tracks. These ids are normally a
+    /// subset of `seeds` (the high-weight, user-picked seeds); the
+    /// low-weight recency frontier is deliberately *not* listed here so it
+    /// steers direction without widening the leash. Empty / absent ⇒ no leash
+    /// (legacy behaviour). Capped at `MAX_SEEDS`.
+    #[serde(default)]
+    pub anchor_track_ids: Vec<String>,
+    /// Per-request override for the leash radius `τ`. `None` ⇒ the
+    /// `[recommend] leash_tau` server default. Ignored when
+    /// `anchor_track_ids` is empty.
+    #[serde(default)]
+    pub leash_tau: Option<f32>,
+    /// Per-request override for the leash strength `λ`. `None` ⇒ the
+    /// `[recommend] leash_lambda` server default. `<= 0` disables the leash.
+    #[serde(default)]
+    pub leash_lambda: Option<f32>,
 }
 
 /// Client-supplied queue snapshot for diversity filtering. Sent on
@@ -585,6 +606,11 @@ pub struct FromSeedsResponse {
         seeds_indexed = tracing::field::Empty,
         requested_n = tracing::field::Empty,
         results = tracing::field::Empty,
+        leash_anchors = tracing::field::Empty,
+        leash_measured = tracing::field::Empty,
+        leash_demoted = tracing::field::Empty,
+        leash_min_sim = tracing::field::Empty,
+        leash_max_sim = tracing::field::Empty,
         shortfall_reason = tracing::field::Empty,
         result_track_ids_json = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
@@ -625,6 +651,9 @@ pub async fn from_seeds(
     }
     if req.exclude_track_ids.len() > MAX_EXCLUDE {
         return Err((StatusCode::BAD_REQUEST, "too many exclude_track_ids"));
+    }
+    if req.anchor_track_ids.len() > MAX_SEEDS {
+        return Err((StatusCode::BAD_REQUEST, "too many anchor_track_ids"));
     }
     if let Some(qc) = &req.queue_context
         && qc.queue_track_ids.len() > MAX_QUEUE
@@ -746,11 +775,27 @@ pub async fn from_seeds(
     }
     tracing::Span::current().record("seeds_indexed", seeds_indexed);
 
-    let aggregated = music_recommend::aggregate::aggregate_seed_results_weighted(
+    let mut aggregated = music_recommend::aggregate::aggregate_seed_results_weighted(
         &per_seed_results,
         &weights_for_results,
         &exclude,
         internal_top_n,
+    );
+
+    // Anchor leash: demote candidates that stray past `τ` from their nearest
+    // anchor, so a station that re-seeds from its own recent output travels
+    // smoothly outward instead of wandering off. Adjusts the Σ-similarity
+    // scores in place, then re-sorts. No-op when no anchors are supplied or
+    // none resolve to an embedded vector (degrades to the legacy ranking).
+    let leash_params = LeashParams {
+        tau: req.leash_tau.unwrap_or(state.leash_params().tau),
+        lambda: req.leash_lambda.unwrap_or(state.leash_params().lambda),
+    };
+    apply_anchor_leash(
+        &mut aggregated,
+        state.ann(),
+        &req.anchor_track_ids,
+        leash_params,
     );
 
     let rescore = rescore_ctx(&state).await;
@@ -2034,6 +2079,79 @@ fn walk_off<C: CandidateLike>(
         out.push(c);
     }
     (out, stats)
+}
+
+/// Demote aggregated candidates by the anchor leash, mutating their scores in
+/// place and re-sorting (highest adjusted score first). Records leash stats on
+/// the current span.
+///
+/// Vectors come from the ANN's stored (whitened) copies via
+/// [`AnnIndex::get_vector`] — the same space the Σ-similarity scores live in,
+/// so the penalty is comparable to the score it subtracts from. A candidate
+/// or anchor with no stored vector is skipped (fail-open, no penalty), matching
+/// the MMR path's behaviour for missing vectors.
+///
+/// No-op (and no vector fetches) when `anchor_ids` is empty or the params are
+/// inactive (`λ <= 0`).
+fn apply_anchor_leash(
+    aggregated: &mut [music_recommend::aggregate::AggregatedResult],
+    ann: &AnnIndex,
+    anchor_ids: &[String],
+    params: LeashParams,
+) {
+    if anchor_ids.is_empty() || !params.is_active() || aggregated.is_empty() {
+        return;
+    }
+
+    // Resolve anchor vectors once. De-dup ids so a repeated anchor doesn't pay
+    // for repeated fetches. An anchor not in the ANN (not embedded yet) is
+    // simply dropped — fewer constraints, never a spurious penalty.
+    let mut seen = HashSet::new();
+    let anchor_vecs: Vec<Vec<f32>> = anchor_ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .filter_map(|id| ann.get_vector(&TrackId::from(id.as_str())).ok().flatten())
+        .collect();
+
+    tracing::Span::current().record("leash_anchors", anchor_vecs.len());
+    if anchor_vecs.is_empty() {
+        return; // No embedded anchors → leash inert.
+    }
+
+    // Hydrate candidate vectors (whitened) and compute penalties.
+    let cand_vecs: Vec<Option<Vec<f32>>> = aggregated
+        .iter()
+        .map(|c| ann.get_vector(&c.track_id).ok().flatten())
+        .collect();
+    let candidates: Vec<LeashCandidate<'_>> = aggregated
+        .iter()
+        .zip(&cand_vecs)
+        .map(|(c, v)| LeashCandidate {
+            track_id: &c.track_id,
+            vector: v.as_deref(),
+        })
+        .collect();
+    let (adjustments, stats) = music_recommend::leash::apply(&candidates, &anchor_vecs, params);
+
+    tracing::Span::current().record("leash_measured", stats.measured);
+    tracing::Span::current().record("leash_demoted", stats.demoted);
+    if stats.measured > 0 {
+        tracing::Span::current().record("leash_min_sim", stats.min_sim);
+        tracing::Span::current().record("leash_max_sim", stats.max_sim);
+    }
+
+    // Subtract penalties (adjustments align with `aggregated` by index — both
+    // built from the same iteration order) and re-rank.
+    for (c, adj) in aggregated.iter_mut().zip(&adjustments) {
+        c.score -= adj.penalty;
+    }
+    aggregated.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.seed_hits.cmp(&a.seed_hits))
+            .then_with(|| a.track_id.as_str().cmp(b.track_id.as_str()))
+    });
 }
 
 /// Apply the [`QueueFilter`] to aggregated `from-seeds` results. Returns

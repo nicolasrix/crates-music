@@ -473,6 +473,94 @@ async fn from_seeds_with_weights_changes_ranking() {
 }
 
 #[tokio::test]
+async fn from_seeds_anchor_leash_demotes_far_candidate() {
+    // Geometry (DIM=8, raw cosines — whitening isn't fit in tests):
+    //   anchor  A = e0
+    //   nearN     = [0.8, 0.6, …]      cos(N, A) = 0.8   (inside τ)
+    //   farF      = e2                 cos(F, A) = 0     (outside τ)
+    //   frontier S= [0,0,0.9,0.436,…]  cos(F, S) ≈ 0.9, cos(*, A) = 0
+    //
+    // Σ-similarity (seeds A + S, equal weight, both excluded from results):
+    //   nearN = cos(N,A) + cos(N,S) ≈ 0.8 + 0   = 0.8
+    //   farF  = cos(F,A) + cos(F,S) ≈ 0   + 0.9 = 0.9
+    //
+    // So *without* a leash, farF outranks nearN. With the anchor leash on A
+    // (τ=0.5, λ=16), farF eats a 16·0.5² = 4.0 penalty (→ −3.1) while nearN
+    // (0.8 ≥ τ) is untouched, flipping the order. This proves the leash both
+    // engages and uses anchor — not seed — similarity.
+    fn vec8(parts: &[(usize, f32)]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; DIM];
+        for &(i, x) in parts {
+            v[i] = x;
+        }
+        v
+    }
+
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    ann.upsert(&TrackId::from("A"), &vec8(&[(0, 1.0)])).unwrap();
+    ann.upsert(&TrackId::from("nearN"), &vec8(&[(0, 0.8), (1, 0.6)]))
+        .unwrap();
+    ann.upsert(&TrackId::from("farF"), &vec8(&[(2, 1.0)]))
+        .unwrap();
+    ann.upsert(&TrackId::from("S"), &vec8(&[(2, 0.9), (3, 0.436)]))
+        .unwrap();
+    let app = build_router(state);
+
+    let base = json!({
+        "seeds": ["A", "S"],
+        "seed_weights": [1.0, 1.0],
+        "per_seed_n": 8,
+        "top_n": 5,
+        "sample_size": 2, // force both seeds queried
+    });
+
+    // Without a leash: farF (higher Σ-sim) ranks first.
+    let resp = app
+        .clone()
+        .oneshot(auth_post("/v1/recommend/from-seeds", &base))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results[0]["track_id"], "farF",
+        "without leash, the high-Σ-sim far candidate wins"
+    );
+
+    // With the leash anchored on A: nearN wins, farF is demoted.
+    let mut leashed = base.clone();
+    leashed["anchor_track_ids"] = json!(["A"]);
+    leashed["leash_tau"] = json!(0.5);
+    leashed["leash_lambda"] = json!(16.0);
+    let resp = app
+        .oneshot(auth_post("/v1/recommend/from-seeds", &leashed))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results[0]["track_id"], "nearN",
+        "the anchor leash demotes the far candidate below the near one"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_rejects_too_many_anchors() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let anchors: Vec<String> = (0..201).map(|i| format!("a{i}")).collect();
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({"seeds": ["t0"], "anchor_track_ids": anchors, "top_n": 5}),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn from_seeds_partial_index_does_not_set_all_unindexed() {
     let state = build_state(test_config()).await;
     let ann = state.ann();
@@ -2043,8 +2131,15 @@ async fn next_demotes_a_disliked_track_when_preference_enabled() {
     seed_and_graded_candidates(&state);
 
     // Control: with no feedback, the most-similar candidate leads.
-    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
-    assert_eq!(ids[0], "t1", "most-similar candidate should lead with no feedback");
+    let ids = next_ids(
+        build_router(state.clone()),
+        "/v1/recommend/next?seed=t0&n=3",
+    )
+    .await;
+    assert_eq!(
+        ids[0], "t1",
+        "most-similar candidate should lead with no feedback"
+    );
 
     // Thumbs-down t1 via the real endpoint.
     let status = post_feedback(build_router(state.clone()), "t1", "down").await;
@@ -2052,9 +2147,17 @@ async fn next_demotes_a_disliked_track_when_preference_enabled() {
 
     // t1's negative affinity sinks it below the others; t2 now leads and
     // the disliked t1 falls to the back.
-    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
+    let ids = next_ids(
+        build_router(state.clone()),
+        "/v1/recommend/next?seed=t0&n=3",
+    )
+    .await;
     assert_eq!(ids[0], "t2", "disliked t1 must no longer lead");
-    assert_eq!(ids.last().map(String::as_str), Some("t1"), "disliked t1 sinks to last");
+    assert_eq!(
+        ids.last().map(String::as_str),
+        Some("t1"),
+        "disliked t1 sinks to last"
+    );
 }
 
 #[tokio::test]
@@ -2067,8 +2170,15 @@ async fn next_promotes_a_liked_track_when_preference_enabled() {
     let status = post_feedback(build_router(state.clone()), "t3", "up").await;
     assert_eq!(status, StatusCode::OK);
 
-    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
-    assert_eq!(ids[0], "t3", "liked t3 should climb above the acoustic leader");
+    let ids = next_ids(
+        build_router(state.clone()),
+        "/v1/recommend/next?seed=t0&n=3",
+    )
+    .await;
+    assert_eq!(
+        ids[0], "t3",
+        "liked t3 should climb above the acoustic leader"
+    );
 }
 
 #[tokio::test]
@@ -2081,8 +2191,16 @@ async fn next_ignores_feedback_when_preference_disabled() {
     let status = post_feedback(build_router(state.clone()), "t1", "down").await;
     assert_eq!(status, StatusCode::OK);
 
-    let ids = next_ids(build_router(state.clone()), "/v1/recommend/next?seed=t0&n=3").await;
-    assert_eq!(ids, vec!["t1", "t2", "t3"], "ordering unchanged when preference is off");
+    let ids = next_ids(
+        build_router(state.clone()),
+        "/v1/recommend/next?seed=t0&n=3",
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec!["t1", "t2", "t3"],
+        "ordering unchanged when preference is off"
+    );
 }
 
 #[tokio::test]
@@ -2117,7 +2235,11 @@ async fn from_seeds_demotes_disliked_track_in_hardcap_mode() {
         .map(|r| r["track_id"].as_str().unwrap().to_string())
         .collect();
 
-    assert_ne!(ids.first().map(String::as_str), Some("t1"), "disliked t1 must not lead");
+    assert_ne!(
+        ids.first().map(String::as_str),
+        Some("t1"),
+        "disliked t1 must not lead"
+    );
     let pos = |id: &str| ids.iter().position(|x| x == id);
     assert!(
         pos("t1") > pos("t2"),
