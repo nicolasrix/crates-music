@@ -230,6 +230,16 @@ pub struct RecommendConfig {
     /// per-request `leash_lambda` overrides this default.
     #[serde(default = "default_leash_lambda")]
     pub leash_lambda: f32,
+
+    /// Recommendation provenance logging. When true, every served
+    /// recommendation (the request context + the ordered slate + per-item
+    /// scores) is persisted to the `recommendation` / `recommendation_item`
+    /// tables — the training substrate for future learning-to-rank /
+    /// supervised-metric models. Default on: it is pure append-only data
+    /// capture with no effect on what gets recommended. Set false to stop
+    /// capturing (e.g. to bound disk on a long-running deploy).
+    #[serde(default = "default_log_provenance")]
+    pub log_provenance: bool,
 }
 
 impl Default for RecommendConfig {
@@ -245,6 +255,7 @@ impl Default for RecommendConfig {
             like_bonus_artist: default_like_bonus_artist(),
             leash_tau: default_leash_tau(),
             leash_lambda: default_leash_lambda(),
+            log_provenance: default_log_provenance(),
         }
     }
 }
@@ -287,6 +298,10 @@ fn default_leash_tau() -> f32 {
 
 fn default_leash_lambda() -> f32 {
     music_recommend::DEFAULT_LEASH_LAMBDA
+}
+
+fn default_log_provenance() -> bool {
+    true
 }
 
 impl Default for OauthConfig {

@@ -22,6 +22,7 @@ pub mod mmr;
 pub mod play_history;
 pub mod preference;
 pub mod projection;
+pub mod provenance;
 pub mod queue_filter;
 pub mod rating;
 pub mod sessions;
@@ -46,6 +47,10 @@ pub use mmr::{Candidate as MmrCandidate, mmr_rerank};
 pub use play_history::PlayHistoryStore;
 pub use preference::{AffinityEvent, half_life_days_to_ms, preference_bonus};
 pub use projection::{Projection2D, ProjectionStore, ProjectionVersionSummary};
+pub use provenance::{
+    RecommendationItemRecord, RecommendationKind, RecommendationLogStore, RecommendationRecord,
+    StoredRecommendation,
+};
 pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use rating::{LIKE_BONUS, LIKE_BONUS_ALBUM, LIKE_BONUS_ARTIST, RatedKind, Rating, RatingStore};
 pub use sessions::{SessionRow, SessionStore};

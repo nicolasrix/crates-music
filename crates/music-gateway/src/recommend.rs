@@ -26,6 +26,9 @@ use music_core::TrackId;
 use music_recommend::aggregate::sample_indices;
 use music_recommend::ingest::rebuild_ann_from_store;
 use music_recommend::metadata::MetadataStore;
+use music_recommend::provenance::{
+    RecommendationItemRecord, RecommendationKind, RecommendationRecord,
+};
 use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
@@ -151,6 +154,29 @@ pub async fn next(
     results.truncate(n);
     tracing::Span::current().record("results", results.len());
 
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            let bonus = bonuses.get(&r.track_id).copied().unwrap_or(0.0);
+            RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity + bonus))
+                .with_features(serde_json::json!({
+                    "similarity": r.similarity,
+                    "affinity_bonus": bonus,
+                }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::Next,
+        None,
+        Some(vec![q.seed.clone()]),
+        None,
+        serde_json::json!({ "n": n }),
+        false,
+        prov_items,
+    )
+    .await;
+
     Ok(Json(RecommendNextResponse {
         seed: q.seed,
         model_version: Some(model_version.as_str().to_string()),
@@ -262,6 +288,25 @@ pub async fn station(
         .query_text(&embed.vector, n, &exclude)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
     tracing::Span::current().record("results", results.len());
+
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity))
+                .with_features(serde_json::json!({ "similarity": r.similarity }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::Station,
+        None,
+        None,
+        Some(trimmed.to_string()),
+        serde_json::json!({ "n": n }),
+        false,
+        prov_items,
+    )
+    .await;
 
     Ok(Json(RecommendStationResponse {
         query: trimmed.to_string(),
@@ -441,6 +486,45 @@ fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Persist a served recommendation for future model training (see
+/// `music_recommend::provenance`). Best-effort: a logging failure must
+/// never fail the recommendation that the user is waiting on, so errors
+/// are warned and swallowed. No-op when `log_provenance` is off.
+///
+/// Called inline after the final slate is decided. The write is a small
+/// SQLite transaction (one parent row + ~20 item rows) on the WAL pool —
+/// sub-millisecond at single-user scale, well inside the response budget.
+// The arg list mirrors the `RecommendationRecord` fields one-to-one;
+// bundling them into a struct just to satisfy the lint adds ceremony.
+#[allow(clippy::too_many_arguments)]
+async fn record_provenance(
+    state: &AppState,
+    kind: RecommendationKind,
+    session_id: Option<String>,
+    seeds: Option<Vec<String>>,
+    text_query: Option<String>,
+    params: serde_json::Value,
+    degraded: bool,
+    items: Vec<RecommendationItemRecord>,
+) {
+    if !state.provenance_enabled() {
+        return;
+    }
+    let record = RecommendationRecord {
+        kind,
+        session_id,
+        model_version: state.recommend_model_version().as_str().to_string(),
+        seeds,
+        text_query,
+        params,
+        degraded,
+        items,
+    };
+    if let Err(e) = state.recommendation_log().record(&record).await {
+        tracing::warn!(error = %e, kind = kind.as_str(), "failed to log recommendation provenance");
+    }
 }
 
 // --- /v1/recommend/from-seeds ----------------------------------------
@@ -818,6 +902,51 @@ pub async fn from_seeds(
     let result_ids: Vec<&str> = filtered.iter().map(|a| a.track_id.as_str()).collect();
     record_call_summary(top_n, &result_ids, &filter_stats);
 
+    let qc = req.queue_context.as_ref();
+    let diversity_mode = qc.and_then(|c| c.diversity_mode.as_ref()).map(|m| match m {
+        DiversityModeWire::HardCap => "hard_cap",
+        DiversityModeWire::Mmr => "mmr",
+        DiversityModeWire::Off => "off",
+    });
+    let prov_params = serde_json::json!({
+        "requested_n": top_n,
+        "per_seed_n": per_seed_n,
+        "sample_size": sample_size,
+        "seeds_total": req.seeds.len(),
+        "exclude_count": req.exclude_track_ids.len(),
+        "leash": {
+            "tau": leash_params.tau,
+            "lambda": leash_params.lambda,
+            "anchors": req.anchor_track_ids.len(),
+            "active": !req.anchor_track_ids.is_empty() && leash_params.lambda > 0.0,
+        },
+        "diversity": {
+            "mode": diversity_mode,
+            "mmr_lambda": qc.and_then(|c| c.mmr_lambda),
+            "artist_penalty_weight": qc.and_then(|c| c.artist_penalty_weight),
+            "max_per_artist": qc.and_then(|c| c.max_per_artist),
+            "queue_len": qc.map(|c| c.queue_track_ids.len()),
+        },
+    });
+    let prov_items = filtered
+        .iter()
+        .map(|a| {
+            RecommendationItemRecord::new(a.track_id.as_str(), Some(a.score))
+                .with_features(serde_json::json!({ "score": a.score, "seed_hits": a.seed_hits }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::FromSeeds,
+        req.session_id.clone(),
+        Some(req.seeds.clone()),
+        None,
+        prov_params,
+        seeds_indexed == 0,
+        prov_items,
+    )
+    .await;
+
     Ok(Json(FromSeedsResponse {
         model_version: Some(model_version.as_str().to_string()),
         degraded: false,
@@ -882,6 +1011,9 @@ pub struct FromAnyResponse {
         filter_dropped_sims_json = tracing::field::Empty,
     ),
 )]
+#[allow(clippy::too_many_lines)] // First-wins loop + filter dispatch +
+// provenance capture + serialization at the HTTP boundary; splitting
+// obscures the request lifecycle.
 pub async fn from_any(
     State(state): State<AppState>,
     payload: Result<Json<FromAnyRequest>, JsonRejection>,
@@ -988,6 +1120,43 @@ pub async fn from_any(
         record_filter_stats(&filter_stats);
         let result_ids: Vec<&str> = filtered.iter().map(|r| r.track_id.as_str()).collect();
         record_call_summary(n, &result_ids, &filter_stats);
+
+        let qc = req.queue_context.as_ref();
+        let diversity_mode = qc.and_then(|c| c.diversity_mode.as_ref()).map(|m| match m {
+            DiversityModeWire::HardCap => "hard_cap",
+            DiversityModeWire::Mmr => "mmr",
+            DiversityModeWire::Off => "off",
+        });
+        let prov_params = serde_json::json!({
+            "requested_n": n,
+            "candidates_total": req.candidate_seeds.len(),
+            "seed_used": cand,
+            "diversity": {
+                "mode": diversity_mode,
+                "mmr_lambda": qc.and_then(|c| c.mmr_lambda),
+                "artist_penalty_weight": qc.and_then(|c| c.artist_penalty_weight),
+                "max_per_artist": qc.and_then(|c| c.max_per_artist),
+                "queue_len": qc.map(|c| c.queue_track_ids.len()),
+            },
+        });
+        let prov_items = filtered
+            .iter()
+            .map(|r| {
+                RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity))
+                    .with_features(serde_json::json!({ "similarity": r.similarity }))
+            })
+            .collect();
+        record_provenance(
+            &state,
+            RecommendationKind::FromAny,
+            req.session_id.clone(),
+            Some(req.candidate_seeds.clone()),
+            None,
+            prov_params,
+            false,
+            prov_items,
+        )
+        .await;
 
         return Ok(Json(FromAnyResponse {
             seed_used: cand.clone(),
@@ -1103,6 +1272,8 @@ struct GroupedResult {
 /// `bool` mirrors [`FromSeedsResponse::all_seeds_unindexed`] so the
 /// frontend can distinguish "no neighbours yet" from "you haven't
 /// finished indexing this album".
+#[allow(clippy::too_many_lines)] // Validation + per-seed ANN fan-out +
+// metadata grouping + provenance capture; one linear request lifecycle.
 async fn group_similar_by(
     state: &AppState,
     seed_track_ids: &[String],
@@ -1171,7 +1342,29 @@ async fn group_similar_by(
         }
     }
 
+    let prov_kind = match group_by {
+        GroupBy::Album => RecommendationKind::SimilarAlbums,
+        GroupBy::Artist => RecommendationKind::SimilarArtists,
+    };
+    let prov_params = serde_json::json!({
+        "requested_n": n,
+        "per_seed_n": per_seed_n,
+        "sample_size": sample_size,
+        "seeds_total": seed_track_ids.len(),
+    });
+
     if seeds_indexed == 0 {
+        record_provenance(
+            state,
+            prov_kind,
+            None,
+            Some(seed_track_ids.to_vec()),
+            None,
+            prov_params,
+            true,
+            vec![],
+        )
+        .await;
         return Ok((Vec::new(), true));
     }
 
@@ -1224,6 +1417,26 @@ async fn group_similar_by(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(n);
+
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            RecommendationItemRecord::new(r.key.as_str(), Some(r.score)).with_features(
+                serde_json::json!({ "score": r.score, "supporting_tracks": r.supporting_tracks }),
+            )
+        })
+        .collect();
+    record_provenance(
+        state,
+        prov_kind,
+        None,
+        Some(seed_track_ids.to_vec()),
+        None,
+        prov_params,
+        false,
+        prov_items,
+    )
+    .await;
 
     Ok((results, false))
 }

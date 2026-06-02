@@ -41,6 +41,9 @@ Optional env (with defaults):
                                          stations)
     RECOMMEND_LEASH_LAMBDA              (float >= 0; gateway default 16 —
                                          anchor-leash strength; 0 disables)
+    RECOMMEND_LOG_PROVENANCE            (bool; gateway default true — capture
+                                         served recommendations as model
+                                         training data; false to disable)
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
@@ -171,6 +174,11 @@ def build_config(env: Mapping[str, str]) -> str:
     # gateway defaults (tau 0.28 / lambda 16). lambda 0 disables the leash.
     leash_tau = _parse_float(env, "RECOMMEND_LEASH_TAU", non_negative=True)
     leash_lambda = _parse_float(env, "RECOMMEND_LEASH_LAMBDA", non_negative=True)
+    # Recommendation provenance logging (gateway default TRUE). Pure
+    # append-only capture of what was served — the training substrate for
+    # future ranking models. Set false to stop capturing (e.g. to bound
+    # disk on a long-running deploy).
+    log_provenance = _parse_bool(env, "RECOMMEND_LOG_PROVENANCE")
 
     parts: list[str] = []
 
@@ -237,6 +245,10 @@ def build_config(env: Mapping[str, str]) -> str:
         recommend_lines.append(f"leash_tau = {leash_tau}")
     if leash_lambda is not None:
         recommend_lines.append(f"leash_lambda = {leash_lambda}")
+    if log_provenance is not None:
+        recommend_lines.append(
+            f"log_provenance = {'true' if log_provenance else 'false'}"
+        )
     if recommend_lines:
         parts.append("[recommend]")
         parts.extend(recommend_lines)

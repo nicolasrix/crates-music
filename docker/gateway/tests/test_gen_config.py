@@ -415,3 +415,28 @@ def test_leash_tau_rejects_negative() -> None:
     env = _minimum_env() | {"RECOMMEND_LEASH_TAU": "-0.1"}
     with pytest.raises(ConfigError, match="non-negative"):
         build_config(env)
+
+
+def test_log_provenance_true_is_emitted() -> None:
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "true"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["log_provenance"] is True
+
+
+def test_log_provenance_false_is_emitted() -> None:
+    # false is meaningful (turn capture off) — must survive, not be dropped.
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "false"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["log_provenance"] is False
+
+
+def test_log_provenance_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "log_provenance" not in parsed["recommend"]
+
+
+def test_log_provenance_rejects_non_boolean() -> None:
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "yes-please"}
+    with pytest.raises(ConfigError):
+        build_config(env)

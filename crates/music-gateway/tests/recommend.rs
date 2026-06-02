@@ -548,6 +548,91 @@ async fn from_seeds_anchor_leash_demotes_far_candidate() {
 }
 
 #[tokio::test]
+async fn provenance_logs_served_recommendations() {
+    // Both /next and /from-seeds should leave a provenance row behind:
+    // the request context + ordered slate, joinable to outcomes later.
+    let state = build_state(test_config()).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    let app = build_router(state.clone());
+
+    // /next — no session, seeds = [seed], kind = next.
+    let resp = app
+        .clone()
+        .oneshot(auth_get("/v1/recommend/next?seed=t0&n=3"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // /from-seeds — carries a session id, seeds = the seed list.
+    let resp = app
+        .oneshot(auth_post(
+            "/v1/recommend/from-seeds",
+            &json!({"seeds": ["t1", "t2"], "top_n": 4, "session_id": "sess-prov"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Recording is inline (awaited before the response returns), so the
+    // rows are durable by the time oneshot resolves.
+    let logged = state.recommendation_log().recent(10).await.unwrap();
+    assert_eq!(logged.len(), 2, "both calls were logged");
+
+    // recent() is newest-first → from_seeds, then next.
+    let from_seeds = &logged[0];
+    assert_eq!(
+        from_seeds.kind,
+        music_recommend::RecommendationKind::FromSeeds
+    );
+    assert_eq!(from_seeds.session_id.as_deref(), Some("sess-prov"));
+    assert_eq!(
+        from_seeds.seeds,
+        Some(vec!["t1".to_string(), "t2".to_string()])
+    );
+    assert!(!from_seeds.model_version.is_empty());
+    assert_eq!(from_seeds.result_count as usize, from_seeds.items.len());
+    assert!(!from_seeds.items.is_empty(), "served a non-empty slate");
+    // Per-item features carry the aggregation provenance (seed_hits).
+    assert!(from_seeds.items[0].features.get("seed_hits").is_some());
+    assert!(from_seeds.params.get("requested_n").is_some());
+
+    let next = &logged[1];
+    assert_eq!(next.kind, music_recommend::RecommendationKind::Next);
+    assert_eq!(next.session_id, None);
+    assert_eq!(next.seeds, Some(vec!["t0".to_string()]));
+    assert!(next.items[0].features.get("similarity").is_some());
+}
+
+#[tokio::test]
+async fn provenance_disabled_logs_nothing() {
+    let mut cfg = test_config();
+    cfg.recommend.log_provenance = false;
+    let state = build_state(cfg).await;
+    let ann = state.ann();
+    for i in 0..DIM {
+        ann.upsert(&TrackId::from(format!("t{i}")), &unit_at(i))
+            .unwrap();
+    }
+    let app = build_router(state.clone());
+
+    let resp = app
+        .oneshot(auth_get("/v1/recommend/next?seed=t0&n=3"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        state.recommendation_log().count().await.unwrap(),
+        0,
+        "nothing logged when log_provenance is off"
+    );
+}
+
+#[tokio::test]
 async fn from_seeds_rejects_too_many_anchors() {
     let state = build_state(test_config()).await;
     let app = build_router(state);

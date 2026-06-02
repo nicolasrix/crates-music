@@ -15,6 +15,7 @@ use music_recommend::FeedbackStore;
 use music_recommend::PlayHistoryStore;
 use music_recommend::ProjectionStore;
 use music_recommend::RatingStore;
+use music_recommend::RecommendationLogStore;
 use music_recommend::SessionStore;
 use music_recommend::TrackAffinityStore;
 use music_recommend::WhiteningStore;
@@ -63,6 +64,10 @@ struct Inner {
     event_store: EventStore,
     play_history: PlayHistoryStore,
     feedback: FeedbackStore,
+    /// Append-only log of what the recommender served (request context +
+    /// ordered slate + per-item scores). Pure data capture for future
+    /// model training; gated by `config.recommend.log_provenance`.
+    recommendation_log: RecommendationLogStore,
     track_affinity: TrackAffinityStore,
     /// Durable per-track like/dislike — the user's explicit taste. A
     /// separate channel from `track_affinity` (that one decays; ratings
@@ -133,6 +138,7 @@ impl AppState {
         let event_store = EventStore::new(embedding_store.pool().clone());
         let play_history = PlayHistoryStore::new(embedding_store.pool().clone());
         let feedback = FeedbackStore::new(embedding_store.pool().clone());
+        let recommendation_log = RecommendationLogStore::new(embedding_store.pool().clone());
         let track_affinity = TrackAffinityStore::new(embedding_store.pool().clone());
         let ratings = RatingStore::new(embedding_store.pool().clone());
         let projection = ProjectionStore::new(embedding_store.pool().clone());
@@ -152,6 +158,7 @@ impl AppState {
                 event_store,
                 play_history,
                 feedback,
+                recommendation_log,
                 track_affinity,
                 ratings,
                 projection,
@@ -234,6 +241,17 @@ impl AppState {
 
     pub fn feedback(&self) -> &FeedbackStore {
         &self.inner.feedback
+    }
+
+    pub fn recommendation_log(&self) -> &RecommendationLogStore {
+        &self.inner.recommendation_log
+    }
+
+    /// Whether to persist recommendation provenance for model training.
+    /// Gated so it can be turned off without a redeploy of the capture
+    /// call sites.
+    pub fn provenance_enabled(&self) -> bool {
+        self.inner.config.recommend.log_provenance
     }
 
     pub fn track_affinity(&self) -> &TrackAffinityStore {
