@@ -48,8 +48,8 @@ pub use play_history::PlayHistoryStore;
 pub use preference::{AffinityEvent, half_life_days_to_ms, preference_bonus};
 pub use projection::{Projection2D, ProjectionStore, ProjectionVersionSummary};
 pub use provenance::{
-    RecommendationItemRecord, RecommendationKind, RecommendationLogStore, RecommendationRecord,
-    StoredRecommendation,
+    RecommendationItemRecord, RecommendationKind, RecommendationLogStore, RecommendationOutcome,
+    RecommendationRecord, StoredRecommendation,
 };
 pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use rating::{LIKE_BONUS, LIKE_BONUS_ALBUM, LIKE_BONUS_ARTIST, RatedKind, Rating, RatingStore};

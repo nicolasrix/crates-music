@@ -1453,9 +1453,11 @@ pub async fn recommendations(
     // u32 literals matching DEFAULT_TRACE_LIMIT / MAX_TRACE_LIMIT — the
     // store's `recent` takes a u32, so avoid a usize→u32 cast here.
     let limit = q.limit.unwrap_or(100).clamp(1, 1_000);
+    // Outcome-annotated: each track item carries the listener's
+    // session-scoped kept/skipped/pending label joined from the event log.
     let recommendations = state
         .recommendation_log()
-        .recent(limit)
+        .recent_with_outcomes(limit)
         .await
         .map_err(db_error)?;
     Ok(Json(RecommendationsResponse { recommendations }))

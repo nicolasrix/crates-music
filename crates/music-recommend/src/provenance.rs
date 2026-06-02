@@ -63,6 +63,44 @@ impl RecommendationKind {
             _ => Self::Other,
         }
     }
+
+    /// Whether this endpoint's `entity_id`s are track ids (so a served
+    /// item can be joined to the per-track event log for an outcome). The
+    /// `similar_*` endpoints serve album / artist ids, which don't join.
+    pub fn serves_tracks(self) -> bool {
+        matches!(
+            self,
+            Self::Next | Self::Station | Self::FromSeeds | Self::FromAny
+        )
+    }
+}
+
+/// What the listener did with a served track, joined from the event log.
+/// Only meaningful for track-serving kinds (see
+/// [`RecommendationKind::serves_tracks`]); `None` on an item means "not
+/// applicable" (an album/artist recommendation), distinct from
+/// [`RecommendationOutcome::Pending`] ("a track, but no event yet").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecommendationOutcome {
+    /// A `scrobble` landed — the track played through. Positive label.
+    Kept,
+    /// A `skip` landed first. Negative label.
+    Skipped,
+    /// No scrobble/skip yet in this session+window — still in flight.
+    Pending,
+}
+
+impl RecommendationOutcome {
+    /// Map the earliest joined event type to a label. `None` (no event)
+    /// → `Pending`.
+    fn from_event(event_type: Option<&str>) -> Self {
+        match event_type {
+            Some("scrobble") => Self::Kept,
+            Some("skip") => Self::Skipped,
+            _ => Self::Pending,
+        }
+    }
 }
 
 /// One served candidate in a recommendation slate.
@@ -75,6 +113,12 @@ pub struct RecommendationItemRecord {
     /// Per-candidate features computed at serve time (similarity,
     /// seed_hits, affinity_bonus, supporting_tracks, …). Opaque JSON.
     pub features: serde_json::Value,
+    /// The listener's outcome for this item, joined from the event log on
+    /// the read path. `None` on the write path and for non-track kinds;
+    /// skipped from serialization when absent so the stored/write shape is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RecommendationOutcome>,
 }
 
 impl RecommendationItemRecord {
@@ -84,6 +128,7 @@ impl RecommendationItemRecord {
             entity_id: entity_id.into(),
             score,
             features: serde_json::Value::Object(serde_json::Map::new()),
+            outcome: None,
         }
     }
 
@@ -264,10 +309,77 @@ impl RecommendationLogStore {
                 score: row.get::<Option<f64>, _>("score").map(|v| v as f32),
                 features: serde_json::from_str(&row.get::<String, _>("features_json"))
                     .unwrap_or(serde_json::Value::Null),
+                outcome: None,
             })
             .collect())
     }
+
+    /// Like [`Self::recent`], but each track item carries the listener's
+    /// [`RecommendationOutcome`] joined from the event log. The join is
+    /// **session-scoped** when the recommendation has a `session_id` (the
+    /// from_seeds / from_any autoplay paths) — so a track served, ignored,
+    /// then served+skipped in a *different* session can't mis-label this
+    /// one. It also bounds the forward window to [`OUTCOME_WINDOW_MS`] and
+    /// allows [`OUTCOME_SKEW_MS`] of client-clock lag on the lower edge.
+    /// `similar_*` items (album/artist ids) get `outcome = None`.
+    pub async fn recent_with_outcomes(&self, limit: u32) -> Result<Vec<StoredRecommendation>> {
+        let mut recs = self.recent(limit).await?;
+        for rec in &mut recs {
+            if !rec.kind.serves_tracks() {
+                continue; // album/artist items don't join to the track event log
+            }
+            for item in &mut rec.items {
+                item.outcome = Some(
+                    self.outcome_for(&item.entity_id, rec.served_ms, rec.session_id.as_deref())
+                        .await?,
+                );
+            }
+        }
+        Ok(recs)
+    }
+
+    /// Earliest scrobble/skip for `track_id` in the serve window, scoped
+    /// to `session_id` when present. Returns the mapped outcome.
+    async fn outcome_for(
+        &self,
+        track_id: &str,
+        served_ms: i64,
+        session_id: Option<&str>,
+    ) -> Result<RecommendationOutcome> {
+        let row = sqlx::query(
+            "SELECT event_type FROM events
+                 WHERE track_id = ?
+                   AND event_type IN ('scrobble', 'skip')
+                   AND occurred_at >= ?
+                   AND occurred_at <= ?
+                   AND (? IS NULL OR session_id = ?)
+                 ORDER BY occurred_at ASC
+                 LIMIT 1",
+        )
+        .bind(track_id)
+        .bind(served_ms - OUTCOME_SKEW_MS)
+        .bind(served_ms + OUTCOME_WINDOW_MS)
+        .bind(session_id)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(RecommendationOutcome::from_event(
+            row.as_ref()
+                .map(|r| r.get::<String, _>("event_type"))
+                .as_deref(),
+        ))
+    }
 }
+
+/// Client clocks can lag the gateway slightly; allow the outcome event to
+/// have occurred up to this many ms *before* the recorded serve time.
+const OUTCOME_SKEW_MS: i64 = 2_000;
+
+/// Forward window for attributing an event to a served item. A queued
+/// autoplay track normally plays within minutes; this generous bound (6h)
+/// keeps the session-scoped join robust and bounds the no-session
+/// fallback (next / station carry no session).
+const OUTCOME_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
 
 fn now_ms() -> i64 {
     let d = SystemTime::now()
@@ -364,6 +476,127 @@ mod tests {
         assert_eq!(got.result_count, 0);
         assert!(got.degraded);
         assert!(got.items.is_empty());
+    }
+
+    async fn insert_event(
+        pool: &SqlitePool,
+        event_type: &str,
+        track_id: &str,
+        at: i64,
+        session_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (event_type, track_id, occurred_at, received_at, metadata, session_id)
+             VALUES (?, ?, ?, ?, NULL, ?)",
+        )
+        .bind(event_type)
+        .bind(track_id)
+        .bind(at)
+        .bind(at)
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn outcomes_are_session_scoped() {
+        let embed = EmbeddingStore::open_in_memory().await.unwrap();
+        let pool = embed.pool().clone();
+        let store = RecommendationLogStore::new(pool.clone());
+
+        store
+            .record(&RecommendationRecord {
+                kind: RecommendationKind::FromSeeds,
+                session_id: Some("A".into()),
+                model_version: "m".into(),
+                seeds: Some(vec!["seed".into()]),
+                text_query: None,
+                params: json!({}),
+                degraded: false,
+                items: vec![
+                    RecommendationItemRecord::new("t_keep", Some(1.0)),
+                    RecommendationItemRecord::new("t_skip", Some(0.9)),
+                    RecommendationItemRecord::new("t_pending", Some(0.8)),
+                ],
+            })
+            .await
+            .unwrap();
+        // record() stamps served_ms from the wall clock; anchor events to it.
+        let t = store.recent(1).await.unwrap()[0].served_ms;
+
+        // t_keep: an *earlier* skip in a DIFFERENT session (B) must NOT win —
+        // session scoping ignores it, leaving the in-session scrobble → Kept.
+        insert_event(&pool, "skip", "t_keep", t + 500, Some("B")).await;
+        insert_event(&pool, "scrobble", "t_keep", t + 1_000, Some("A")).await;
+        // t_skip: skipped in-session.
+        insert_event(&pool, "skip", "t_skip", t + 800, Some("A")).await;
+        // t_pending: its only event is before the serve window (beyond skew).
+        insert_event(&pool, "scrobble", "t_pending", t - 60_000, Some("A")).await;
+
+        let recs = store.recent_with_outcomes(10).await.unwrap();
+        let items = &recs[0].items;
+        let outcome = |id: &str| items.iter().find(|i| i.entity_id == id).unwrap().outcome;
+        assert_eq!(
+            outcome("t_keep"),
+            Some(RecommendationOutcome::Kept),
+            "cross-session skip must not override the in-session scrobble"
+        );
+        assert_eq!(outcome("t_skip"), Some(RecommendationOutcome::Skipped));
+        assert_eq!(
+            outcome("t_pending"),
+            Some(RecommendationOutcome::Pending),
+            "out-of-window event is ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_session_outcome_falls_back_to_track_and_window() {
+        // next / station carry no session_id — the join still labels by
+        // track id within the forward window.
+        let embed = EmbeddingStore::open_in_memory().await.unwrap();
+        let pool = embed.pool().clone();
+        let store = RecommendationLogStore::new(pool.clone());
+        store
+            .record(&RecommendationRecord {
+                kind: RecommendationKind::Next,
+                session_id: None,
+                model_version: "m".into(),
+                seeds: Some(vec!["seed".into()]),
+                text_query: None,
+                params: json!({}),
+                degraded: false,
+                items: vec![RecommendationItemRecord::new("t1", Some(1.0))],
+            })
+            .await
+            .unwrap();
+        let t = store.recent(1).await.unwrap()[0].served_ms;
+        insert_event(&pool, "scrobble", "t1", t + 1_000, Some("whatever")).await;
+        let recs = store.recent_with_outcomes(10).await.unwrap();
+        assert_eq!(recs[0].items[0].outcome, Some(RecommendationOutcome::Kept));
+    }
+
+    #[tokio::test]
+    async fn similar_items_have_no_outcome() {
+        let store = store().await;
+        store
+            .record(&RecommendationRecord {
+                kind: RecommendationKind::SimilarAlbums,
+                session_id: None,
+                model_version: "m".into(),
+                seeds: Some(vec!["seed".into()]),
+                text_query: None,
+                params: json!({}),
+                degraded: false,
+                items: vec![RecommendationItemRecord::new("album-1", Some(1.0))],
+            })
+            .await
+            .unwrap();
+        let recs = store.recent_with_outcomes(10).await.unwrap();
+        assert_eq!(
+            recs[0].items[0].outcome, None,
+            "album/artist items don't join to the per-track event log"
+        );
     }
 
     #[test]
