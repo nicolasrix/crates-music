@@ -72,6 +72,28 @@ describe("postEvents", () => {
     });
   });
 
+  it("forwards session_id so skips can be attributed session-scoped", async () => {
+    seedTokens();
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await postEvents([
+      {
+        event_type: "skip",
+        track_id: "t0",
+        occurred_at: 1_700_000_000_000,
+        session_id: "sess-abc",
+        metadata: { played_ms: 4200 },
+      },
+    ]);
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { events: Array<{ session_id?: string }> };
+    expect(body.events[0]?.session_id).toBe("sess-abc");
+  });
+
   it("short-circuits an empty batch without touching the network", async () => {
     seedTokens();
     const fetchSpy = vi.fn();
