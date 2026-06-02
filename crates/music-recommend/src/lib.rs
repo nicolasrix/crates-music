@@ -16,11 +16,13 @@ pub mod embedder;
 pub mod events;
 pub mod feedback;
 pub mod ingest;
+pub mod leash;
 pub mod metadata;
 pub mod mmr;
 pub mod play_history;
 pub mod preference;
 pub mod projection;
+pub mod provenance;
 pub mod queue_filter;
 pub mod rating;
 pub mod sessions;
@@ -34,6 +36,10 @@ pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, E
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
 pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
 pub use ingest::{MetadataFetcher, MetadataIngest};
+pub use leash::{
+    DEFAULT_LEASH_LAMBDA, DEFAULT_LEASH_TAU, LeashAdjustment, LeashCandidate, LeashParams,
+    LeashStats,
+};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };
@@ -41,6 +47,10 @@ pub use mmr::{Candidate as MmrCandidate, mmr_rerank};
 pub use play_history::PlayHistoryStore;
 pub use preference::{AffinityEvent, half_life_days_to_ms, preference_bonus};
 pub use projection::{Projection2D, ProjectionStore, ProjectionVersionSummary};
+pub use provenance::{
+    RecommendationItemRecord, RecommendationKind, RecommendationLogStore, RecommendationOutcome,
+    RecommendationRecord, StoredRecommendation,
+};
 pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
 pub use rating::{LIKE_BONUS, LIKE_BONUS_ALBUM, LIKE_BONUS_ARTIST, RatedKind, Rating, RatingStore};
 pub use sessions::{SessionRow, SessionStore};

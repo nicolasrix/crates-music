@@ -1429,3 +1429,36 @@ async fn compute_session_segments(
     }
     Ok(out)
 }
+
+// --- /v1/diagnostics/recommendations ---------------------------------------
+//
+// Read-back of the recommendation provenance log (what the recommender
+// served + context + per-item scores). Lets you eyeball the training
+// substrate without going to SQLite. Newest first; items hydrated.
+
+#[derive(Debug, Deserialize)]
+pub struct RecommendationsQuery {
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecommendationsResponse {
+    recommendations: Vec<music_recommend::StoredRecommendation>,
+}
+
+pub async fn recommendations(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendationsQuery>,
+) -> Result<Json<RecommendationsResponse>, (StatusCode, Json<Value>)> {
+    // u32 literals matching DEFAULT_TRACE_LIMIT / MAX_TRACE_LIMIT — the
+    // store's `recent` takes a u32, so avoid a usize→u32 cast here.
+    let limit = q.limit.unwrap_or(100).clamp(1, 1_000);
+    // Outcome-annotated: each track item carries the listener's
+    // session-scoped kept/skipped/pending label joined from the event log.
+    let recommendations = state
+        .recommendation_log()
+        .recent_with_outcomes(limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(RecommendationsResponse { recommendations }))
+}

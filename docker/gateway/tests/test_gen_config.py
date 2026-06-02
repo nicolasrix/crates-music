@@ -384,3 +384,59 @@ def test_like_bonus_artist_rejects_negative() -> None:
     env = _minimum_env() | {"RECOMMEND_LIKE_BONUS_ARTIST": "-0.1"}
     with pytest.raises(ConfigError, match="non-negative"):
         build_config(env)
+
+
+def test_leash_knobs_emitted_when_set() -> None:
+    env = _minimum_env() | {
+        "RECOMMEND_LEASH_TAU": "0.3",
+        "RECOMMEND_LEASH_LAMBDA": "20",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["leash_tau"] == pytest.approx(0.3)
+    assert parsed["recommend"]["leash_lambda"] == pytest.approx(20)
+
+
+def test_leash_knobs_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "leash_tau" not in parsed["recommend"]
+    assert "leash_lambda" not in parsed["recommend"]
+
+
+def test_leash_lambda_zero_is_emitted() -> None:
+    # 0 is a meaningful value (disables the leash), not "unset" — it must
+    # survive into the config rather than being dropped.
+    env = _minimum_env() | {"RECOMMEND_LEASH_LAMBDA": "0"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["leash_lambda"] == pytest.approx(0)
+
+
+def test_leash_tau_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_LEASH_TAU": "-0.1"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)
+
+
+def test_log_provenance_true_is_emitted() -> None:
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "true"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["log_provenance"] is True
+
+
+def test_log_provenance_false_is_emitted() -> None:
+    # false is meaningful (turn capture off) — must survive, not be dropped.
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "false"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["recommend"]["log_provenance"] is False
+
+
+def test_log_provenance_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    parsed = tomllib.loads(build_config(env))
+    assert "log_provenance" not in parsed["recommend"]
+
+
+def test_log_provenance_rejects_non_boolean() -> None:
+    env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "yes-please"}
+    with pytest.raises(ConfigError):
+        build_config(env)

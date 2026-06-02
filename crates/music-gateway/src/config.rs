@@ -215,6 +215,31 @@ pub struct RecommendConfig {
     /// `like_bonus_album + like_bonus_artist` is kept below `like_bonus`.
     #[serde(default = "default_like_bonus_artist")]
     pub like_bonus_artist: f32,
+
+    /// Anchor-leash radius `τ` (cosine, whitened space). A `/from-seeds`
+    /// candidate whose nearest-anchor similarity is `>= τ` pays no leash
+    /// penalty; below it the penalty grows quadratically — keeping a
+    /// *travelling* autoplay station within a soft boundary of the user's
+    /// anchored tracks. Only takes effect when the request supplies
+    /// `anchor_track_ids`; the per-request `leash_tau` overrides this default.
+    #[serde(default = "default_leash_tau")]
+    pub leash_tau: f32,
+
+    /// Anchor-leash strength `λ`. Scales the quadratic penalty past `τ`;
+    /// higher = tighter leash. `<= 0` disables the leash entirely. The
+    /// per-request `leash_lambda` overrides this default.
+    #[serde(default = "default_leash_lambda")]
+    pub leash_lambda: f32,
+
+    /// Recommendation provenance logging. When true, every served
+    /// recommendation (the request context + the ordered slate + per-item
+    /// scores) is persisted to the `recommendation` / `recommendation_item`
+    /// tables — the training substrate for future learning-to-rank /
+    /// supervised-metric models. Default on: it is pure append-only data
+    /// capture with no effect on what gets recommended. Set false to stop
+    /// capturing (e.g. to bound disk on a long-running deploy).
+    #[serde(default = "default_log_provenance")]
+    pub log_provenance: bool,
 }
 
 impl Default for RecommendConfig {
@@ -228,6 +253,9 @@ impl Default for RecommendConfig {
             like_bonus: default_like_bonus(),
             like_bonus_album: default_like_bonus_album(),
             like_bonus_artist: default_like_bonus_artist(),
+            leash_tau: default_leash_tau(),
+            leash_lambda: default_leash_lambda(),
+            log_provenance: default_log_provenance(),
         }
     }
 }
@@ -262,6 +290,18 @@ fn default_like_bonus_album() -> f32 {
 
 fn default_like_bonus_artist() -> f32 {
     music_recommend::LIKE_BONUS_ARTIST
+}
+
+fn default_leash_tau() -> f32 {
+    music_recommend::DEFAULT_LEASH_TAU
+}
+
+fn default_leash_lambda() -> f32 {
+    music_recommend::DEFAULT_LEASH_LAMBDA
+}
+
+fn default_log_provenance() -> bool {
+    true
 }
 
 impl Default for OauthConfig {

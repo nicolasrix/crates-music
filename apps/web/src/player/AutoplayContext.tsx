@@ -32,6 +32,11 @@ import {
 import { startStationFromAny, startWeightedStation } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
 import { buildAutoplaySeeds } from "./autoplaySeeds";
+import {
+  AutoplaySettings,
+  loadAutoplaySettings,
+  saveAutoplaySettings,
+} from "./autoplaySettings";
 
 // Threshold the queue refill targets. The server applies the artist
 // cap + dedup, so we ask for exactly `need` candidates per refill
@@ -39,14 +44,11 @@ import { buildAutoplaySeeds } from "./autoplaySeeds";
 const MIN_UPCOMING = 5;
 const STORAGE_KEY = "crates-music.autoplay";
 
-// Slate selection knobs. We opted into MMR after the λ-sweep at
-// `bench-results/lambda-sweep/` showed λ=0.8 is the only point on the
-// curve that doesn't trade off admit_mean for the worst-case-tax win.
-// Hard-cap is still available server-side as a fallback if a user-level
-// override ever lands; for now the value is hard-coded to the swept
-// default.
+// Slate selection algorithm. We opted into MMR after the λ-sweep at
+// `bench-results/lambda-sweep/`; the λ value itself is now a user-tunable
+// setting (default 0.8, the swept sweet spot). Hard-cap remains the
+// server-side default for clients that don't send a mode.
 const DIVERSITY_MODE = "mmr" as const;
-const MMR_LAMBDA = 0.8;
 // Hold the in-flight lock for a beat after pushing so the gateway WS
 // round-trip can land before the effect re-evaluates. Without this the
 // effect can re-fire while the new items haven't shown up in local
@@ -68,6 +70,10 @@ interface AutoplayCtx {
    *  conflating "I added this manually" with "it came from a rec" is
    *  worse than the buttons going dim after a reload. */
   isRecommendation: (itemId: string | undefined) => boolean;
+  /** Tethered-drift tuning (leash radius/strength, frontier, MMR λ).
+   *  Read by the refill effect and edited from the Settings page. */
+  settings: AutoplaySettings;
+  setSettings: (s: AutoplaySettings) => void;
 }
 
 const Ctx = createContext<AutoplayCtx | null>(null);
@@ -87,6 +93,16 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     } catch {
       /* localStorage may be unavailable (private mode); ignore */
     }
+  }, []);
+
+  // Tethered-drift tuning. Lazy-init from localStorage; persisted on every
+  // change so the refill effect (and a reload) always see the latest.
+  const [settings, setSettingsState] = useState<AutoplaySettings>(() =>
+    loadAutoplaySettings(),
+  );
+  const setSettings = useCallback((s: AutoplaySettings) => {
+    setSettingsState(s);
+    saveAutoplaySettings(s);
   }, []);
 
   const { state, pushTrack } = useSync();
@@ -124,16 +140,20 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     if (upcomingCount >= MIN_UPCOMING) return;
     if (isRefillingRef.current) return;
 
-    // Weighted seed list rooted in the user's intent:
-    //   anchor (3x) > user-picked (2x) > scrobble (1x) > algo-added (skip)
-    // The skip on algo-added items is the key fix for the drift loop
-    // that previously had the seed pool walking off into whatever the
-    // recommender had last suggested.
-    const weightedSeeds = buildAutoplaySeeds({
+    // Tethered-drift seed plan:
+    //   boundary: anchor (3x) > user-picked (2x) > scrobble (1x)  → anchorIds
+    //   direction: recency-decayed recent tail (incl. algo-added) → frontier
+    // The boundary roots the leash; the frontier lets the station travel.
+    const { seeds: weightedSeeds, anchorIds } = buildAutoplaySeeds({
       items,
       nowPlayingIndex: now_playing_index,
       sessionAnchor: session_anchor,
       recommendedItemIds: recommendedIdsRef.current,
+      frontier: {
+        weight: settings.frontierWeight,
+        decay: settings.frontierDecay,
+        window: settings.frontierWindow,
+      },
     });
     // Fallback to the legacy single-seed-first-wins path when we have
     // *no* weighted seeds at all — happens when the session anchor
@@ -160,12 +180,16 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
           queueTrackIds: items.map((it) => it.track_id),
           ...(nowPlayingTrackId ? { nowPlayingTrackId } : {}),
           diversityMode: DIVERSITY_MODE,
-          mmrLambda: MMR_LAMBDA,
+          mmrLambda: settings.mmrLambda,
         };
         const sessionId = session_anchor?.session_id;
         const { tracks } =
           weightedSeeds.length > 0
-            ? await startWeightedStation(weightedSeeds, need, queueContext, sessionId)
+            ? await startWeightedStation(weightedSeeds, need, queueContext, sessionId, {
+                anchorIds,
+                tau: settings.leashTau,
+                lambda: settings.leashLambda,
+              })
             : await startStationFromAny(fallbackCandidates, need, queueContext);
         if (cancelled) return;
         for (const t of tracks) {
@@ -210,10 +234,12 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [autoplay, queue.items, now_playing_index, session_anchor, pushTrack]);
+  }, [autoplay, queue.items, now_playing_index, session_anchor, pushTrack, settings]);
 
   return (
-    <Ctx.Provider value={{ autoplay, setAutoplay, isRecommendation }}>
+    <Ctx.Provider
+      value={{ autoplay, setAutoplay, isRecommendation, settings, setSettings }}
+    >
       {children}
     </Ctx.Provider>
   );

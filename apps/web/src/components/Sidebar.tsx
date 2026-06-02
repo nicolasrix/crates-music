@@ -8,7 +8,7 @@
 // below the parent. Sub-items match the URL exactly; the parent stays
 // active for any sub-page (via `prefix`).
 
-import { Disc3, Heart, Home as HomeIcon, ListMusic, Radio, User, Activity, Search, Plus } from "lucide-react";
+import { Disc3, Heart, Home as HomeIcon, ListMusic, Radio, User, Activity, Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { createPlaylist, listPlaylists } from "../api/client";
@@ -83,6 +83,11 @@ const DIAGNOSTICS_SUBS: readonly SubItem[] = [
 ];
 
 const SYSTEM: NavItem[] = [
+  {
+    to: "/settings",
+    label: "settings",
+    icon: <SlidersHorizontal size={18} strokeWidth={1.5} />,
+  },
   {
     to: "/diagnostics",
     label: "diagnostics",

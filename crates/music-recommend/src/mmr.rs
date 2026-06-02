@@ -211,6 +211,9 @@ where
 /// empty inputs, or zero vectors — keeps the caller's loop simple
 /// without forcing a Result. CLAP outputs are unit-norm so the divide
 /// is purely defensive.
+///
+/// Shared with the [`crate::leash`] module (anchor leash penalty), which
+/// computes candidate-vs-anchor cosines over the same whitened vectors.
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;

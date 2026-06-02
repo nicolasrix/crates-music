@@ -53,7 +53,7 @@ const Ctx = createContext<PlayerCtx | null>(null);
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const { state, trackMeta, submit } = useSync();
-  const { queue, now_playing_index, is_playing } = state.playback;
+  const { queue, now_playing_index, is_playing, session_anchor } = state.playback;
   // Lazy-construct on first render (not in a useEffect) so the element is
   // available to consumers — including the Scrubber that reads
   // currentTime/duration off it — from the very first render. The lazy
@@ -64,6 +64,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return a;
   });
   const audioRef = useRef<HTMLAudioElement>(audio);
+
+  // Active recommend-session id, read through a ref so the skip emitter
+  // (stable `[]` deps, called synchronously at gesture sites) can stamp the
+  // *current* session without re-binding. Stamping it lets the gateway's
+  // provenance log join a served track to its skip outcome session-scoped —
+  // without it, skips land session-null and can't be attributed.
+  const sessionIdRef = useRef<string | undefined>(session_anchor?.session_id);
+  useEffect(() => {
+    sessionIdRef.current = session_anchor?.session_id;
+  }, [session_anchor]);
 
   const currentItem = now_playing_index !== null ? queue.items[now_playing_index] : undefined;
   const currentTrackId = currentItem?.track_id;
@@ -283,6 +293,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         event_type: "skip",
         track_id: trackId,
         occurred_at: Date.now(),
+        // Omit (don't send `undefined`) when there's no active session.
+        ...(sessionIdRef.current ? { session_id: sessionIdRef.current } : {}),
         metadata: { played_ms: decision.playedMs },
       },
     ]).catch(() => {});

@@ -146,6 +146,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/diagnostics/recommend/sessions",
             get(diagnostics_handlers::recommend_sessions),
         )
+        .route(
+            "/v1/diagnostics/recommendations",
+            get(diagnostics_handlers::recommendations),
+        )
         // Coarse body cap on the JSON API only — see MAX_V1_BODY_BYTES.
         // Scoped here so it does NOT reach the /rest proxy once merged.
         .layer(DefaultBodyLimit::max(MAX_V1_BODY_BYTES));

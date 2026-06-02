@@ -26,12 +26,16 @@ use music_core::TrackId;
 use music_recommend::aggregate::sample_indices;
 use music_recommend::ingest::rebuild_ann_from_store;
 use music_recommend::metadata::MetadataStore;
+use music_recommend::provenance::{
+    RecommendationItemRecord, RecommendationKind, RecommendationRecord,
+};
 use music_recommend::queue_filter::{
     DiversityMode, FilterDecision, QueueFilter, QueueFilterConfig,
 };
 use music_recommend::types::ModelVersion;
 use music_recommend::{
-    EmbeddingKey, EmbeddingStore, RatedKind, Whitening, ann::AnnIndex, default_k,
+    EmbeddingKey, EmbeddingStore, LeashCandidate, LeashParams, RatedKind, Whitening, ann::AnnIndex,
+    default_k,
 };
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -150,6 +154,29 @@ pub async fn next(
     results.truncate(n);
     tracing::Span::current().record("results", results.len());
 
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            let bonus = bonuses.get(&r.track_id).copied().unwrap_or(0.0);
+            RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity + bonus))
+                .with_features(serde_json::json!({
+                    "similarity": r.similarity,
+                    "affinity_bonus": bonus,
+                }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::Next,
+        None,
+        Some(vec![q.seed.clone()]),
+        None,
+        serde_json::json!({ "n": n }),
+        false,
+        prov_items,
+    )
+    .await;
+
     Ok(Json(RecommendNextResponse {
         seed: q.seed,
         model_version: Some(model_version.as_str().to_string()),
@@ -261,6 +288,25 @@ pub async fn station(
         .query_text(&embed.vector, n, &exclude)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
     tracing::Span::current().record("results", results.len());
+
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity))
+                .with_features(serde_json::json!({ "similarity": r.similarity }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::Station,
+        None,
+        None,
+        Some(trimmed.to_string()),
+        serde_json::json!({ "n": n }),
+        false,
+        prov_items,
+    )
+    .await;
 
     Ok(Json(RecommendStationResponse {
         query: trimmed.to_string(),
@@ -442,6 +488,45 @@ fn now_unix_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// Persist a served recommendation for future model training (see
+/// `music_recommend::provenance`). Best-effort: a logging failure must
+/// never fail the recommendation that the user is waiting on, so errors
+/// are warned and swallowed. No-op when `log_provenance` is off.
+///
+/// Called inline after the final slate is decided. The write is a small
+/// SQLite transaction (one parent row + ~20 item rows) on the WAL pool —
+/// sub-millisecond at single-user scale, well inside the response budget.
+// The arg list mirrors the `RecommendationRecord` fields one-to-one;
+// bundling them into a struct just to satisfy the lint adds ceremony.
+#[allow(clippy::too_many_arguments)]
+async fn record_provenance(
+    state: &AppState,
+    kind: RecommendationKind,
+    session_id: Option<String>,
+    seeds: Option<Vec<String>>,
+    text_query: Option<String>,
+    params: serde_json::Value,
+    degraded: bool,
+    items: Vec<RecommendationItemRecord>,
+) {
+    if !state.provenance_enabled() {
+        return;
+    }
+    let record = RecommendationRecord {
+        kind,
+        session_id,
+        model_version: state.recommend_model_version().as_str().to_string(),
+        seeds,
+        text_query,
+        params,
+        degraded,
+        items,
+    };
+    if let Err(e) = state.recommendation_log().record(&record).await {
+        tracing::warn!(error = %e, kind = kind.as_str(), "failed to log recommendation provenance");
+    }
+}
+
 // --- /v1/recommend/from-seeds ----------------------------------------
 //
 // Multi-seed station: client hands us a set of track ids (typically a
@@ -484,6 +569,26 @@ pub struct FromSeedsRequest {
     /// might have been in a different mood.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Anchor-leash references. When non-empty, every aggregated candidate is
+    /// demoted by `λ·max(0, τ − sim(candidate, nearest anchor))²` (whitened
+    /// cosine) before the final top-N walk — keeping a *travelling* autoplay
+    /// station (one that re-seeds from its own recent output) within a soft
+    /// boundary of the user's anchored tracks. These ids are normally a
+    /// subset of `seeds` (the high-weight, user-picked seeds); the
+    /// low-weight recency frontier is deliberately *not* listed here so it
+    /// steers direction without widening the leash. Empty / absent ⇒ no leash
+    /// (legacy behaviour). Capped at `MAX_SEEDS`.
+    #[serde(default)]
+    pub anchor_track_ids: Vec<String>,
+    /// Per-request override for the leash radius `τ`. `None` ⇒ the
+    /// `[recommend] leash_tau` server default. Ignored when
+    /// `anchor_track_ids` is empty.
+    #[serde(default)]
+    pub leash_tau: Option<f32>,
+    /// Per-request override for the leash strength `λ`. `None` ⇒ the
+    /// `[recommend] leash_lambda` server default. `<= 0` disables the leash.
+    #[serde(default)]
+    pub leash_lambda: Option<f32>,
 }
 
 /// Client-supplied queue snapshot for diversity filtering. Sent on
@@ -585,6 +690,11 @@ pub struct FromSeedsResponse {
         seeds_indexed = tracing::field::Empty,
         requested_n = tracing::field::Empty,
         results = tracing::field::Empty,
+        leash_anchors = tracing::field::Empty,
+        leash_measured = tracing::field::Empty,
+        leash_demoted = tracing::field::Empty,
+        leash_min_sim = tracing::field::Empty,
+        leash_max_sim = tracing::field::Empty,
         shortfall_reason = tracing::field::Empty,
         result_track_ids_json = tracing::field::Empty,
         filter_capped = tracing::field::Empty,
@@ -625,6 +735,9 @@ pub async fn from_seeds(
     }
     if req.exclude_track_ids.len() > MAX_EXCLUDE {
         return Err((StatusCode::BAD_REQUEST, "too many exclude_track_ids"));
+    }
+    if req.anchor_track_ids.len() > MAX_SEEDS {
+        return Err((StatusCode::BAD_REQUEST, "too many anchor_track_ids"));
     }
     if let Some(qc) = &req.queue_context
         && qc.queue_track_ids.len() > MAX_QUEUE
@@ -746,11 +859,27 @@ pub async fn from_seeds(
     }
     tracing::Span::current().record("seeds_indexed", seeds_indexed);
 
-    let aggregated = music_recommend::aggregate::aggregate_seed_results_weighted(
+    let mut aggregated = music_recommend::aggregate::aggregate_seed_results_weighted(
         &per_seed_results,
         &weights_for_results,
         &exclude,
         internal_top_n,
+    );
+
+    // Anchor leash: demote candidates that stray past `τ` from their nearest
+    // anchor, so a station that re-seeds from its own recent output travels
+    // smoothly outward instead of wandering off. Adjusts the Σ-similarity
+    // scores in place, then re-sorts. No-op when no anchors are supplied or
+    // none resolve to an embedded vector (degrades to the legacy ranking).
+    let leash_params = LeashParams {
+        tau: req.leash_tau.unwrap_or(state.leash_params().tau),
+        lambda: req.leash_lambda.unwrap_or(state.leash_params().lambda),
+    };
+    apply_anchor_leash(
+        &mut aggregated,
+        state.ann(),
+        &req.anchor_track_ids,
+        leash_params,
     );
 
     let rescore = rescore_ctx(&state).await;
@@ -772,6 +901,51 @@ pub async fn from_seeds(
     record_filter_stats(&filter_stats);
     let result_ids: Vec<&str> = filtered.iter().map(|a| a.track_id.as_str()).collect();
     record_call_summary(top_n, &result_ids, &filter_stats);
+
+    let qc = req.queue_context.as_ref();
+    let diversity_mode = qc.and_then(|c| c.diversity_mode.as_ref()).map(|m| match m {
+        DiversityModeWire::HardCap => "hard_cap",
+        DiversityModeWire::Mmr => "mmr",
+        DiversityModeWire::Off => "off",
+    });
+    let prov_params = serde_json::json!({
+        "requested_n": top_n,
+        "per_seed_n": per_seed_n,
+        "sample_size": sample_size,
+        "seeds_total": req.seeds.len(),
+        "exclude_count": req.exclude_track_ids.len(),
+        "leash": {
+            "tau": leash_params.tau,
+            "lambda": leash_params.lambda,
+            "anchors": req.anchor_track_ids.len(),
+            "active": !req.anchor_track_ids.is_empty() && leash_params.lambda > 0.0,
+        },
+        "diversity": {
+            "mode": diversity_mode,
+            "mmr_lambda": qc.and_then(|c| c.mmr_lambda),
+            "artist_penalty_weight": qc.and_then(|c| c.artist_penalty_weight),
+            "max_per_artist": qc.and_then(|c| c.max_per_artist),
+            "queue_len": qc.map(|c| c.queue_track_ids.len()),
+        },
+    });
+    let prov_items = filtered
+        .iter()
+        .map(|a| {
+            RecommendationItemRecord::new(a.track_id.as_str(), Some(a.score))
+                .with_features(serde_json::json!({ "score": a.score, "seed_hits": a.seed_hits }))
+        })
+        .collect();
+    record_provenance(
+        &state,
+        RecommendationKind::FromSeeds,
+        req.session_id.clone(),
+        Some(req.seeds.clone()),
+        None,
+        prov_params,
+        seeds_indexed == 0,
+        prov_items,
+    )
+    .await;
 
     Ok(Json(FromSeedsResponse {
         model_version: Some(model_version.as_str().to_string()),
@@ -837,6 +1011,9 @@ pub struct FromAnyResponse {
         filter_dropped_sims_json = tracing::field::Empty,
     ),
 )]
+#[allow(clippy::too_many_lines)] // First-wins loop + filter dispatch +
+// provenance capture + serialization at the HTTP boundary; splitting
+// obscures the request lifecycle.
 pub async fn from_any(
     State(state): State<AppState>,
     payload: Result<Json<FromAnyRequest>, JsonRejection>,
@@ -943,6 +1120,43 @@ pub async fn from_any(
         record_filter_stats(&filter_stats);
         let result_ids: Vec<&str> = filtered.iter().map(|r| r.track_id.as_str()).collect();
         record_call_summary(n, &result_ids, &filter_stats);
+
+        let qc = req.queue_context.as_ref();
+        let diversity_mode = qc.and_then(|c| c.diversity_mode.as_ref()).map(|m| match m {
+            DiversityModeWire::HardCap => "hard_cap",
+            DiversityModeWire::Mmr => "mmr",
+            DiversityModeWire::Off => "off",
+        });
+        let prov_params = serde_json::json!({
+            "requested_n": n,
+            "candidates_total": req.candidate_seeds.len(),
+            "seed_used": cand,
+            "diversity": {
+                "mode": diversity_mode,
+                "mmr_lambda": qc.and_then(|c| c.mmr_lambda),
+                "artist_penalty_weight": qc.and_then(|c| c.artist_penalty_weight),
+                "max_per_artist": qc.and_then(|c| c.max_per_artist),
+                "queue_len": qc.map(|c| c.queue_track_ids.len()),
+            },
+        });
+        let prov_items = filtered
+            .iter()
+            .map(|r| {
+                RecommendationItemRecord::new(r.track_id.as_str(), Some(r.similarity))
+                    .with_features(serde_json::json!({ "similarity": r.similarity }))
+            })
+            .collect();
+        record_provenance(
+            &state,
+            RecommendationKind::FromAny,
+            req.session_id.clone(),
+            Some(req.candidate_seeds.clone()),
+            None,
+            prov_params,
+            false,
+            prov_items,
+        )
+        .await;
 
         return Ok(Json(FromAnyResponse {
             seed_used: cand.clone(),
@@ -1058,6 +1272,8 @@ struct GroupedResult {
 /// `bool` mirrors [`FromSeedsResponse::all_seeds_unindexed`] so the
 /// frontend can distinguish "no neighbours yet" from "you haven't
 /// finished indexing this album".
+#[allow(clippy::too_many_lines)] // Validation + per-seed ANN fan-out +
+// metadata grouping + provenance capture; one linear request lifecycle.
 async fn group_similar_by(
     state: &AppState,
     seed_track_ids: &[String],
@@ -1126,7 +1342,29 @@ async fn group_similar_by(
         }
     }
 
+    let prov_kind = match group_by {
+        GroupBy::Album => RecommendationKind::SimilarAlbums,
+        GroupBy::Artist => RecommendationKind::SimilarArtists,
+    };
+    let prov_params = serde_json::json!({
+        "requested_n": n,
+        "per_seed_n": per_seed_n,
+        "sample_size": sample_size,
+        "seeds_total": seed_track_ids.len(),
+    });
+
     if seeds_indexed == 0 {
+        record_provenance(
+            state,
+            prov_kind,
+            None,
+            Some(seed_track_ids.to_vec()),
+            None,
+            prov_params,
+            true,
+            vec![],
+        )
+        .await;
         return Ok((Vec::new(), true));
     }
 
@@ -1179,6 +1417,26 @@ async fn group_similar_by(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(n);
+
+    let prov_items = results
+        .iter()
+        .map(|r| {
+            RecommendationItemRecord::new(r.key.as_str(), Some(r.score)).with_features(
+                serde_json::json!({ "score": r.score, "supporting_tracks": r.supporting_tracks }),
+            )
+        })
+        .collect();
+    record_provenance(
+        state,
+        prov_kind,
+        None,
+        Some(seed_track_ids.to_vec()),
+        None,
+        prov_params,
+        false,
+        prov_items,
+    )
+    .await;
 
     Ok((results, false))
 }
@@ -2034,6 +2292,79 @@ fn walk_off<C: CandidateLike>(
         out.push(c);
     }
     (out, stats)
+}
+
+/// Demote aggregated candidates by the anchor leash, mutating their scores in
+/// place and re-sorting (highest adjusted score first). Records leash stats on
+/// the current span.
+///
+/// Vectors come from the ANN's stored (whitened) copies via
+/// [`AnnIndex::get_vector`] — the same space the Σ-similarity scores live in,
+/// so the penalty is comparable to the score it subtracts from. A candidate
+/// or anchor with no stored vector is skipped (fail-open, no penalty), matching
+/// the MMR path's behaviour for missing vectors.
+///
+/// No-op (and no vector fetches) when `anchor_ids` is empty or the params are
+/// inactive (`λ <= 0`).
+fn apply_anchor_leash(
+    aggregated: &mut [music_recommend::aggregate::AggregatedResult],
+    ann: &AnnIndex,
+    anchor_ids: &[String],
+    params: LeashParams,
+) {
+    if anchor_ids.is_empty() || !params.is_active() || aggregated.is_empty() {
+        return;
+    }
+
+    // Resolve anchor vectors once. De-dup ids so a repeated anchor doesn't pay
+    // for repeated fetches. An anchor not in the ANN (not embedded yet) is
+    // simply dropped — fewer constraints, never a spurious penalty.
+    let mut seen = HashSet::new();
+    let anchor_vecs: Vec<Vec<f32>> = anchor_ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .filter_map(|id| ann.get_vector(&TrackId::from(id.as_str())).ok().flatten())
+        .collect();
+
+    tracing::Span::current().record("leash_anchors", anchor_vecs.len());
+    if anchor_vecs.is_empty() {
+        return; // No embedded anchors → leash inert.
+    }
+
+    // Hydrate candidate vectors (whitened) and compute penalties.
+    let cand_vecs: Vec<Option<Vec<f32>>> = aggregated
+        .iter()
+        .map(|c| ann.get_vector(&c.track_id).ok().flatten())
+        .collect();
+    let candidates: Vec<LeashCandidate<'_>> = aggregated
+        .iter()
+        .zip(&cand_vecs)
+        .map(|(c, v)| LeashCandidate {
+            track_id: &c.track_id,
+            vector: v.as_deref(),
+        })
+        .collect();
+    let (adjustments, stats) = music_recommend::leash::apply(&candidates, &anchor_vecs, params);
+
+    tracing::Span::current().record("leash_measured", stats.measured);
+    tracing::Span::current().record("leash_demoted", stats.demoted);
+    if stats.measured > 0 {
+        tracing::Span::current().record("leash_min_sim", stats.min_sim);
+        tracing::Span::current().record("leash_max_sim", stats.max_sim);
+    }
+
+    // Subtract penalties (adjustments align with `aggregated` by index — both
+    // built from the same iteration order) and re-rank.
+    for (c, adj) in aggregated.iter_mut().zip(&adjustments) {
+        c.score -= adj.penalty;
+    }
+    aggregated.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.seed_hits.cmp(&a.seed_hits))
+            .then_with(|| a.track_id.as_str().cmp(b.track_id.as_str()))
+    });
 }
 
 /// Apply the [`QueueFilter`] to aggregated `from-seeds` results. Returns
