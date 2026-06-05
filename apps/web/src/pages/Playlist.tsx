@@ -14,6 +14,7 @@ import {
 } from "../api/client";
 import { suggestForPlaylist } from "../api/recommend";
 import { Cover } from "../components/Cover";
+import { DownloadAllButton } from "../components/DownloadAllButton";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
@@ -205,6 +206,7 @@ export function Playlist({ id }: { id: string }) {
             >
               <Sparkles size={18} strokeWidth={1.5} />
             </button>
+            <DownloadAllButton tracks={tracks} label="download playlist for offline" />
             <button
               className="icon-btn"
               onClick={handleDelete}

@@ -9,8 +9,17 @@
 //   • Direction (travel) — how fast it moves on to new territory.
 // Plus the diversity λ and the master autoplay toggle.
 
-import { RotateCcw, SlidersHorizontal } from "lucide-react";
+import { HardDrive, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { useState } from "react";
 
+import { useAudioCache } from "../cache/AudioCacheContext";
+import {
+  CACHE_BOUNDS,
+  CacheSettings,
+  loadCacheSettings,
+  saveCacheSettings,
+} from "../cache/cacheSettings";
+import { formatBytes } from "../cache/format";
 import { Layout } from "../components/Layout";
 import { useAutoplay } from "../player/AutoplayContext";
 import {
@@ -137,11 +146,68 @@ function KnobRow({
   );
 }
 
+function StorageKnob({
+  label,
+  help,
+  value,
+  bounds,
+  onChange,
+}: {
+  label: string;
+  help: string;
+  value: number;
+  bounds: { min: number; max: number; step: number };
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
+          marginBottom: 2,
+        }}
+      >
+        <label style={{ fontWeight: 500 }}>{label}</label>
+        <span
+          className="text-sm"
+          style={{ fontVariantNumeric: "tabular-nums", color: "var(--fg)" }}
+        >
+          {formatBytes(value)}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={bounds.min}
+        max={bounds.max}
+        step={bounds.step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: "100%", accentColor: "var(--accent, #f0a020)" }}
+      />
+      <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
+        {help}
+      </p>
+    </div>
+  );
+}
+
 export function Settings() {
   const { autoplay, setAutoplay, settings, setSettings } = useAutoplay();
+  const cache = useAudioCache();
+  const [cacheSettings, setCacheSettingsState] = useState(loadCacheSettings);
 
   const update = (key: keyof AutoplaySettings, v: number) =>
     setSettings({ ...settings, [key]: v });
+
+  const updateCache = (key: keyof CacheSettings, v: number) => {
+    const next = { ...cacheSettings, [key]: v };
+    setCacheSettingsState(next);
+    saveCacheSettings(next);
+    // Lowering a cap must evict immediately and visibly (no-op if under).
+    void cache.evictToBudget();
+  };
 
   const renderGroup = (title: string, knobs: KnobMeta[]) => (
     <div className="section" style={{ marginTop: 24 }}>
@@ -217,6 +283,41 @@ export function Settings() {
       {renderGroup("Boundary — how far it strays", BOUNDARY_KNOBS)}
       {renderGroup("Direction — how it travels", TRAVEL_KNOBS)}
       {renderGroup("Diversity", DIVERSITY_KNOBS)}
+
+      <div className="section" style={{ marginTop: 24 }}>
+        <div className="section-head">
+          <h3 style={{ margin: 0 }}>
+            <HardDrive
+              size={16}
+              strokeWidth={1.5}
+              style={{ verticalAlign: "-3px", marginRight: 8 }}
+            />
+            Offline storage
+          </h3>
+        </div>
+        <p className="text-fg-muted text-sm" style={{ marginBottom: 16 }}>
+          Audio is cached in the browser for offline playback. Lowering a
+          budget frees space immediately. See what's stored on the{" "}
+          <a href="/downloads" style={{ color: "var(--accent, #f0a020)" }}>
+            downloads
+          </a>{" "}
+          page.
+        </p>
+        <StorageKnob
+          label="Download budget"
+          help="Space for tracks you save for offline. Never auto-evicted."
+          value={cacheSettings.pinnedBudgetBytes}
+          bounds={CACHE_BOUNDS.pinnedBudgetBytes}
+          onChange={(v) => updateCache("pinnedBudgetBytes", v)}
+        />
+        <StorageKnob
+          label="Recent cache budget"
+          help="Space for automatically-cached recent plays. Oldest is evicted first when full."
+          value={cacheSettings.regularBudgetBytes}
+          bounds={CACHE_BOUNDS.regularBudgetBytes}
+          onChange={(v) => updateCache("regularBudgetBytes", v)}
+        />
+      </div>
     </Layout>
   );
 }
