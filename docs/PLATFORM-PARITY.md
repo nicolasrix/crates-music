@@ -36,11 +36,11 @@ that distinction:
 | Server connectivity check (`ping`) | 🚫 | ✅ | 🔭 |
 | Browse albums | ✅ | ✅ | 🔭 |
 | Album detail + track list | ✅ | ✅ | 🔭 |
-| Browse artists | ✅ | ❌ | 🔭 |
-| Artist detail + discography | ✅ | ❌ | 🔭 |
-| Browse all tracks (paginated) | ✅ | ❌ | 🔭 |
+| Browse artists | ✅ | ✅ `artists` | 🔭 |
+| Artist detail + discography | ✅ | ✅ `artist <id>` | 🔭 |
+| Browse all tracks (paginated) | ✅ | ✅ `tracks` | 🔭 |
 | Browse filters (recent / most-played / random) | ✅ | ⚠️ albums only | 🔭 |
-| Global search (artists / albums / tracks) | ✅ | ❌ | 🔭 |
+| Global search (artists / albums / tracks) | ✅ | ✅ `search <q>` | 🔭 |
 | Home / overview page | ✅ | 🚫 | 🔭 |
 
 ### Playback
@@ -158,8 +158,10 @@ that distinction:
 Bringing the CLI toward the web UI is mostly mechanical — wiring clap
 subcommands onto endpoints that already exist. Rough priority:
 
-1. **Browse parity** — `artists`, `tracks`, `search` (Subsonic
-   passthrough; no gateway work).
+1. ~~**Browse parity** — `artists`, `tracks`, `search`.~~ **Done** —
+   `artists`, `artist <id>`, `tracks`, `search <q>` via new typed
+   `music-subsonic` methods (`get_artists`/`get_artist`/`search3`). Works
+   in both direct and gateway mode; no gateway change.
 2. **Ratings** — `like` / `dislike` / `liked` against the gateway
    ratings endpoints.
 3. **Stations** — `station "<prompt>"` and seed-from-track via
