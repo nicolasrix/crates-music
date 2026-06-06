@@ -9,12 +9,12 @@ pub mod auth;
 mod error;
 pub mod wire;
 
-use music_core::{Album, AlbumId, Track, TrackId};
+use music_core::{Album, AlbumId, Artist, ArtistId, Track, TrackId};
 use reqwest::Client as Http;
 use url::Url;
 
 pub use error::{Error, Result};
-pub use wire::AlbumWithSongs;
+pub use wire::{AlbumWithSongs, ArtistWithAlbums, SearchResult3};
 
 const CLIENT_NAME: &str = "crates-music";
 const PROTOCOL_VERSION: &str = "1.16.1";
@@ -143,6 +143,46 @@ impl Client {
         let params = vec![("id", id.as_str().to_string())];
         let body = self.fetch_text("getSong", &params).await?;
         wire::parse_get_song(&body)
+    }
+
+    /// List every artist (ID3 `getArtists`), flattened across the index
+    /// buckets the server groups them into. Order is the server's
+    /// (alphabetical).
+    pub async fn get_artists(&self) -> Result<Vec<Artist>> {
+        let body = self.fetch_text("getArtists", &[]).await?;
+        wire::parse_get_artists(&body)
+    }
+
+    /// Fetch one artist with their albums (ID3 `getArtist`).
+    pub async fn get_artist(&self, id: &ArtistId) -> Result<ArtistWithAlbums> {
+        let params = vec![("id", id.as_str().to_string())];
+        let body = self.fetch_text("getArtist", &params).await?;
+        wire::parse_get_artist(&body)
+    }
+
+    /// Search across artists, albums and tracks (`search3`, ID3). `count`
+    /// caps each bucket; `offset` pages within each bucket (Subsonic applies
+    /// the same offset to all three). An empty `query` matches everything on
+    /// Navidrome — used to page the full track list.
+    pub async fn search3(
+        &self,
+        query: &str,
+        count: u32,
+        offset: u32,
+    ) -> Result<SearchResult3> {
+        let count = count.to_string();
+        let offset = offset.to_string();
+        let params = vec![
+            ("query", query.to_string()),
+            ("artistCount", count.clone()),
+            ("artistOffset", offset.clone()),
+            ("albumCount", count.clone()),
+            ("albumOffset", offset.clone()),
+            ("songCount", count),
+            ("songOffset", offset),
+        ];
+        let body = self.fetch_text("search3", &params).await?;
+        wire::parse_search3(&body)
     }
 
     /// Build the URL for streaming a track. The caller is responsible for

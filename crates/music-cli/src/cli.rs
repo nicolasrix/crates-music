@@ -36,6 +36,36 @@ pub enum Command {
         id: String,
     },
 
+    /// List all artists (alphabetical).
+    Artists,
+
+    /// Show an artist with their albums.
+    Artist {
+        /// Artist ID (e.g. from `artists` or `search`).
+        id: String,
+    },
+
+    /// List tracks from the library (paginated, server order).
+    Tracks {
+        /// Number of tracks to return.
+        #[arg(long, default_value_t = 50)]
+        size: u32,
+
+        /// Skip this many tracks (for paging).
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
+
+    /// Search artists, albums and tracks by free text.
+    Search {
+        /// Query string.
+        query: String,
+
+        /// Max results per category (artists / albums / tracks).
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+
     /// Stream and play one or more tracks. Multiple IDs play gaplessly.
     Play {
         /// Track IDs (in playback order).

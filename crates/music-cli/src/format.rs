@@ -3,7 +3,50 @@
 
 use std::fmt::Write;
 
-use music_core::{Album, Track};
+use music_core::{Album, Artist, Track};
+
+pub fn artists_table(artists: &[Artist]) -> String {
+    if artists.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let id_w = artists
+        .iter()
+        .map(|a| a.id.as_str().len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let name_w = artists
+        .iter()
+        .map(|a| a.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    let _ = writeln!(
+        out,
+        "{:<id_w$}  {:<name_w$}  {:>6}",
+        "ID",
+        "NAME",
+        "ALBUMS",
+        id_w = id_w,
+        name_w = name_w,
+    );
+    for a in artists {
+        let albums = a.album_count.map(|n| n.to_string()).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:<id_w$}  {:<name_w$}  {:>6}",
+            a.id.as_str(),
+            a.name,
+            albums,
+            id_w = id_w,
+            name_w = name_w,
+        );
+    }
+    out
+}
 
 pub fn albums_table(albums: &[Album]) -> String {
     if albums.is_empty() {

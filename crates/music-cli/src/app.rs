@@ -5,13 +5,13 @@ use std::path::Path;
 use anyhow::Context;
 use bytes::Bytes;
 use music_cache::{AudioCache, AudioKey, PinOutcome, UnpinOutcome};
-use music_core::{AlbumId, TrackId};
+use music_core::{AlbumId, ArtistId, TrackId};
 use music_player::{play_queue_blocking, read_cached, resolve_source};
-use music_subsonic::{Client, Credentials};
+use music_subsonic::{Client, Credentials, SearchResult3};
 
 use crate::cli::{CacheAction, Cli, Command, SyncAction};
 use crate::config::{Config, resolve_cache_root};
-use crate::format::{albums_table, tracks_table};
+use crate::format::{albums_table, artists_table, tracks_table};
 
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
@@ -48,6 +48,34 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             println!();
             print!("{}", tracks_table(&result.tracks));
         }
+        Command::Artists => {
+            let artists = client.get_artists().await?;
+            print!("{}", artists_table(&artists));
+        }
+        Command::Artist { id } => {
+            let result = client.get_artist(&ArtistId::from(id)).await?;
+            println!(
+                "{}{}",
+                result.artist.name,
+                result
+                    .artist
+                    .album_count
+                    .map(|n| format!(" ({n} albums)"))
+                    .unwrap_or_default(),
+            );
+            println!();
+            print!("{}", albums_table(&result.albums));
+        }
+        Command::Tracks { size, offset } => {
+            // Empty query matches the whole library on Navidrome; paging is
+            // via search3's shared offset.
+            let result = client.search3("", size, offset).await?;
+            print!("{}", tracks_table(&result.tracks));
+        }
+        Command::Search { query, limit } => {
+            let result = client.search3(&query, limit, 0).await?;
+            print_search(&result);
+        }
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;
             let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();
@@ -79,6 +107,37 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         },
     }
     Ok(())
+}
+
+/// Render a `search3` result as three labelled sections. Empty buckets are
+/// skipped so a song-only match doesn't print bare "ARTISTS"/"ALBUMS"
+/// headers. If nothing matched at all, say so on stderr-free stdout.
+fn print_search(result: &SearchResult3) {
+    let mut printed = false;
+    if !result.artists.is_empty() {
+        println!("ARTISTS");
+        print!("{}", artists_table(&result.artists));
+        printed = true;
+    }
+    if !result.albums.is_empty() {
+        if printed {
+            println!();
+        }
+        println!("ALBUMS");
+        print!("{}", albums_table(&result.albums));
+        printed = true;
+    }
+    if !result.tracks.is_empty() {
+        if printed {
+            println!();
+        }
+        println!("TRACKS");
+        print!("{}", tracks_table(&result.tracks));
+        printed = true;
+    }
+    if !printed {
+        println!("(no matches)");
+    }
 }
 
 fn audio_key(track_id: &TrackId) -> AudioKey {
