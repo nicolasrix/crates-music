@@ -216,6 +216,15 @@ def build_config(env: Mapping[str, str]) -> str:
     parts.append("]")
     parts.append("")
 
+    # CLI client for the Device Authorization Grant (RFC 8628). No redirect
+    # URIs — the device grant never uses one. Always registered so
+    # `music auth login` works against the deployed gateway out of the box.
+    parts.append("[[oauth.clients]]")
+    parts.append('client_id = "cli"')
+    parts.append('name = "CLI"')
+    parts.append("redirect_uris = []")
+    parts.append("")
+
     if embedder_url:
         parts.append("[embedder]")
         parts.append(f"url = {_str(embedder_url)}")

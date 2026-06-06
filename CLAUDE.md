@@ -171,14 +171,16 @@ section is the high-level "what's done, what isn't" view.
 
 **P3 in flight.** OAuth 2.1 server complete (P3.1):
 
-- Hand-rolled, single-tenant. Five tables in `gateway-state.sqlite` —
+- Hand-rolled, single-tenant. Six tables in `gateway-state.sqlite` —
   `users` (Argon2id master password), `oauth_clients`, `auth_codes`,
-  `refresh_tokens`, `access_tokens`. Plus a `sessions` table for the
-  browser login flow.
+  `refresh_tokens`, `access_tokens`, `device_codes` (RFC 8628). Plus a
+  `sessions` table for the browser login flow.
 - Endpoints: `POST /oauth/setup` (one-shot bootstrap), `GET/POST
   /oauth/login`, `GET /oauth/authorize` (Authorization Code + PKCE
-  S256), `POST /oauth/token` (code grant + refresh-token rotation),
-  `POST /oauth/revoke` (RFC 7009).
+  S256), `POST /oauth/token` (code grant + refresh-token rotation +
+  `device_code` grant), `POST /oauth/revoke` (RFC 7009),
+  `POST /oauth/device_authorization` + session-gated `GET/POST
+  /oauth/device` (Device Authorization Grant — the CLI's auth path).
 - `require_bearer` accepts OAuth-issued access tokens (sha256 lookup)
   in addition to the legacy static config bearer. Token can come via
   `Authorization: Bearer …` *or* `?access_token=…` (RFC 6750 §2.3 —
@@ -483,7 +485,13 @@ password = "wonderland"
 
 [gateway]
 url = "https://gateway.local:8443"
-bearer_token = "<the same token in gateway.toml>"
+# ca_cert_path = "/home/alice/.local/share/mkcert/rootCA.pem"  # for gateway.local certs
+
+# 5. Authenticate (Device Authorization Grant, RFC 8628). There is no
+#    static bearer token — run this once; tokens persist to a sibling
+#    cli-tokens.json (0600) and refresh automatically:
+#    music auth login   → prints a code + URL; approve in a logged-in browser
+#    music auth status  → show token state;  music auth logout → revoke + clear
 ```
 
 `[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.

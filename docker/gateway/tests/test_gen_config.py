@@ -50,13 +50,16 @@ def test_minimum_env_produces_valid_toml() -> None:
     assert parsed["cache"]["browse_ttl_seconds"] == 86400
 
     assert parsed["oauth"]["state_db"] == "/data/state/gateway-state.sqlite"
-    # Default web client always registered.
+    # Default web + cli clients always registered.
     clients = parsed["oauth"]["clients"]
-    assert len(clients) == 1
+    assert len(clients) == 2
     assert clients[0]["client_id"] == "web"
     assert clients[0]["redirect_uris"] == [
         "https://gateway.local:8443/oauth/callback"
     ]
+    # CLI client (Device Authorization Grant, RFC 8628) — no redirect URIs.
+    assert clients[1]["client_id"] == "cli"
+    assert clients[1]["redirect_uris"] == []
 
 
 def test_embedder_section_omitted_when_url_unset() -> None:

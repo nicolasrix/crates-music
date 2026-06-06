@@ -36,11 +36,11 @@ that distinction:
 | Server connectivity check (`ping`) | 🚫 | ✅ | 🔭 |
 | Browse albums | ✅ | ✅ | 🔭 |
 | Album detail + track list | ✅ | ✅ | 🔭 |
-| Browse artists | ✅ | ❌ | 🔭 |
-| Artist detail + discography | ✅ | ❌ | 🔭 |
-| Browse all tracks (paginated) | ✅ | ❌ | 🔭 |
+| Browse artists | ✅ | ✅ `artists` | 🔭 |
+| Artist detail + discography | ✅ | ✅ `artist <id>` | 🔭 |
+| Browse all tracks (paginated) | ✅ | ✅ `tracks` | 🔭 |
 | Browse filters (recent / most-played / random) | ✅ | ⚠️ albums only | 🔭 |
-| Global search (artists / albums / tracks) | ✅ | ❌ | 🔭 |
+| Global search (artists / albums / tracks) | ✅ | ✅ `search <q>` | 🔭 |
 | Home / overview page | ✅ | 🚫 | 🔭 |
 
 ### Playback
@@ -60,11 +60,12 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| View queue + now-playing | ✅ | ⚠️ `sync state` (JSON) | 🔭 |
+| View queue + now-playing | ✅ | ✅ `sync queue` (resolved titles + ▶) | 🔭 |
 | Append to queue | ✅ | ✅ `sync push` | 🔭 |
-| Reorder / move | ✅ | ❌ | 🔭 |
-| Remove / clear upcoming | ✅ | ❌ | 🔭 |
-| Jump to track | ✅ | ❌ | 🔭 |
+| Reorder / move | ✅ | ✅ `sync move` (alias `reorder`) | 🔭 |
+| Remove a queue item | ✅ | ✅ `sync remove` | 🔭 |
+| Clear whole queue | ✅ | ✅ `sync clear` | 🔭 |
+| Jump to track | ✅ | ✅ `sync jump <index>` | 🔭 |
 
 ### Cache & pinning (client-local)
 
@@ -88,9 +89,9 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ❌ | 🔭 |
+| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ✅ `station` | 🔭 |
 | Station from album / artist (seed) | ✅ | ❌ | 🔭 |
-| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ❌ | 🔭 |
+| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ✅ `recommend next` | 🔭 |
 | Similar albums / artists | ✅ | ❌ | 🔭 |
 | Playlist "suggest more tracks" | ✅ | ❌ | 🔭 |
 
@@ -105,9 +106,10 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Like / dislike track | ✅ | ❌ | 🔭 |
-| Like / dislike album / artist | ✅ | ❌ | 🔭 |
-| Liked page (tracks / albums / artists) | ✅ | ❌ | 🔭 |
+| Like / dislike track | ✅ | ✅ `like`/`dislike` | 🔭 |
+| Like / dislike album / artist | ✅ | ✅ `--kind album\|artist` | 🔭 |
+| Liked page (tracks / albums / artists) | ✅ | ✅ `liked` | 🔭 |
+| Clear a rating | ✅ | ✅ `unrate` | 🔭 |
 | Recommendation feedback (thumbs, session-scoped) | ✅ | ❌ | 🔭 |
 
 > Ratings have **no Navidrome writeback** by design — they are
@@ -125,8 +127,8 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Read sync snapshot | ✅ | ✅ `sync state` | 🔭 |
-| Push ops (append, etc.) | ✅ | ⚠️ append only | 🔭 |
+| Read sync snapshot | ✅ | ✅ `sync state` / `sync queue` | 🔭 |
+| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump / clear | 🔭 |
 | Live WebSocket updates | ✅ | ✅ `sync watch` | 🔭 |
 | Optimistic UI + rollback | ✅ | 🚫 | 🔭 |
 
@@ -145,31 +147,54 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| OAuth flow | ✅ Auth Code + PKCE | 🔭 Device Grant (RFC 8628) | 🔭 PKCE via Custom Tabs |
+| OAuth flow | ✅ Auth Code + PKCE | ✅ `auth login` (Device Grant, RFC 8628) | 🔭 PKCE via Custom Tabs |
 | Direct Subsonic creds (no gateway) | 🚫 | ✅ `[server]` config | 🔭 |
 
-> The CLI currently authenticates with the gateway via a **static
-> bearer token** in `[gateway]` config, or talks to Navidrome directly
-> with `[server]` creds. The Device Authorization Grant flow described
-> in CLAUDE.md is not yet wired into the CLI.
+> The CLI authenticates with the gateway via the **Device Authorization
+> Grant** (RFC 8628): `music auth login` prints a short code + URL, you
+> approve it in a logged-in browser, and the CLI stores rotating
+> per-device tokens in `cli-tokens.json` (next to the config, `0600`).
+> `auth status` / `auth logout` manage that store; the access token
+> refreshes automatically. The old static `[gateway].bearer_token` has
+> been removed. Direct mode still uses `[server]` creds against Navidrome.
 
 ## CLI parity backlog (the ❌ rows)
 
 Bringing the CLI toward the web UI is mostly mechanical — wiring clap
 subcommands onto endpoints that already exist. Rough priority:
 
-1. **Browse parity** — `artists`, `tracks`, `search` (Subsonic
-   passthrough; no gateway work).
-2. **Ratings** — `like` / `dislike` / `liked` against the gateway
-   ratings endpoints.
-3. **Stations** — `station "<prompt>"` and seed-from-track via
-   `/v1/recommend/station`.
-4. **Recommend / autoplay** — `recommend next <seed>`; optionally a
-   queue-fill loop mirroring the web autoplay.
-5. **Queue management** — reorder / remove / jump via sync ops (CLI
-   currently only appends).
-6. **Auth** — Device Authorization Grant (RFC 8628) to replace the
-   static bearer token.
+1. ~~**Browse parity** — `artists`, `tracks`, `search`.~~ **Done** —
+   `artists`, `artist <id>`, `tracks`, `search <q>` via new typed
+   `music-subsonic` methods (`get_artists`/`get_artist`/`search3`). Works
+   in both direct and gateway mode; no gateway change.
+2. ~~**Ratings** — `like` / `dislike` / `liked`.~~ **Done** — `like`,
+   `dislike`, `unrate`, `liked` against `PUT/GET /v1/library/rating(s)`,
+   with `--kind track|album|artist`. Gateway-owned; no Navidrome
+   writeback. Shared gateway HTTP plumbing extracted to `gateway.rs`.
+3. ~~**Stations** — `station "<prompt>"`.~~ **Done** — `station
+   "<prompt>"` → `GET /v1/recommend/station`, resolving ranked ids to
+   titles via the Subsonic client. (Seed-from-album/artist station still
+   open.)
+4. ~~**Recommend** — `recommend next <seed>`.~~ **Done** — `recommend
+   next <seed> [-n N]` → `GET /v1/recommend/next`, resolving ids to
+   titles; notes degraded mode. (A queue-fill loop mirroring web autoplay
+   is still open.)
+5. ~~**Queue management** — reorder / remove / jump via sync ops.~~
+   **Done** — `sync queue` (readable view with resolved titles + ▶
+   now-playing marker), `sync remove`, `sync move` (alias `reorder`),
+   `sync jump <index>`, `sync clear`. All ops already existed in
+   `music-sync`; this was pure client surface.
+6. ~~**Auth** — Device Authorization Grant (RFC 8628) to replace the
+   static bearer token.~~ **Done** — `music auth login|logout|status`.
+   Gateway gained `POST /oauth/device_authorization`, a session-gated
+   `GET/POST /oauth/device` approval page, and the `device_code` token
+   grant; the CLI polls, persists rotating tokens to `cli-tokens.json`
+   (`0600`), and auto-refreshes. The static `[gateway].bearer_token` was
+   removed.
+
+The CLI parity backlog is now clear. Remaining ❌ rows are smaller,
+lower-priority items (seed-from-album station, similar albums/artists,
+playlist CRUD, recommendation thumbs, diagnostics views).
 
 ## Android (P4) — not started
 

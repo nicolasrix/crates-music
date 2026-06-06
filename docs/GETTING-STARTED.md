@@ -113,8 +113,13 @@ password = "wonderland"
 
 [gateway]
 url = "https://gateway.local:8443"
-bearer_token = "<the same token you put in gateway.toml>"
 EOF
+
+# Authenticate (once) — Device Authorization Grant, RFC 8628. Prints a
+# code + URL; approve it in a browser logged into the gateway. Tokens
+# persist to ~/.config/crates-music/cli-tokens.json and refresh on their
+# own. (Needs a `[[oauth.clients]] client_id = "cli"` block in gateway.toml.)
+cargo run -p music-cli -- auth login
 
 cargo run -p music-cli -- albums list
 ```

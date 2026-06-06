@@ -31,7 +31,7 @@ clap = { workspace = true }
 directories = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-native-roots"] }
 reqwest = { workspace = true }
 url = { workspace = true }

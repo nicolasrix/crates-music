@@ -36,6 +36,28 @@ pub fn mint_token() -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// Unambiguous base-20 charset for human-typed codes: consonants only —
+/// no vowels (can't spell words), no `0/O/1/I/L` lookalikes.
+const USER_CODE_CHARSET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+/// Mint an RFC 8628 user code: 8 chars from the unambiguous charset,
+/// formatted `XXXX-XXXX` (~34.6 bits). The user reads this off the
+/// terminal and types it into the browser, so legibility beats raw
+/// entropy — the short TTL and the session-gated approval page carry the
+/// security weight.
+pub fn mint_user_code() -> String {
+    let mut buf = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut buf);
+    let mut s = String::with_capacity(9);
+    for (i, b) in buf.iter().enumerate() {
+        if i == 4 {
+            s.push('-');
+        }
+        s.push(USER_CODE_CHARSET[(*b as usize) % USER_CODE_CHARSET.len()] as char);
+    }
+    s
+}
+
 /// SHA-256 hex of the token. Used everywhere the DB sees it.
 pub fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();

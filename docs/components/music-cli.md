@@ -78,10 +78,16 @@ password = "wonderland"
 
 [gateway]                   # for through-the-gateway mode (default)
 url = "https://gateway.local:8443"
-bearer_token = "..."
 # ca_cert_path = "~/.local/share/mkcert/rootCA.pem"  # trust the gateway's CA
 # insecure_tls = false                               # debug-only TLS bypass
 ```
+
+There is **no** `bearer_token` field. Gateway auth is the OAuth 2.1
+Device Authorization Grant (RFC 8628): run `music auth login` once — it
+prints a short code + URL, you approve it in a logged-in browser, and the
+CLI stores rotating tokens in `cli-tokens.json` next to the config
+(`0600`), refreshing them automatically. `music auth status` /
+`music auth logout` inspect and clear that store.
 
 If both sections are present, `[gateway]` wins. To force direct
 mode, pass `--no-gateway`.

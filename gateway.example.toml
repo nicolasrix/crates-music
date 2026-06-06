@@ -34,3 +34,12 @@ redirect_uris = [
     "http://localhost:5173/oauth/callback",
     "https://gateway.local:8443/oauth/callback",
 ]
+
+# The CLI authenticates with the Device Authorization Grant (RFC 8628):
+# it has no redirect URI (it can't host one), so the list is empty. The
+# CLI prints a short code, you approve it in a logged-in browser, and it
+# receives a per-device refresh token. Run `music auth login` to start.
+[[oauth.clients]]
+client_id     = "cli"
+name          = "CLI"
+redirect_uris = []
