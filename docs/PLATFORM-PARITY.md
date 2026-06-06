@@ -60,11 +60,12 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| View queue + now-playing | ✅ | ⚠️ `sync state` (JSON) | 🔭 |
+| View queue + now-playing | ✅ | ✅ `sync queue` (resolved titles + ▶) | 🔭 |
 | Append to queue | ✅ | ✅ `sync push` | 🔭 |
-| Reorder / move | ✅ | ❌ | 🔭 |
-| Remove / clear upcoming | ✅ | ❌ | 🔭 |
-| Jump to track | ✅ | ❌ | 🔭 |
+| Reorder / move | ✅ | ✅ `sync move` (alias `reorder`) | 🔭 |
+| Remove a queue item | ✅ | ✅ `sync remove` | 🔭 |
+| Clear whole queue | ✅ | ❌ (`Clear` op exists, no command) | 🔭 |
+| Jump to track | ✅ | ✅ `sync jump <index>` | 🔭 |
 
 ### Cache & pinning (client-local)
 
@@ -126,8 +127,8 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Read sync snapshot | ✅ | ✅ `sync state` | 🔭 |
-| Push ops (append, etc.) | ✅ | ⚠️ append only | 🔭 |
+| Read sync snapshot | ✅ | ✅ `sync state` / `sync queue` | 🔭 |
+| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump | 🔭 |
 | Live WebSocket updates | ✅ | ✅ `sync watch` | 🔭 |
 | Optimistic UI + rollback | ✅ | 🚫 | 🔭 |
 
@@ -175,8 +176,11 @@ subcommands onto endpoints that already exist. Rough priority:
    next <seed> [-n N]` → `GET /v1/recommend/next`, resolving ids to
    titles; notes degraded mode. (A queue-fill loop mirroring web autoplay
    is still open.)
-5. **Queue management** — reorder / remove / jump via sync ops (CLI
-   currently only appends).
+5. ~~**Queue management** — reorder / remove / jump via sync ops.~~
+   **Done** — `sync queue` (readable view with resolved titles + ▶
+   now-playing marker), `sync remove`, `sync move` (alias `reorder`),
+   `sync jump <index>`. All ops already existed in `music-sync`; this was
+   pure client surface. Clear-whole-queue (`Clear` op) is still unwired.
 6. **Auth** — Device Authorization Grant (RFC 8628) to replace the
    static bearer token.
 

@@ -100,7 +100,14 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         }
         Command::Sync { action } => match action {
             SyncAction::State => crate::sync::run_state(&config).await?,
+            SyncAction::Queue => crate::sync::run_queue(&config, &client).await?,
             SyncAction::Push { track_ids } => crate::sync::run_push(&config, &track_ids).await?,
+            SyncAction::Remove { item_id } => crate::sync::run_remove(&config, &item_id).await?,
+            SyncAction::Move {
+                item_id,
+                new_index,
+            } => crate::sync::run_move(&config, &item_id, new_index).await?,
+            SyncAction::Jump { index } => crate::sync::run_jump(&config, index).await?,
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
     }

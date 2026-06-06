@@ -166,11 +166,36 @@ pub enum RecommendAction {
 pub enum SyncAction {
     /// Print the current snapshot as JSON.
     State,
+    /// Show the synced queue as a readable table: position, now-playing
+    /// marker, item id (for `remove`/`move`), and resolved track title.
+    Queue,
     /// Append one or more tracks to the synced queue.
     Push {
         /// Track IDs to push (in order).
         #[arg(required = true)]
         track_ids: Vec<String>,
+    },
+    /// Remove a queue item by its item id (see `sync queue`). No-op if
+    /// the id isn't in the queue.
+    Remove {
+        /// Queue item id (the ITEM column of `sync queue`).
+        item_id: String,
+    },
+    /// Move a queue item to a new position. `new_index` is the 0-based
+    /// slot in the queue after the item is lifted out; it's clamped to
+    /// the valid range. The now-playing cursor follows the track.
+    #[command(alias = "reorder")]
+    Move {
+        /// Queue item id to move (the ITEM column of `sync queue`).
+        item_id: String,
+        /// Target 0-based position.
+        new_index: usize,
+    },
+    /// Set the now-playing cursor to a queue position (0-based). This is
+    /// shared playback state — it changes what plays on every device.
+    Jump {
+        /// 0-based queue position to make current.
+        index: usize,
     },
     /// Open the WebSocket and stream every server message to stdout
     /// as JSON, one frame per line. Run with Ctrl-C to exit.
