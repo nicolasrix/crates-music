@@ -88,7 +88,7 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ❌ | 🔭 |
+| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ✅ `station` | 🔭 |
 | Station from album / artist (seed) | ✅ | ❌ | 🔭 |
 | "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ❌ | 🔭 |
 | Similar albums / artists | ✅ | ❌ | 🔭 |
@@ -167,8 +167,10 @@ subcommands onto endpoints that already exist. Rough priority:
    `dislike`, `unrate`, `liked` against `PUT/GET /v1/library/rating(s)`,
    with `--kind track|album|artist`. Gateway-owned; no Navidrome
    writeback. Shared gateway HTTP plumbing extracted to `gateway.rs`.
-3. **Stations** — `station "<prompt>"` and seed-from-track via
-   `/v1/recommend/station`.
+3. ~~**Stations** — `station "<prompt>"`.~~ **Done** — `station
+   "<prompt>"` → `GET /v1/recommend/station`, resolving ranked ids to
+   titles via the Subsonic client. (Seed-from-album/artist station still
+   open.)
 4. **Recommend / autoplay** — `recommend next <seed>`; optionally a
    queue-fill loop mirroring the web autoplay.
 5. **Queue management** — reorder / remove / jump via sync ops (CLI

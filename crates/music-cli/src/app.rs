@@ -66,6 +66,9 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         Command::Liked => {
             crate::ratings::run_liked(&config).await?;
         }
+        Command::Station { prompt, n } => {
+            crate::recommend::run_station(&config, &client, &prompt, n).await?;
+        }
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;
             let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();

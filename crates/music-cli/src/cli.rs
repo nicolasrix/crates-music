@@ -107,6 +107,17 @@ pub enum Command {
     /// List your liked (and disliked) tracks, albums and artists.
     Liked,
 
+    /// Build a station from a natural-language prompt, e.g.
+    /// "rainy sunday afternoon". Prints ranked tracks. Requires `[gateway]`
+    /// config and a ready recommender.
+    Station {
+        /// Free-text prompt.
+        prompt: String,
+        /// Number of tracks to return.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        n: usize,
+    },
+
     /// Pin a track to the cache so it's never LRU-evicted. Fetches first if
     /// not yet cached.
     Pin { track_id: String },
