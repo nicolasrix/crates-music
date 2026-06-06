@@ -14,9 +14,9 @@ use futures_util::StreamExt;
 use music_core::{QueueItemId, TrackId};
 use music_sync::{ServerMessage, SyncOp};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use url::Url;
 
-use crate::config::{Config, GatewayConfig};
+use crate::config::Config;
+use crate::gateway::{http_client, require_gateway, ws_url_for};
 
 pub async fn run_state(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
@@ -98,64 +98,6 @@ pub async fn run_watch(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn require_gateway(config: &Config) -> Result<&GatewayConfig> {
-    config
-        .gateway
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("`music sync` requires a [gateway] block in the CLI config"))
-}
-
-/// Build the HTTPS client used for the gateway REST calls.
-///
-/// Verification is **on** by default (system trust store). The gateway's
-/// mkcert-issued `gateway.local` cert won't be in every machine's store,
-/// so `[gateway].ca_cert_path` can point at the mkcert root CA — it's
-/// added as an extra trust anchor, which keeps a real MITM cert (signed
-/// by neither the system roots nor that CA) rejected. `insecure_tls` is a
-/// loud, opt-in escape hatch that restores the old accept-anything
-/// behaviour for throwaway setups.
-fn http_client(gw: &GatewayConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder();
-
-    if let Some(ca_path) = &gw.ca_cert_path {
-        let pem = std::fs::read(ca_path)
-            .with_context(|| format!("reading gateway CA cert at {}", ca_path.display()))?;
-        // A PEM file may bundle a chain; trust every cert it contains.
-        let certs = reqwest::Certificate::from_pem_bundle(&pem)
-            .with_context(|| format!("parsing CA cert(s) at {}", ca_path.display()))?;
-        for cert in certs {
-            builder = builder.add_root_certificate(cert);
-        }
-    }
-
-    if gw.insecure_tls {
-        eprintln!(
-            "WARNING: [gateway].insecure_tls is set — TLS certificate \
-             verification is DISABLED, so anyone who can intercept the \
-             connection can read your bearer token. Set \
-             [gateway].ca_cert_path to the mkcert root CA (`mkcert -CAROOT`) \
-             instead."
-        );
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-
-    builder.build().context("building gateway HTTP client")
-}
-
-/// Convert https://host[:port] → wss://host[:port]<path> (and http→ws).
-pub fn ws_url_for(base: &str, path: &str) -> Result<Url> {
-    let mut url = Url::parse(base).with_context(|| format!("parsing gateway url {base}"))?;
-    let scheme = match url.scheme() {
-        "https" => "wss",
-        "http" => "ws",
-        other => bail!("unsupported gateway scheme {other:?} (expected http or https)"),
-    };
-    url.set_scheme(scheme)
-        .map_err(|()| anyhow::anyhow!("could not set ws scheme on {base}"))?;
-    url.set_path(path);
-    Ok(url)
-}
-
 /// Short, lexically-sortable item id. Server doesn't care about the
 /// shape — clients pick one and Push is idempotent on collisions.
 /// Uniqueness within a single CLI invocation is sufficient (there's no
@@ -176,29 +118,6 @@ fn new_item_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn https_url_becomes_wss() {
-        let u = ws_url_for("https://gateway.local:8443", "/v1/sync").unwrap();
-        assert_eq!(u.scheme(), "wss");
-        assert_eq!(u.host_str(), Some("gateway.local"));
-        assert_eq!(u.port(), Some(8443));
-        assert_eq!(u.path(), "/v1/sync");
-    }
-
-    #[test]
-    fn http_url_becomes_ws() {
-        let u = ws_url_for("http://localhost:4567", "/v1/sync").unwrap();
-        assert_eq!(u.scheme(), "ws");
-    }
-
-    #[test]
-    fn unsupported_scheme_errors() {
-        let err = ws_url_for("ftp://nope/", "/v1/sync")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("unsupported gateway scheme"), "{err}");
-    }
 
     #[test]
     fn item_ids_are_unique_within_a_burst() {

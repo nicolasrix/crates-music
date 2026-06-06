@@ -7,4 +7,6 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod format;
+pub mod gateway;
+pub mod ratings;
 pub mod sync;

@@ -78,6 +78,35 @@ pub enum Command {
         offline: bool,
     },
 
+    /// Like a track (or album/artist via `--kind`). Boosts it in
+    /// recommendations. Gateway-owned; no Navidrome writeback.
+    Like {
+        /// Entity ID.
+        id: String,
+        #[arg(long, value_enum, default_value_t = RatingKind::Track)]
+        kind: RatingKind,
+    },
+
+    /// Dislike a track (or album/artist via `--kind`). Excludes it from
+    /// play and auto-skips it. Gateway-owned; no Navidrome writeback.
+    Dislike {
+        /// Entity ID.
+        id: String,
+        #[arg(long, value_enum, default_value_t = RatingKind::Track)]
+        kind: RatingKind,
+    },
+
+    /// Clear a like/dislike, returning the entity to neutral.
+    Unrate {
+        /// Entity ID.
+        id: String,
+        #[arg(long, value_enum, default_value_t = RatingKind::Track)]
+        kind: RatingKind,
+    },
+
+    /// List your liked (and disliked) tracks, albums and artists.
+    Liked,
+
     /// Pin a track to the cache so it's never LRU-evicted. Fetches first if
     /// not yet cached.
     Pin { track_id: String },
@@ -124,6 +153,25 @@ pub enum CacheAction {
     Stats,
     /// Force-evict regular entries until total bytes fit the budget.
     Evict,
+}
+
+/// Which library entity a rating applies to. Maps to the gateway's
+/// lowercase `kind` wire value.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RatingKind {
+    Track,
+    Album,
+    Artist,
+}
+
+impl RatingKind {
+    pub fn wire(self) -> &'static str {
+        match self {
+            RatingKind::Track => "track",
+            RatingKind::Album => "album",
+            RatingKind::Artist => "artist",
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

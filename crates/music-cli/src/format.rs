@@ -5,6 +5,26 @@ use std::fmt::Write;
 
 use music_core::{Album, Artist, Track};
 
+/// One-line album header: `Name — Artist (Year)`, omitting absent parts.
+pub fn album_header(album: &Album) -> String {
+    let artist = album
+        .artist_name
+        .as_deref()
+        .map(|a| format!(" — {a}"))
+        .unwrap_or_default();
+    let year = album.year.map(|y| format!(" ({y})")).unwrap_or_default();
+    format!("{}{artist}{year}", album.name)
+}
+
+/// One-line artist header: `Name (N albums)`, omitting the count if unknown.
+pub fn artist_header(artist: &Artist) -> String {
+    let albums = artist
+        .album_count
+        .map(|n| format!(" ({n} albums)"))
+        .unwrap_or_default();
+    format!("{}{albums}", artist.name)
+}
+
 pub fn artists_table(artists: &[Artist]) -> String {
     if artists.is_empty() {
         return String::new();

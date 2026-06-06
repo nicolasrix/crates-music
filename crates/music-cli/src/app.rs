@@ -11,7 +11,7 @@ use music_subsonic::{Client, Credentials, SearchResult3};
 
 use crate::cli::{CacheAction, Cli, Command, SyncAction};
 use crate::config::{Config, resolve_cache_root};
-use crate::format::{albums_table, artists_table, tracks_table};
+use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
@@ -30,21 +30,7 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         }
         Command::Album { id } => {
             let result = client.get_album(&AlbumId::from(id)).await?;
-            println!(
-                "{}{}{}",
-                result.album.name,
-                result
-                    .album
-                    .artist_name
-                    .as_deref()
-                    .map(|a| format!(" — {a}"))
-                    .unwrap_or_default(),
-                result
-                    .album
-                    .year
-                    .map(|y| format!(" ({y})"))
-                    .unwrap_or_default(),
-            );
+            println!("{}", album_header(&result.album));
             println!();
             print!("{}", tracks_table(&result.tracks));
         }
@@ -54,15 +40,7 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         }
         Command::Artist { id } => {
             let result = client.get_artist(&ArtistId::from(id)).await?;
-            println!(
-                "{}{}",
-                result.artist.name,
-                result
-                    .artist
-                    .album_count
-                    .map(|n| format!(" ({n} albums)"))
-                    .unwrap_or_default(),
-            );
+            println!("{}", artist_header(&result.artist));
             println!();
             print!("{}", albums_table(&result.albums));
         }
@@ -75,6 +53,18 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         Command::Search { query, limit } => {
             let result = client.search3(&query, limit, 0).await?;
             print_search(&result);
+        }
+        Command::Like { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, Some("like")).await?;
+        }
+        Command::Dislike { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, Some("dislike")).await?;
+        }
+        Command::Unrate { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, None).await?;
+        }
+        Command::Liked => {
+            crate::ratings::run_liked(&config).await?;
         }
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;

@@ -105,9 +105,10 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| Like / dislike track | ✅ | ❌ | 🔭 |
-| Like / dislike album / artist | ✅ | ❌ | 🔭 |
-| Liked page (tracks / albums / artists) | ✅ | ❌ | 🔭 |
+| Like / dislike track | ✅ | ✅ `like`/`dislike` | 🔭 |
+| Like / dislike album / artist | ✅ | ✅ `--kind album\|artist` | 🔭 |
+| Liked page (tracks / albums / artists) | ✅ | ✅ `liked` | 🔭 |
+| Clear a rating | ✅ | ✅ `unrate` | 🔭 |
 | Recommendation feedback (thumbs, session-scoped) | ✅ | ❌ | 🔭 |
 
 > Ratings have **no Navidrome writeback** by design — they are
@@ -162,8 +163,10 @@ subcommands onto endpoints that already exist. Rough priority:
    `artists`, `artist <id>`, `tracks`, `search <q>` via new typed
    `music-subsonic` methods (`get_artists`/`get_artist`/`search3`). Works
    in both direct and gateway mode; no gateway change.
-2. **Ratings** — `like` / `dislike` / `liked` against the gateway
-   ratings endpoints.
+2. ~~**Ratings** — `like` / `dislike` / `liked`.~~ **Done** — `like`,
+   `dislike`, `unrate`, `liked` against `PUT/GET /v1/library/rating(s)`,
+   with `--kind track|album|artist`. Gateway-owned; no Navidrome
+   writeback. Shared gateway HTTP plumbing extracted to `gateway.rs`.
 3. **Stations** — `station "<prompt>"` and seed-from-track via
    `/v1/recommend/station`.
 4. **Recommend / autoplay** — `recommend next <seed>`; optionally a
