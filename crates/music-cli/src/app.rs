@@ -9,7 +9,7 @@ use music_core::{AlbumId, ArtistId, TrackId};
 use music_player::{play_queue_blocking, read_cached, resolve_source};
 use music_subsonic::{Client, Credentials, SearchResult3};
 
-use crate::cli::{CacheAction, Cli, Command, SyncAction};
+use crate::cli::{CacheAction, Cli, Command, RecommendAction, SyncAction};
 use crate::config::{Config, resolve_cache_root};
 use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
@@ -69,6 +69,11 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         Command::Station { prompt, n } => {
             crate::recommend::run_station(&config, &client, &prompt, n).await?;
         }
+        Command::Recommend { action } => match action {
+            RecommendAction::Next { seed, n } => {
+                crate::recommend::run_next(&config, &client, &seed, n).await?;
+            }
+        },
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;
             let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();

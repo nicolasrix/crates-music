@@ -27,6 +27,15 @@ struct StationResponse {
     results: Vec<RecommendItem>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NextResponse {
+    /// True when the recommender fell back to tag-only similarity (seed not
+    /// embedded, or the index is still warming up).
+    #[serde(default)]
+    degraded: bool,
+    results: Vec<RecommendItem>,
+}
+
 /// `GET /v1/recommend/station?text=<prompt>&n=<n>` — a natural-language
 /// station. Resolves the returned ids to titles and prints them in rank
 /// order.
@@ -57,6 +66,47 @@ pub async fn run_station(config: &Config, client: &Client, prompt: &str, n: usiz
     let station: StationResponse = resp.json().await.context("parsing station response")?;
 
     let ids: Vec<TrackId> = station
+        .results
+        .into_iter()
+        .map(|r| TrackId::from(r.track_id))
+        .collect();
+    print_resolved(client, &ids).await;
+    Ok(())
+}
+
+/// `GET /v1/recommend/next?seed=<id>&n=<n>` — tracks acoustically similar
+/// to a seed track. Prints them in rank order; notes degraded mode.
+pub async fn run_next(config: &Config, client: &Client, seed: &str, n: usize) -> Result<()> {
+    let gw = require_gateway(config)?;
+    let url = endpoint(gw, "/v1/recommend/next");
+    let resp = http_client(gw)?
+        .get(&url)
+        .query(&[("seed", seed), ("n", &n.to_string())])
+        .bearer_auth(&gw.bearer_token)
+        .send()
+        .await
+        .context("requesting recommendations")?;
+
+    if resp.status() == StatusCode::NOT_FOUND {
+        bail!(
+            "no recommendations for {seed}: the seed track isn't embedded \
+             yet, or the recommender is not ready"
+        );
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        bail!("recommend request failed ({status}): {text}");
+    }
+    let next: NextResponse = resp.json().await.context("parsing recommend response")?;
+
+    if next.degraded {
+        eprintln!(
+            "(degraded mode: tag-only similarity — seed not embedded or \
+             recommender warming up)"
+        );
+    }
+    let ids: Vec<TrackId> = next
         .results
         .into_iter()
         .map(|r| TrackId::from(r.track_id))

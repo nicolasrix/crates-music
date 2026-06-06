@@ -90,7 +90,7 @@ that distinction:
 |---|:--:|:--:|:--:|
 | Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ✅ `station` | 🔭 |
 | Station from album / artist (seed) | ✅ | ❌ | 🔭 |
-| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ❌ | 🔭 |
+| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ✅ `recommend next` | 🔭 |
 | Similar albums / artists | ✅ | ❌ | 🔭 |
 | Playlist "suggest more tracks" | ✅ | ❌ | 🔭 |
 
@@ -171,8 +171,10 @@ subcommands onto endpoints that already exist. Rough priority:
    "<prompt>"` → `GET /v1/recommend/station`, resolving ranked ids to
    titles via the Subsonic client. (Seed-from-album/artist station still
    open.)
-4. **Recommend / autoplay** — `recommend next <seed>`; optionally a
-   queue-fill loop mirroring the web autoplay.
+4. ~~**Recommend** — `recommend next <seed>`.~~ **Done** — `recommend
+   next <seed> [-n N]` → `GET /v1/recommend/next`, resolving ids to
+   titles; notes degraded mode. (A queue-fill loop mirroring web autoplay
+   is still open.)
 5. **Queue management** — reorder / remove / jump via sync ops (CLI
    currently only appends).
 6. **Auth** — Device Authorization Grant (RFC 8628) to replace the

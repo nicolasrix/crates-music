@@ -118,6 +118,13 @@ pub enum Command {
         n: usize,
     },
 
+    /// Content-based recommendations from the gateway. Requires `[gateway]`
+    /// config and a ready recommender.
+    Recommend {
+        #[command(subcommand)]
+        action: RecommendAction,
+    },
+
     /// Pin a track to the cache so it's never LRU-evicted. Fetches first if
     /// not yet cached.
     Pin { track_id: String },
@@ -140,6 +147,18 @@ pub enum Command {
     Sync {
         #[command(subcommand)]
         action: SyncAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RecommendAction {
+    /// Tracks acoustically similar to a seed track.
+    Next {
+        /// Seed track ID.
+        seed: String,
+        /// Number of tracks to return.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        n: usize,
     },
 }
 
