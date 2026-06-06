@@ -51,7 +51,7 @@ export default defineConfig({
         navigateFallbackDenylist: [
           /^\/rest\//,
           /^\/v1\//,
-          /^\/oauth\/(setup|login|authorize|token|revoke)\b/,
+          /^\/oauth\/(setup|login|authorize|token|revoke|device|device_authorization)\b/,
         ],
         // Never let the SW cache API, auth, or audio responses.
         runtimeCaching: [
@@ -76,7 +76,7 @@ export default defineConfig({
       "/v1": { target: "https://gateway.local:8443", secure: false, changeOrigin: true, ws: true },
       // Allowlist gateway OAuth endpoints. /oauth/callback is the SPA's
       // own route — it must NOT be proxied to the gateway.
-      "^/oauth/(setup|login|authorize|token|revoke)(\\b|/)": {
+      "^/oauth/(setup|login|authorize|token|revoke|device|device_authorization)(\\b|/)": {
         target: "https://gateway.local:8443",
         secure: false,
         changeOrigin: true,
