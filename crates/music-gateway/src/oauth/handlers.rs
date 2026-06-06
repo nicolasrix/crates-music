@@ -11,7 +11,7 @@ use axum::Form;
 use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -778,6 +778,7 @@ pub struct DeviceAuthResponse {
 /// client where to send the user and how often to poll.
 pub async fn device_authorization(
     State(state): State<AppState>,
+    uri: Uri,
     headers: HeaderMap,
     Form(form): Form<DeviceAuthForm>,
 ) -> Result<Json<DeviceAuthResponse>, (StatusCode, Json<OauthError>)> {
@@ -805,7 +806,7 @@ pub async fn device_authorization(
         .await
         .map_err(|e| oauth_internal(&e))?;
 
-    let base = request_base_url(&headers);
+    let base = request_base_url(&headers, &uri);
     let verification_uri = format!("{base}/oauth/device");
     let verification_uri_complete = format!(
         "{verification_uri}?user_code={}",
@@ -1052,12 +1053,26 @@ fn render_device_message(title: &str, body: &str) -> String {
 const DEVICE_PAGE_CSS: &str =
     "body { font-family: system-ui, sans-serif; max-width: 26rem; margin: 4rem auto; padding: 0 1rem; }";
 
-/// Best-effort public base URL for this request: scheme from
-/// `X-Forwarded-Proto` (default `https`, since the gateway is always
-/// behind TLS), host from `Host`. Empty string when `Host` is absent —
-/// the verification URI then comes out relative (`/oauth/device`), which
-/// the CLI resolves against the gateway URL it already knows.
-fn request_base_url(headers: &HeaderMap) -> String {
+/// Best-effort public base URL for this request, used to build an
+/// absolute `verification_uri` (RFC 8628 §3.2 wants an absolute URL).
+///
+/// Scheme: `X-Forwarded-Proto` (set by Caddy when proxying), else
+/// `https` — the gateway is always behind TLS.
+///
+/// Host, in precedence order:
+///   1. `X-Forwarded-Host` — the original public host when behind a
+///      reverse proxy (Caddy), which may differ from the `Host` the
+///      gateway sees.
+///   2. `Host` header — present on HTTP/1.1 requests.
+///   3. the request URI's authority — the **HTTP/2 path**: h2 carries
+///      the host in the `:authority` pseudo-header, so `Host` is absent
+///      and `headers.get(HOST)` is `None`. Since the gateway speaks
+///      HTTP/2, this is the common case for a direct CLI connection.
+///
+/// Empty string only when none of the three yields a host — the
+/// verification URI then comes out relative (`/oauth/device`), which the
+/// CLI still resolves against the gateway URL it already knows.
+fn request_base_url(headers: &HeaderMap, uri: &Uri) -> String {
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -1065,14 +1080,20 @@ fn request_base_url(headers: &HeaderMap) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("https");
-    let host = headers
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let header_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if host.is_empty() {
-        String::new()
-    } else {
-        format!("{scheme}://{host}")
+        .filter(|s| !s.is_empty());
+    let authority_host = uri.authority().map(axum::http::uri::Authority::as_str);
+    match forwarded_host.or(header_host).or(authority_host) {
+        Some(host) => format!("{scheme}://{host}"),
+        None => String::new(),
     }
 }
 
@@ -1081,4 +1102,70 @@ fn now_unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_base_url;
+    use axum::http::header::{HeaderName, HeaderValue};
+    use axum::http::{HeaderMap, Uri};
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn host_header_used_on_http1() {
+        // HTTP/1.1: authority is in the Host header, request URI is path-only.
+        let base = request_base_url(
+            &headers(&[("host", "gateway.local:8443")]),
+            &"/oauth/device_authorization".parse::<Uri>().unwrap(),
+        );
+        assert_eq!(base, "https://gateway.local:8443");
+    }
+
+    #[test]
+    fn authority_used_on_http2_when_host_header_absent() {
+        // HTTP/2: no Host header; the authority lives in the absolute-form
+        // request URI (the `:authority` pseudo-header). This is the case
+        // that previously yielded a relative verification_uri.
+        let base = request_base_url(
+            &HeaderMap::new(),
+            &"https://gateway.local:8443/oauth/device_authorization"
+                .parse::<Uri>()
+                .unwrap(),
+        );
+        assert_eq!(base, "https://gateway.local:8443");
+    }
+
+    #[test]
+    fn forwarded_host_and_proto_win_behind_proxy() {
+        // Behind Caddy: trust the original public host/scheme it forwards,
+        // not the internal upstream Host the gateway actually receives.
+        let base = request_base_url(
+            &headers(&[
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-host", "music.example.com"),
+                ("host", "crates-gateway:8443"),
+            ]),
+            &"/oauth/device_authorization".parse::<Uri>().unwrap(),
+        );
+        assert_eq!(base, "https://music.example.com");
+    }
+
+    #[test]
+    fn empty_when_no_host_anywhere() {
+        let base = request_base_url(
+            &HeaderMap::new(),
+            &"/oauth/device_authorization".parse::<Uri>().unwrap(),
+        );
+        assert_eq!(base, "");
+    }
 }

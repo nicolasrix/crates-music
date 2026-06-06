@@ -42,6 +42,9 @@ async fn post_form(app: axum::Router, path: &str, body: String) -> axum::http::R
     app.oneshot(
         Request::post(path)
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            // A Host header so device_authorization can build an absolute
+            // verification_uri (mirrors a real HTTP/1.1 client).
+            .header("host", "gateway.local:8443")
             .body(Body::from(body))
             .unwrap(),
     )
@@ -72,7 +75,9 @@ async fn device_authorization_issues_codes() {
     assert!(json["device_code"].is_string());
     let user_code = json["user_code"].as_str().unwrap();
     assert!(user_code.contains('-'), "user code is formatted XXXX-XXXX");
-    assert!(json["verification_uri"].as_str().unwrap().ends_with("/oauth/device"));
+    // Must be an absolute URL (RFC 8628 §3.2), not a relative path.
+    let verification_uri = json["verification_uri"].as_str().unwrap();
+    assert_eq!(verification_uri, "https://gateway.local:8443/oauth/device");
     assert!(
         json["verification_uri_complete"]
             .as_str()
