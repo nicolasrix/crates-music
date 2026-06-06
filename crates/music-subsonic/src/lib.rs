@@ -48,11 +48,59 @@ impl AlbumListType {
     }
 }
 
+/// TLS trust configuration for the underlying reqwest client. The workspace
+/// builds reqwest with `rustls-tls`, whose trust anchors are the *bundled*
+/// webpki roots — not the system store — so a private CA (e.g. an mkcert
+/// `gateway.local` cert) is invisible unless added here explicitly.
+#[derive(Clone, Debug, Default)]
+struct TlsOptions {
+    /// Extra CA roots as a PEM bundle, added on top of the built-in roots.
+    ca_cert_pem: Option<Vec<u8>>,
+    /// Disable certificate verification entirely (debug/throwaway only).
+    insecure: bool,
+}
+
+/// Build the reqwest client from the full set of options. Called whenever
+/// `bearer` or `tls` changes so the two compose regardless of builder-call
+/// order (a naive per-method rebuild would clobber whichever ran first).
+fn build_http(bearer: Option<&str>, tls: &TlsOptions) -> Result<Http> {
+    let mut builder = Http::builder();
+    if let Some(bearer) = bearer {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|e| Error::Config(format!("invalid bearer token: {e}")))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+    }
+    if let Some(pem) = &tls.ca_cert_pem {
+        let certs = reqwest::Certificate::from_pem_bundle(pem)
+            .map_err(|e| Error::Config(format!("invalid CA certificate bundle: {e}")))?;
+        // `from_pem_bundle` returns an empty vec (not an error) when the input
+        // contains no PEM blocks — e.g. a misnamed or empty file. Adding zero
+        // roots would silently leave the cert untrusted and surface as a
+        // baffling `UnknownIssuer` at request time, so fail loudly instead.
+        if certs.is_empty() {
+            return Err(Error::Config(
+                "CA certificate bundle contained no certificates".to_string(),
+            ));
+        }
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    if tls.insecure {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    Ok(builder.build()?)
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     base: Url,
     creds: Credentials,
     http: Http,
+    bearer: Option<String>,
+    tls: TlsOptions,
 }
 
 impl Client {
@@ -65,8 +113,15 @@ impl Client {
             format!("{base}/")
         };
         let base = Url::parse(&normalized)?;
-        let http = Http::builder().build()?;
-        Ok(Self { base, creds, http })
+        let tls = TlsOptions::default();
+        let http = build_http(None, &tls)?;
+        Ok(Self {
+            base,
+            creds,
+            http,
+            bearer: None,
+            tls,
+        })
     }
 
     /// Attach a bearer token sent as `Authorization: Bearer <token>` on every
@@ -74,12 +129,28 @@ impl Client {
     /// (which authenticates via a shared bearer rather than Subsonic's
     /// token+salt scheme — though the latter is still appended and ignored
     /// downstream, since the gateway strips client-supplied auth params).
+    ///
+    /// Composes with [`with_tls`](Self::with_tls) regardless of call order.
     pub fn with_bearer(mut self, bearer: &str) -> Result<Self> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer}"))
-            .map_err(|e| Error::Config(format!("invalid bearer token: {e}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, value);
-        self.http = Http::builder().default_headers(headers).build()?;
+        self.bearer = Some(bearer.to_string());
+        self.http = build_http(self.bearer.as_deref(), &self.tls)?;
+        Ok(self)
+    }
+
+    /// Configure TLS trust. `ca_cert_pem` is an optional PEM bundle added as
+    /// an *extra* root (e.g. the mkcert CA) so the client can verify a
+    /// private `gateway.local` cert the built-in webpki roots don't know;
+    /// `insecure` disables verification entirely. Mirrors the gateway HTTP
+    /// client's `[gateway].ca_cert_path` / `insecure_tls` knobs so gateway-mode
+    /// browse and recommend title-resolution verify the same cert the
+    /// ratings/sync paths already do. Composes with
+    /// [`with_bearer`](Self::with_bearer) regardless of call order.
+    pub fn with_tls(mut self, ca_cert_pem: Option<&[u8]>, insecure: bool) -> Result<Self> {
+        self.tls = TlsOptions {
+            ca_cert_pem: ca_cert_pem.map(<[u8]>::to_vec),
+            insecure,
+        };
+        self.http = build_http(self.bearer.as_deref(), &self.tls)?;
         Ok(self)
     }
 
@@ -194,5 +265,72 @@ impl Client {
 
     pub fn http(&self) -> &Http {
         &self.http
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn creds() -> Credentials {
+        Credentials {
+            username: "u".to_string(),
+            password: "p".to_string(),
+        }
+    }
+
+    // A real self-signed cert exercises the parse + add-root path; we never
+    // connect, so its (un)trustedness and expiry are irrelevant — only the
+    // PEM/DER parse runs here.
+    const SELF_SIGNED_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
+MIIBcjCCARmgAwIBAgIUJAOw160sBu1wvFyZKr/5gyd/lv0wCgYIKoZIzj0EAwIw\n\
+DzENMAsGA1UEAwwEdGVzdDAeFw0yNjA2MDYwOTAyMDBaFw0yNjA2MDcwOTAyMDBa\n\
+MA8xDTALBgNVBAMMBHRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARONpEF\n\
+dgtGfv+7PjpMnsoDR1WpyVdikkgkKcolq9k2NCXXj7eFolQbQXZSJn0C1Gl8LM2g\n\
+Oe7AUSWjJnVddC0ao1MwUTAdBgNVHQ4EFgQU+3fPClTbEIVHTxWtBx1zgHHkyBMw\n\
+HwYDVR0jBBgwFoAU+3fPClTbEIVHTxWtBx1zgHHkyBMwDwYDVR0TAQH/BAUwAwEB\n\
+/zAKBggqhkjOPQQDAgNHADBEAiBFIW5KsOxunxTnFj+sYyrZ9nS4qhJLKRibecy5\n\
+oy+R+AIgLIyIB1tVYb30R48ES93LoP8uEOs60AKpuNtzl1feTuM=\n\
+-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn bearer_and_tls_compose_either_order() {
+        // Whichever builder method runs last must not clobber the other's
+        // effect — both orderings must succeed and produce a usable client.
+        let bearer_first = Client::new("https://gateway.local:8443", creds())
+            .unwrap()
+            .with_bearer("tok")
+            .unwrap()
+            .with_tls(None, true)
+            .unwrap();
+        assert!(bearer_first.bearer.as_deref() == Some("tok"));
+        assert!(bearer_first.tls.insecure);
+
+        let tls_first = Client::new("https://gateway.local:8443", creds())
+            .unwrap()
+            .with_tls(None, true)
+            .unwrap()
+            .with_bearer("tok")
+            .unwrap();
+        assert!(tls_first.bearer.as_deref() == Some("tok"));
+        assert!(tls_first.tls.insecure);
+    }
+
+    #[test]
+    fn invalid_ca_bundle_is_a_config_error() {
+        let err = Client::new("https://gateway.local:8443", creds())
+            .unwrap()
+            .with_tls(Some(b"not a pem"), false)
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn ca_pem_bundle_is_accepted() {
+        let client = Client::new("https://gateway.local:8443", creds())
+            .unwrap()
+            .with_tls(Some(SELF_SIGNED_PEM), false)
+            .unwrap();
+        assert!(client.tls.ca_cert_pem.is_some());
     }
 }

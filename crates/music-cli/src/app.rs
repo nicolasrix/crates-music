@@ -254,19 +254,42 @@ async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
-fn build_client(config: &Config) -> music_subsonic::Result<Client> {
+fn build_client(config: &Config) -> anyhow::Result<Client> {
     let creds = Credentials {
         username: config.server.username.clone(),
         password: config.server.password.clone(),
     };
-    if let Some(gateway) = &config.gateway {
-        // Gateway mode: target the gateway URL with a bearer token. The
-        // upstream Subsonic auth params (u/t/s/…) are still appended by
-        // `Client`, but the gateway strips them and uses its own creds.
-        Client::new(&gateway.url, creds)?.with_bearer(&gateway.bearer_token)
-    } else {
-        Client::new(&config.server.url, creds)
+    let Some(gateway) = &config.gateway else {
+        return Ok(Client::new(&config.server.url, creds)?);
+    };
+
+    // Gateway mode: target the gateway URL with a bearer token. The upstream
+    // Subsonic auth params (u/t/s/…) are still appended by `Client`, but the
+    // gateway strips them and uses its own creds.
+    //
+    // The same TLS trust knobs the dedicated gateway HTTP client honours
+    // (`crate::gateway::http_client`) must apply here too: the workspace
+    // builds reqwest with rustls' bundled webpki roots, so a private mkcert
+    // `gateway.local` cert is invisible unless the CA is added explicitly.
+    // Without this, gateway-mode `ping`/browse and recommend/station
+    // title-resolution fail with `UnknownIssuer`, while ratings/sync (which
+    // go through `gateway.rs`) work — a confusing split.
+    let ca_cert_pem = match &gateway.ca_cert_path {
+        Some(path) => Some(
+            std::fs::read(path)
+                .with_context(|| format!("reading gateway CA cert {}", path.display()))?,
+        ),
+        None => None,
+    };
+    if gateway.insecure_tls {
+        eprintln!(
+            "WARNING: [gateway].insecure_tls is set — Subsonic TLS certificate \
+             verification is disabled; prefer [gateway].ca_cert_path."
+        );
     }
+    Ok(Client::new(&gateway.url, creds)?
+        .with_bearer(&gateway.bearer_token)?
+        .with_tls(ca_cert_pem.as_deref(), gateway.insecure_tls)?)
 }
 
 fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
