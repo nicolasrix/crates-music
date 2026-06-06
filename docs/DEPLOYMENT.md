@@ -88,6 +88,10 @@ Everything is read from env vars at container start and templated into
 | `RECOMMEND_EMBEDDING_DIM` | unset → `512` | Gateway-side embedding dimension. When set, `gen_config.py` emits a `[recommend]\nembedding_dim = …` section into the generated `gateway.toml`; when unset there is no `[recommend]` section and the gateway defaults to **512** (CLAP). Set to `768` for CLaMP 3. Must match the embedder's actual dim. ⚠️ See the silent-no-op caveat below. |
 | `CLAMP3_CHECKPOINT` | — | (CLaMP 3 only) Path inside the embedder container to the unified saas CLaMP 3 checkpoint (`.pth`). |
 | `MERT_FOLDER` | — | (CLaMP 3 only) Local copy of the `m-a-p/MERT-v1-95M` frontend (or a hub id when the embedder can reach the HF hub). |
+| `CRATES_CONFIG_DIR` | — | (CLaMP 3 compose overlays only) Host directory the containers bind-mount component data from; the embedder reads the saas checkpoint from its `models/` subdirectory. Required by `docker-compose.clamp3.yml` / `.clamp3-rocm.yml`. |
+| `RECOMMEND_LEASH_TAU` | unset → `0.28` | Anchor-leash cosine threshold for travelling autoplay stations. Server fallback; web Settings sends per-request overrides. |
+| `RECOMMEND_LEASH_LAMBDA` | unset → `16` | Anchor-leash demotion strength `λ·(τ − sim)²`. `0` disables the leash. |
+| `RECOMMEND_LOG_PROVENANCE` | unset → `true` | Persist every served recommendation slate + scores to `gateway-state.recommend.sqlite` (append-only training data). `false` stops capture. |
 
 **`RECOMMEND_EMBEDDING_DIM` silent-no-op caveat.** The variable is only
 read by `gen_config.py`, which is **baked into the gateway image**. A
@@ -572,7 +576,10 @@ can stay `TRANSFORMERS_OFFLINE=1`.
 ```bash
 # 1. Drop the unified saas CLaMP 3 checkpoint on the host and point
 #    CLAMP3_CHECKPOINT at it (path is inside the embedder container).
-echo 'CLAMP3_CHECKPOINT=/models/clamp3_saas.pth' >> .env
+#    ⚠️ KEEP THE UPSTREAM FILENAME — the checkpoint filename IS the
+#    embedding model_version. Renaming it (e.g. to clamp3_saas.pth)
+#    silently split-brains the embedding store against existing rows.
+echo 'CLAMP3_CHECKPOINT=/models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth' >> .env
 
 # 2. Point MERT_FOLDER at a local m-a-p/MERT-v1-95M copy (or a hub id
 #    if the embedder can reach the HF hub at build time).

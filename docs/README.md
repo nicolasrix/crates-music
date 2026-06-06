@@ -16,7 +16,9 @@ This directory is the onboarding entry point. Follow the docs in this order:
 | [API.md](./API.md) | Every endpoint the gateway exposes, with example requests |
 | [PLATFORM-PARITY.md](./PLATFORM-PARITY.md) | What each client (web / CLI / Android) can do today — the feature matrix |
 | [TESTING.md](./TESTING.md) | How tests are organised; how to run a single test or the whole suite |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev environment setup, every command (build / test / lint / bench), branch workflow, PR checklist |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Run the gateway + embedder in containers (`docker compose`). Operator guide. |
+| [RUNBOOK.md](./RUNBOOK.md) | Operational quick-reference: health checks, deploy/update, model bumps, backup/restore, common issues |
 
 ## Per-component reference
 
@@ -41,7 +43,7 @@ The architecture doc covers all of these in context, but they each get
 their own canonical statement:
 
 - **Caching** — L1 (in-memory) → L2 (SQLite, ETag-keyed) → L3 (audio file cache, content-addressed) → L4 (gateway transcoded LRU). See [ARCHITECTURE.md#caching](./ARCHITECTURE.md#caching).
-- **Auth** — bearer token (CLI, transitional) + OAuth 2.1 with PKCE (web; device-grant for CLI later). See [ARCHITECTURE.md#auth](./ARCHITECTURE.md#auth).
+- **Auth** — OAuth 2.1: Authorization Code + PKCE (web), Device Authorization Grant / RFC 8628 (CLI, via `music auth login`). See [ARCHITECTURE.md#auth](./ARCHITECTURE.md#auth).
 - **Recommender** — content embeddings (CLaMP 3, 768-dim; CLAP legacy) + ABTT whitening + ANN (usearch, cosine), with post-retrieval queue filter (MMR, per-artist cap, dedup), per-session downvote exclusion, text-query stations, and 2D/3D UMAP projections for visual debugging. See [components/music-recommend.md](./components/music-recommend.md).
 - **Diagnostics** — span ring (`gateway-state.traces.sqlite`) + browser RUM + per-feature dashboards backing the `/diagnostics` page. See [ARCHITECTURE.md#diagnostics](./ARCHITECTURE.md#diagnostics) and [API.md#diagnostics](./API.md#diagnostics).
 

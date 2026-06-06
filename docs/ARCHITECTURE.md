@@ -117,18 +117,19 @@ rotation*, not user identification.
 |---|---|---|
 | Web | Authorization Code + PKCE | Implemented |
 | Mobile | Authorization Code + PKCE via Custom Tabs | Planned (P4) |
-| CLI | Device Authorization Grant (RFC 8628) | Planned; currently uses static bearer token |
+| CLI | Device Authorization Grant (RFC 8628) | Implemented (`music auth login`) |
 
 **Bootstrap:** the gateway prints a one-time setup URL on first run.
 The user visits it, sets a master password (Argon2id), and from then
 on the OAuth endpoints are usable.
 
-**Storage:** five tables in `gateway-state.sqlite` —
+**Storage:** six tables in `gateway-state.sqlite` —
 - `users` — Argon2id master password
 - `oauth_clients` — registered client_ids + redirect URIs
 - `auth_codes` — short-lived (60s) authorization codes
 - `refresh_tokens` — long-lived, per-device, individually revocable
 - `access_tokens` — short-lived (1h), looked up by `sha256(token)`
+- `device_codes` — RFC 8628 device-grant pairing codes (the CLI's auth path)
 
 Plus a `sessions` table for the browser login flow (not the same as
 access_tokens — sessions are how the *login form* remembers you between

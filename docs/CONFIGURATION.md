@@ -110,6 +110,9 @@ override when running CLaMP 3.
 | `like_bonus` | f32 | no | `0.15` | Relevance boost added to a **liked track** (`PUT /v1/library/rating`). Distinct from `preference_*`: the like/dislike channel is durable, never decays, and is **always-on** regardless of `preference_enabled`. A dislike has no knob — it hard-excludes the entity from play entirely. |
 | `like_bonus_album` | f32 | no | `0.06` | Boost added to every track of a **liked album**. Additive with `like_bonus` and `like_bonus_artist`. |
 | `like_bonus_artist` | f32 | no | `0.03` | Boost added to every track of a **liked artist**. The defaults follow the hierarchy `like_bonus > like_bonus_album > like_bonus_artist`, with `album + artist < track`, so a directly-liked track always outranks one liked only via its album/artist. |
+| `leash_tau` | f32 | no | `0.28` | Anchor leash for travelling autoplay stations: candidates whose cosine to the nearest anchor falls below `tau` are demoted. Server-side fallback only — clients (web Settings) send per-request overrides. |
+| `leash_lambda` | f32 | no | `16.0` | Strength of the leash demotion, `λ·(τ − sim)²`. `0` disables the leash entirely. Per-request overrides apply as with `leash_tau`. |
+| `log_provenance` | bool | no | `true` | Persist every served recommendation (request context, ordered slate, per-item scores) to the `recommendation` / `recommendation_item` tables in `gateway-state.recommend.sqlite`. Append-only training substrate; no effect on what gets recommended. No automatic trimming. |
 
 ```toml
 [recommend]
@@ -174,6 +177,9 @@ Cache directory follows the same XDG layout under
 | `RECOMMEND_LIKE_BONUS` | — | `gen_config.py` → `[recommend] like_bonus`. Unset → gateway default `0.15`. |
 | `RECOMMEND_LIKE_BONUS_ALBUM` | — | `gen_config.py` → `[recommend] like_bonus_album`. Unset → gateway default `0.06`. |
 | `RECOMMEND_LIKE_BONUS_ARTIST` | — | `gen_config.py` → `[recommend] like_bonus_artist`. Unset → gateway default `0.03`. |
+| `RECOMMEND_LEASH_TAU` | — | `gen_config.py` → `[recommend] leash_tau`. Unset → gateway default `0.28`. |
+| `RECOMMEND_LEASH_LAMBDA` | — | `gen_config.py` → `[recommend] leash_lambda`. Unset → gateway default `16`. `0` disables the anchor leash. |
+| `RECOMMEND_LOG_PROVENANCE` | — | `gen_config.py` → `[recommend] log_provenance`. Unset → gateway default `true`. Set `false` to stop capturing recommendation provenance. |
 
 ### Embedder
 
