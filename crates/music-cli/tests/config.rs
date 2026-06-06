@@ -1,6 +1,8 @@
 //! Config is plain TOML on disk: `[server]` block with url/username/password,
 //! plus an optional `[gateway]` block to route through music-gateway.
 
+use std::path::PathBuf;
+
 use music_cli::config::{CacheConfig, Config, GatewayConfig, ServerConfig};
 
 #[test]
@@ -13,6 +15,7 @@ fn config_roundtrips_toml() {
         },
         gateway: None,
         cache: CacheConfig::default(),
+        source_path: PathBuf::new(),
     };
     let serialized = toml::to_string(&original).unwrap();
     let back: Config = toml::from_str(&serialized).unwrap();
@@ -64,7 +67,10 @@ fn config_without_gateway_block_has_no_gateway() {
 }
 
 #[test]
-fn config_with_gateway_block_parses_gateway_url_and_bearer() {
+fn config_with_gateway_block_parses_gateway_url() {
+    // A legacy `bearer_token` key is now unused; it must still parse
+    // (serde ignores the unknown field) so old configs don't break — the
+    // user just needs to run `music auth login`.
     let raw = r#"
         [server]
         url = "https://nav.example.com"
@@ -73,12 +79,11 @@ fn config_with_gateway_block_parses_gateway_url_and_bearer() {
 
         [gateway]
         url = "https://gateway.local:8443"
-        bearer_token = "shared-secret-abc"
+        bearer_token = "legacy-ignored"
     "#;
     let config: Config = toml::from_str(raw).unwrap();
     let gw = config.gateway.expect("gateway block parsed");
     assert_eq!(gw.url, "https://gateway.local:8443");
-    assert_eq!(gw.bearer_token, "shared-secret-abc");
 }
 
 #[test]
@@ -127,11 +132,11 @@ fn config_with_gateway_block_roundtrips() {
         },
         gateway: Some(GatewayConfig {
             url: "https://gateway.local:8443".into(),
-            bearer_token: "abc".into(),
             ca_cert_path: None,
             insecure_tls: false,
         }),
         cache: CacheConfig::default(),
+        source_path: PathBuf::new(),
     };
     let serialized = toml::to_string(&original).unwrap();
     let back: Config = toml::from_str(&serialized).unwrap();

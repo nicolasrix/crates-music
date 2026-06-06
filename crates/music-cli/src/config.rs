@@ -7,13 +7,20 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub server: ServerConfig,
     /// When set, the CLI talks to a `music-gateway` instead of Navidrome
-    /// directly. Auth becomes a single bearer token; the `[server]`
-    /// credentials are unused in this mode but kept for clean fallback to
-    /// direct mode without rewriting the config.
+    /// directly. Auth is the OAuth 2.1 Device Authorization Grant — run
+    /// `music auth login` once; tokens are kept in a sibling
+    /// `cli-tokens.json`. The `[server]` credentials are unused in this
+    /// mode but kept for clean fallback to direct mode without rewriting
+    /// the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Path this config was loaded from. Not part of the on-disk format
+    /// (skipped by serde) — `Config::load` stamps it so siblings of the
+    /// config file (e.g. the `cli-tokens.json` token store) can be located.
+    #[serde(skip)]
+    pub source_path: PathBuf,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +45,6 @@ impl std::fmt::Debug for ServerConfig {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub url: String,
-    pub bearer_token: String,
     /// Path to a PEM file holding the CA that issued the gateway's TLS
     /// cert — typically the mkcert root CA (`mkcert -CAROOT`/`rootCA.pem`).
     /// Added as an *extra* trust anchor on top of the system store, so the
@@ -54,12 +60,13 @@ pub struct GatewayConfig {
     pub insecure_tls: bool,
 }
 
-// Hand-rolled `Debug` so the gateway bearer token is never printed.
+// Derived `Debug` is fine now that the gateway holds no secret — the CLI
+// authenticates with the Device Authorization Grant and keeps tokens in a
+// separate `cli-tokens.json` store, not in this config.
 impl std::fmt::Debug for GatewayConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GatewayConfig")
             .field("url", &self.url)
-            .field("bearer_token", &"[REDACTED]")
             .field("ca_cert_path", &self.ca_cert_path)
             .field("insecure_tls", &self.insecure_tls)
             .finish()
@@ -109,8 +116,9 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading config at {}: {e}", path.display()))?;
-        let config: Self = toml::from_str(&raw)
+        let mut config: Self = toml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("parsing config at {}: {e}", path.display()))?;
+        config.source_path = path.to_path_buf();
         Ok(config)
     }
 }
@@ -136,7 +144,6 @@ mod tests {
         };
         let gateway = GatewayConfig {
             url: "https://gateway.local:8443".to_string(),
-            bearer_token: "super-secret-bearer".to_string(),
             ca_cert_path: Some(PathBuf::from("/home/alice/rootCA.pem")),
             insecure_tls: false,
         };
@@ -147,10 +154,9 @@ mod tests {
         // Non-secret fields stay visible for diagnostics.
         assert!(server_dbg.contains("alice"));
 
+        // The gateway block no longer holds a secret; the CA path is not
+        // sensitive and stays visible.
         let gateway_dbg = format!("{gateway:?}");
-        assert!(!gateway_dbg.contains("super-secret-bearer"));
-        assert!(gateway_dbg.contains("[REDACTED]"));
-        // The CA path is not a secret and stays visible.
         assert!(gateway_dbg.contains("rootCA.pem"));
     }
 }

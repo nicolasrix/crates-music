@@ -41,11 +41,12 @@ struct NextResponse {
 /// order.
 pub async fn run_station(config: &Config, client: &Client, prompt: &str, n: usize) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, "/v1/recommend/station");
     let resp = http_client(gw)?
         .get(&url)
         .query(&[("text", prompt), ("n", &n.to_string())])
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .send()
         .await
         .context("requesting station")?;
@@ -78,11 +79,12 @@ pub async fn run_station(config: &Config, client: &Client, prompt: &str, n: usiz
 /// to a seed track. Prints them in rank order; notes degraded mode.
 pub async fn run_next(config: &Config, client: &Client, seed: &str, n: usize) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, "/v1/recommend/next");
     let resp = http_client(gw)?
         .get(&url)
         .query(&[("seed", seed), ("n", &n.to_string())])
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .send()
         .await
         .context("requesting recommendations")?;

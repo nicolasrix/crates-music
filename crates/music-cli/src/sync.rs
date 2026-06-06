@@ -30,10 +30,11 @@ use crate::gateway::{http_client, require_gateway, ws_url_for};
 
 pub async fn run_state(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = format!("{}/v1/sync/snapshot", gw.url.trim_end_matches('/'));
     let body: serde_json::Value = http_client(gw)?
         .get(&url)
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .send()
         .await
         .context("requesting snapshot")?
@@ -48,6 +49,7 @@ pub async fn run_state(config: &Config) -> Result<()> {
 
 pub async fn run_push(config: &Config, track_ids: &[String]) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let client = http_client(gw)?;
     for track_id in track_ids {
         let item_id = new_item_id();
@@ -55,7 +57,7 @@ pub async fn run_push(config: &Config, track_ids: &[String]) -> Result<()> {
             item_id: QueueItemId::from(item_id.clone()),
             track_id: TrackId::from(track_id.clone()),
         };
-        let version = submit_op(gw, &client, &op)
+        let version = submit_op(gw, &client, &token, &op)
             .await
             .with_context(|| format!("pushing track {track_id}"))?;
         println!("pushed {track_id} as item {item_id} (version {version})");
@@ -66,10 +68,11 @@ pub async fn run_push(config: &Config, track_ids: &[String]) -> Result<()> {
 /// Remove a queue item by id (no-op server-side if absent).
 pub async fn run_remove(config: &Config, item_id: &str) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let op = SyncOp::Remove {
         item_id: QueueItemId::from(item_id.to_string()),
     };
-    let version = submit_op(gw, &http_client(gw)?, &op).await?;
+    let version = submit_op(gw, &http_client(gw)?, &token, &op).await?;
     println!("removed item {item_id} (version {version})");
     Ok(())
 }
@@ -78,11 +81,12 @@ pub async fn run_remove(config: &Config, item_id: &str) -> Result<()> {
 /// cursor follows the moved track, not the index.
 pub async fn run_move(config: &Config, item_id: &str, new_index: usize) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let op = SyncOp::Reorder {
         item_id: QueueItemId::from(item_id.to_string()),
         new_index,
     };
-    let version = submit_op(gw, &http_client(gw)?, &op).await?;
+    let version = submit_op(gw, &http_client(gw)?, &token, &op).await?;
     println!("moved item {item_id} to index {new_index} (version {version})");
     Ok(())
 }
@@ -91,8 +95,9 @@ pub async fn run_move(config: &Config, item_id: &str, new_index: usize) -> Resul
 /// an out-of-bounds index is rejected by the gateway (422).
 pub async fn run_jump(config: &Config, index: usize) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let op = SyncOp::SetNowPlaying { index: Some(index) };
-    let version = submit_op(gw, &http_client(gw)?, &op).await?;
+    let version = submit_op(gw, &http_client(gw)?, &token, &op).await?;
     println!("now-playing set to index {index} (version {version})");
     Ok(())
 }
@@ -103,10 +108,11 @@ pub async fn run_jump(config: &Config, index: usize) -> Result<()> {
 /// track id so the row count always matches the real queue.
 pub async fn run_queue(config: &Config, client: &Client) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = format!("{}/v1/sync/snapshot", gw.url.trim_end_matches('/'));
     let state: SyncState = http_client(gw)?
         .get(&url)
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .send()
         .await
         .context("requesting snapshot")?
@@ -167,18 +173,24 @@ pub async fn run_queue(config: &Config, client: &Client) -> Result<()> {
 /// the gateway never rejects it.
 pub async fn run_clear(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
-    let version = submit_op(gw, &http_client(gw)?, &SyncOp::Clear).await?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let version = submit_op(gw, &http_client(gw)?, &token, &SyncOp::Clear).await?;
     println!("cleared queue (version {version})");
     Ok(())
 }
 
 /// POST a single op to `/v1/sync/ops` and return the new state version.
 /// Centralises the success/error handling for every op-submitting command.
-async fn submit_op(gw: &GatewayConfig, client: &reqwest::Client, op: &SyncOp) -> Result<u64> {
+async fn submit_op(
+    gw: &GatewayConfig,
+    client: &reqwest::Client,
+    token: &str,
+    op: &SyncOp,
+) -> Result<u64> {
     let url = format!("{}/v1/sync/ops", gw.url.trim_end_matches('/'));
     let resp = client
         .post(&url)
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(token)
         .json(op)
         .send()
         .await
@@ -194,13 +206,14 @@ async fn submit_op(gw: &GatewayConfig, client: &reqwest::Client, op: &SyncOp) ->
 
 pub async fn run_watch(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let mut ws_url = ws_url_for(&gw.url, "/v1/sync")?;
     // Browser parity: pass the bearer token as `access_token=` rather
     // than via the Authorization header. The gateway accepts both;
     // query-string auth keeps the WS handshake plumbing trivial.
     ws_url
         .query_pairs_mut()
-        .append_pair("access_token", &gw.bearer_token);
+        .append_pair("access_token", &token);
 
     let (mut ws, _resp) = connect_async(ws_url.as_str())
         .await

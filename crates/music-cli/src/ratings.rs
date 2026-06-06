@@ -20,13 +20,14 @@ pub async fn run_set(
     rating: Option<&str>,
 ) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, "/v1/library/rating");
     // `rating: null` is a clear — serde_json renders `None` as JSON null.
     let body = serde_json::json!({ "kind": kind.wire(), "id": id, "rating": rating });
 
     let resp = http_client(gw)?
         .put(&url)
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .json(&body)
         .send()
         .await
@@ -66,10 +67,11 @@ struct RatingsResponse {
 /// web "Liked" surface.
 pub async fn run_liked(config: &Config) -> Result<()> {
     let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, "/v1/library/ratings");
     let resp: RatingsResponse = http_client(gw)?
         .get(&url)
-        .bearer_auth(&gw.bearer_token)
+        .bearer_auth(&token)
         .send()
         .await
         .context("requesting ratings")?

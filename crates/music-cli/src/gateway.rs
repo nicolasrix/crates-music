@@ -107,7 +107,6 @@ mod tests {
     fn endpoint_joins_with_single_slash() {
         let gw = GatewayConfig {
             url: "https://gateway.local:8443/".into(),
-            bearer_token: "t".into(),
             ca_cert_path: None,
             insecure_tls: false,
         };

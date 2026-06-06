@@ -147,13 +147,16 @@ that distinction:
 
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
-| OAuth flow | ✅ Auth Code + PKCE | 🔭 Device Grant (RFC 8628) | 🔭 PKCE via Custom Tabs |
+| OAuth flow | ✅ Auth Code + PKCE | ✅ `auth login` (Device Grant, RFC 8628) | 🔭 PKCE via Custom Tabs |
 | Direct Subsonic creds (no gateway) | 🚫 | ✅ `[server]` config | 🔭 |
 
-> The CLI currently authenticates with the gateway via a **static
-> bearer token** in `[gateway]` config, or talks to Navidrome directly
-> with `[server]` creds. The Device Authorization Grant flow described
-> in CLAUDE.md is not yet wired into the CLI.
+> The CLI authenticates with the gateway via the **Device Authorization
+> Grant** (RFC 8628): `music auth login` prints a short code + URL, you
+> approve it in a logged-in browser, and the CLI stores rotating
+> per-device tokens in `cli-tokens.json` (next to the config, `0600`).
+> `auth status` / `auth logout` manage that store; the access token
+> refreshes automatically. The old static `[gateway].bearer_token` has
+> been removed. Direct mode still uses `[server]` creds against Navidrome.
 
 ## CLI parity backlog (the ❌ rows)
 
@@ -181,8 +184,17 @@ subcommands onto endpoints that already exist. Rough priority:
    now-playing marker), `sync remove`, `sync move` (alias `reorder`),
    `sync jump <index>`, `sync clear`. All ops already existed in
    `music-sync`; this was pure client surface.
-6. **Auth** — Device Authorization Grant (RFC 8628) to replace the
-   static bearer token.
+6. ~~**Auth** — Device Authorization Grant (RFC 8628) to replace the
+   static bearer token.~~ **Done** — `music auth login|logout|status`.
+   Gateway gained `POST /oauth/device_authorization`, a session-gated
+   `GET/POST /oauth/device` approval page, and the `device_code` token
+   grant; the CLI polls, persists rotating tokens to `cli-tokens.json`
+   (`0600`), and auto-refreshes. The static `[gateway].bearer_token` was
+   removed.
+
+The CLI parity backlog is now clear. Remaining ❌ rows are smaller,
+lower-priority items (seed-from-album station, similar albums/artists,
+playlist CRUD, recommendation thumbs, diagnostics views).
 
 ## Android (P4) — not started
 

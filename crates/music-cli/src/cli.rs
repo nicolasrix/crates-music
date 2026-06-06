@@ -148,6 +148,25 @@ pub enum Command {
         #[command(subcommand)]
         action: SyncAction,
     },
+
+    /// Authenticate with the gateway via the OAuth 2.1 Device Authorization
+    /// Grant (RFC 8628). Requires `[gateway]` config.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthAction {
+    /// Start the device flow: prints a code + URL, then waits for you to
+    /// approve it in a logged-in browser. Saves the resulting tokens.
+    Login,
+    /// Revoke the stored refresh token and delete the local token store.
+    Logout,
+    /// Show whether the CLI is authenticated and when the access token
+    /// expires.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]

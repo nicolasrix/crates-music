@@ -13,9 +13,22 @@ use crate::cli::{CacheAction, Cli, Command, RecommendAction, SyncAction};
 use crate::config::{Config, resolve_cache_root};
 use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
+// A flat command dispatcher — splitting the match across helpers would
+// hurt readability more than the length lint helps.
+#[allow(clippy::too_many_lines)]
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
-    let client = build_client(&config).context("constructing Subsonic client")?;
+
+    // `auth` is special: `login` bootstraps the token store and the others
+    // manage it, so they run before we try to construct an authed client
+    // (which, in gateway mode, would require a token we may not have yet).
+    if let Command::Auth { action } = &cli.command {
+        return crate::auth::run_auth(&config, action).await;
+    }
+
+    let client = build_client(&config)
+        .await
+        .context("constructing Subsonic client")?;
 
     match cli.command {
         Command::Ping => {
@@ -111,6 +124,8 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             SyncAction::Clear => crate::sync::run_clear(&config).await?,
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
+        // Handled above, before the client is built.
+        Command::Auth { .. } => unreachable!("auth dispatched before client construction"),
     }
     Ok(())
 }
@@ -262,7 +277,7 @@ async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
-fn build_client(config: &Config) -> anyhow::Result<Client> {
+async fn build_client(config: &Config) -> anyhow::Result<Client> {
     let creds = Credentials {
         username: config.server.username.clone(),
         password: config.server.password.clone(),
@@ -270,6 +285,10 @@ fn build_client(config: &Config) -> anyhow::Result<Client> {
     let Some(gateway) = &config.gateway else {
         return Ok(Client::new(&config.server.url, creds)?);
     };
+
+    // Gateway mode authenticates with a device-flow access token (resolved
+    // — and silently refreshed — from the token store). No static bearer.
+    let bearer = crate::auth::resolve_bearer(config, gateway).await?;
 
     // Gateway mode: target the gateway URL with a bearer token. The upstream
     // Subsonic auth params (u/t/s/…) are still appended by `Client`, but the
@@ -296,7 +315,7 @@ fn build_client(config: &Config) -> anyhow::Result<Client> {
         );
     }
     Ok(Client::new(&gateway.url, creds)?
-        .with_bearer(&gateway.bearer_token)?
+        .with_bearer(&bearer)?
         .with_tls(ca_cert_pem.as_deref(), gateway.insecure_tls)?)
 }
 

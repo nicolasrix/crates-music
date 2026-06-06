@@ -81,6 +81,52 @@ pub struct AccessToken {
     pub expires_at_unix_ms: i64,
 }
 
+/// Input for `create_device_code`. Issued-at is filled in by the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDeviceCode {
+    pub client_id: String,
+    pub ttl: Duration,
+    /// Polling interval handed back to the client (RFC 8628 §3.2).
+    pub interval: Duration,
+}
+
+/// Plaintext-bearing return value from `create_device_code`. Both codes
+/// are returned once: the `device_code` goes to the polling client (only
+/// its hash is stored), the `user_code` is shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedDeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub expires_at_unix_ms: i64,
+    pub interval_secs: i64,
+}
+
+/// A device-code row looked up by `user_code` (for the approval page).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCodeRow {
+    pub user_code: String,
+    pub client_id: String,
+    pub issued_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub approved_at_unix_ms: Option<i64>,
+    pub denied_at_unix_ms: Option<i64>,
+    pub consumed_at_unix_ms: Option<i64>,
+}
+
+/// Outcome of a token-endpoint poll against a device code (RFC 8628 §3.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevicePollState {
+    /// User hasn't decided yet → `authorization_pending`.
+    Pending,
+    /// User approved; tokens were just minted for `client_id` (the consume
+    /// is atomic, so this is returned exactly once).
+    Approved { client_id: String },
+    /// User denied → `access_denied`.
+    Denied,
+    /// Unknown, expired, or already-consumed code → `expired_token`.
+    Expired,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("sqlx: {0}")]
@@ -541,6 +587,147 @@ impl OauthStore {
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
         }))
+    }
+
+    // -----------------------------------------------------------------
+    // Device Authorization Grant (RFC 8628)
+    // -----------------------------------------------------------------
+
+    /// Mint and store a fresh device code + user code. The plaintext
+    /// `device_code` is in the return value (goes to the polling client);
+    /// the row holds only its sha256. `user_code` is stored in plaintext
+    /// for the approval-page lookup.
+    pub async fn create_device_code(&self, input: NewDeviceCode) -> Result<IssuedDeviceCode> {
+        let device_code = session::mint_token();
+        let device_code_hash = session::hash_token(&device_code);
+        let user_code = session::mint_user_code();
+        let issued_at = unix_ms_now();
+        let ttl_ms = i64::try_from(input.ttl.as_millis()).unwrap_or(i64::MAX);
+        let expires_at = issued_at.saturating_add(ttl_ms);
+        let interval_secs = i64::try_from(input.interval.as_secs()).unwrap_or(5).max(1);
+        sqlx::query(
+            "INSERT INTO device_codes \
+                (device_code_hash, user_code, client_id, issued_at, expires_at, interval_secs) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&device_code_hash)
+        .bind(&user_code)
+        .bind(&input.client_id)
+        .bind(issued_at)
+        .bind(expires_at)
+        .bind(interval_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(IssuedDeviceCode {
+            device_code,
+            user_code,
+            expires_at_unix_ms: expires_at,
+            interval_secs,
+        })
+    }
+
+    /// Look up a device code by its (plaintext, user-typed) `user_code`,
+    /// for the browser approval page. Returns `None` for an unknown code.
+    pub async fn find_device_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCodeRow>> {
+        let row = sqlx::query(
+            "SELECT user_code, client_id, issued_at, expires_at, \
+                    approved_at, denied_at, consumed_at \
+             FROM device_codes WHERE user_code = ?",
+        )
+        .bind(user_code)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| DeviceCodeRow {
+            user_code: r.get("user_code"),
+            client_id: r.get("client_id"),
+            issued_at_unix_ms: r.get("issued_at"),
+            expires_at_unix_ms: r.get("expires_at"),
+            approved_at_unix_ms: r.get("approved_at"),
+            denied_at_unix_ms: r.get("denied_at"),
+            consumed_at_unix_ms: r.get("consumed_at"),
+        }))
+    }
+
+    /// Record the user's approve/deny decision for a `user_code`. Only
+    /// affects a row that is still pending (no decision, not consumed, not
+    /// expired). Returns `true` if a decision was recorded, `false` if the
+    /// code was unknown, already decided, consumed, or expired.
+    pub async fn set_device_decision(&self, user_code: &str, approve: bool) -> Result<bool> {
+        let now = unix_ms_now();
+        let col = if approve { "approved_at" } else { "denied_at" };
+        let sql = format!(
+            "UPDATE device_codes SET {col} = ? \
+             WHERE user_code = ? \
+               AND approved_at IS NULL \
+               AND denied_at IS NULL \
+               AND consumed_at IS NULL \
+               AND expires_at > ?"
+        );
+        let result = sqlx::query(&sql)
+            .bind(now)
+            .bind(user_code)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Poll a device code from the token endpoint. Classifies the row, and
+    /// — only when it's approved-and-unspent — atomically stamps
+    /// `consumed_at` so tokens mint exactly once (the `UPDATE … RETURNING`
+    /// is the concurrency gate, mirroring `consume_auth_code`). Unknown,
+    /// expired, and already-consumed codes all collapse to `Expired`.
+    pub async fn consume_device_code(&self, device_code: &str) -> Result<DevicePollState> {
+        let device_code_hash = session::hash_token(device_code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "SELECT expires_at, approved_at, denied_at, consumed_at \
+             FROM device_codes WHERE device_code_hash = ?",
+        )
+        .bind(&device_code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(DevicePollState::Expired);
+        };
+        let expires_at: i64 = row.get("expires_at");
+        let approved_at: Option<i64> = row.get("approved_at");
+        let denied_at: Option<i64> = row.get("denied_at");
+        let consumed_at: Option<i64> = row.get("consumed_at");
+
+        if consumed_at.is_some() || expires_at <= now {
+            return Ok(DevicePollState::Expired);
+        }
+        if denied_at.is_some() {
+            return Ok(DevicePollState::Denied);
+        }
+        if approved_at.is_none() {
+            return Ok(DevicePollState::Pending);
+        }
+
+        // Approved and unspent: atomically claim it. The WHERE re-checks
+        // every precondition, so a concurrent poll can't double-mint — the
+        // loser matches no row and falls through to `Expired`.
+        let claimed = sqlx::query(
+            "UPDATE device_codes SET consumed_at = ? \
+             WHERE device_code_hash = ? \
+               AND approved_at IS NOT NULL \
+               AND denied_at IS NULL \
+               AND consumed_at IS NULL \
+               AND expires_at > ? \
+             RETURNING client_id",
+        )
+        .bind(now)
+        .bind(&device_code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        match claimed {
+            Some(r) => Ok(DevicePollState::Approved {
+                client_id: r.get("client_id"),
+            }),
+            None => Ok(DevicePollState::Expired),
+        }
     }
 
     /// Diagnostic: list every table in the DB. Used by tests to verify the

@@ -58,7 +58,15 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/oauth/authorize", get(oauth_handlers::authorize))
         .route("/oauth/token", post(oauth_handlers::token))
-        .route("/oauth/revoke", post(oauth_handlers::revoke));
+        .route("/oauth/revoke", post(oauth_handlers::revoke))
+        .route(
+            "/oauth/device_authorization",
+            post(oauth_handlers::device_authorization),
+        )
+        .route(
+            "/oauth/device",
+            get(oauth_handlers::device_verify_get).post(oauth_handlers::device_verify_post),
+        );
 
     let v1 = Router::new()
         .route("/v1/whoami", get(whoami))

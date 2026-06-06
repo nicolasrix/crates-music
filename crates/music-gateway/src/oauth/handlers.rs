@@ -21,7 +21,7 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::oauth::password;
-use crate::oauth::storage::{NewAuthCode, NewRefreshToken};
+use crate::oauth::storage::{DeviceCodeRow, DevicePollState, NewAuthCode, NewDeviceCode, NewRefreshToken};
 use crate::state::AppState;
 
 /// Cookie name. Short, gateway-scoped, matches the convention of OAuth
@@ -38,6 +38,14 @@ pub const AUTH_CODE_TTL: Duration = Duration::from_mins(10);
 
 /// Access tokens are short-lived; clients refresh as needed.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::from_hours(1);
+
+/// Device codes are short-lived (RFC 8628 §3.2 example uses ~15 min; we
+/// match the auth-code window of 10 min).
+pub const DEVICE_CODE_TTL: Duration = Duration::from_mins(10);
+
+/// Default device-flow polling interval handed to the client (RFC 8628
+/// §3.2 default is 5 s).
+pub const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Minimum master-password length. NIST SP 800-63B recommends ≥ 8 with
 /// no other rules; we go a little stricter (this is the *root* credential).
@@ -442,6 +450,8 @@ pub struct TokenForm {
     pub redirect_uri: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
+    /// RFC 8628 device-code grant.
+    pub device_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -466,6 +476,7 @@ pub async fn token(
     match form.grant_type.as_str() {
         "authorization_code" => grant_authorization_code(&state, form).await,
         "refresh_token" => grant_refresh_token(&state, form).await,
+        "urn:ietf:params:oauth:grant-type:device_code" => grant_device_code(&state, form).await,
         other => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
@@ -588,6 +599,68 @@ async fn grant_refresh_token(
     Ok(Json(pair))
 }
 
+/// RFC 8628 §3.4 device-code grant: the polling step. Maps the device
+/// code's state to the spec's polling errors, or mints a token pair once
+/// the user has approved.
+async fn grant_device_code(
+    state: &AppState,
+    form: TokenForm,
+) -> Result<Json<TokenResponse>, (StatusCode, Json<OauthError>)> {
+    let device_code = form.device_code.ok_or_else(|| {
+        oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing device_code",
+        )
+    })?;
+    let client_id = form.client_id.ok_or_else(|| {
+        oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing client_id",
+        )
+    })?;
+
+    match state
+        .oauth()
+        .consume_device_code(&device_code)
+        .await
+        .map_err(|e| oauth_internal(&e))?
+    {
+        DevicePollState::Pending => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "authorization_pending",
+            "the user has not yet approved this device",
+        )),
+        DevicePollState::Denied => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "access_denied",
+            "the authorization request was denied",
+        )),
+        DevicePollState::Expired => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "expired_token",
+            "the device code has expired or is no longer valid",
+        )),
+        // The device_code is the high-entropy secret; client_id is not.
+        // We still cross-check it for correctness — a mismatch can only
+        // come from a caller already holding the secret code (the CLI).
+        DevicePollState::Approved {
+            client_id: code_client,
+        } => {
+            if code_client != client_id {
+                return Err(oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_grant",
+                    "client_id does not match the device code",
+                ));
+            }
+            let pair = mint_pair(state, &client_id).await?;
+            Ok(Json(pair))
+        }
+    }
+}
+
 async fn mint_pair(
     state: &AppState,
     client_id: &str,
@@ -675,4 +748,337 @@ pub async fn revoke(State(state): State<AppState>, Form(form): Form<RevokeForm>)
         tracing::error!("revoke access: {e}");
     }
     StatusCode::OK
+}
+
+// ---------------------------------------------------------------------
+// Device Authorization Grant (RFC 8628)
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceAuthForm {
+    pub client_id: String,
+    /// Scopes are unused (single-user gateway); accepted for spec politeness.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeviceAuthResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+/// POST /oauth/device_authorization (RFC 8628 §3.1/§3.2). Public client
+/// asks for a device code; we mint a device/user code pair and tell the
+/// client where to send the user and how often to poll.
+pub async fn device_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<DeviceAuthForm>,
+) -> Result<Json<DeviceAuthResponse>, (StatusCode, Json<OauthError>)> {
+    // The client must be registered (mirrors authorize()'s client check).
+    state
+        .oauth()
+        .find_client(&form.client_id)
+        .await
+        .map_err(|e| oauth_internal(&e))?
+        .ok_or_else(|| {
+            oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client",
+                "unknown client_id",
+            )
+        })?;
+
+    let issued = state
+        .oauth()
+        .create_device_code(NewDeviceCode {
+            client_id: form.client_id,
+            ttl: DEVICE_CODE_TTL,
+            interval: DEVICE_POLL_INTERVAL,
+        })
+        .await
+        .map_err(|e| oauth_internal(&e))?;
+
+    let base = request_base_url(&headers);
+    let verification_uri = format!("{base}/oauth/device");
+    let verification_uri_complete = format!(
+        "{verification_uri}?user_code={}",
+        urlencoding_encode(&issued.user_code)
+    );
+    Ok(Json(DeviceAuthResponse {
+        device_code: issued.device_code,
+        user_code: issued.user_code,
+        verification_uri,
+        verification_uri_complete,
+        expires_in: DEVICE_CODE_TTL.as_secs(),
+        interval: u64::try_from(issued.interval_secs).unwrap_or(5),
+    }))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DeviceVerifyQuery {
+    pub user_code: Option<String>,
+}
+
+/// GET /oauth/device — the verification page. Session-gated: an
+/// unauthenticated visitor is bounced to login and back. With a
+/// `user_code` it shows the code + Approve/Deny; without one it shows a
+/// field to enter the code.
+pub async fn device_verify_get(
+    State(state): State<AppState>,
+    Query(q): Query<DeviceVerifyQuery>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    if !is_signed_in(&state, &headers).await? {
+        return Ok(redirect(&device_login_redirect(q.user_code.as_deref())));
+    }
+
+    let page = match q.user_code.as_deref() {
+        None => render_device_entry(),
+        Some(user_code) => {
+            match state
+                .oauth()
+                .find_device_by_user_code(user_code)
+                .await
+                .map_err(internal)?
+            {
+                None => render_device_message(
+                    "Unknown code",
+                    "That code wasn't found. Check the code shown in your terminal.",
+                ),
+                Some(row) => render_device_for_row(&row),
+            }
+        }
+    };
+    Ok(Html(page).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceVerifyForm {
+    pub user_code: String,
+    /// `approve` or `deny`.
+    pub action: String,
+}
+
+/// POST /oauth/device — record the approve/deny decision. Session-gated.
+pub async fn device_verify_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<DeviceVerifyForm>,
+) -> Result<Response, (StatusCode, String)> {
+    if !is_signed_in(&state, &headers).await? {
+        return Ok(redirect(&device_login_redirect(Some(&form.user_code))));
+    }
+
+    let approve = match form.action.as_str() {
+        "approve" => true,
+        "deny" => false,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "action must be 'approve' or 'deny'".to_string(),
+            ));
+        }
+    };
+
+    let recorded = state
+        .oauth()
+        .set_device_decision(&form.user_code, approve)
+        .await
+        .map_err(internal)?;
+
+    let page = if !recorded {
+        render_device_message(
+            "Code not available",
+            "That code is unknown, already decided, or expired. Start over from your terminal.",
+        )
+    } else if approve {
+        render_device_message(
+            "Device approved",
+            "You can return to your terminal — it will finish signing in shortly.",
+        )
+    } else {
+        render_device_message(
+            "Device denied",
+            "The sign-in request was denied. You can close this tab.",
+        )
+    };
+    Ok(Html(page).into_response())
+}
+
+/// Is there a valid browser session on this request? DB errors surface as
+/// a 500 (mirrors `authorize`'s `map_err(internal)`).
+async fn is_signed_in(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<bool, (StatusCode, String)> {
+    let Some(token) = extract_session_cookie(headers) else {
+        return Ok(false);
+    };
+    Ok(state
+        .oauth()
+        .find_session(&token)
+        .await
+        .map_err(internal)?
+        .is_some())
+}
+
+/// Build the `/oauth/login?next=…` URL that bounces an unauthenticated
+/// visitor back to the device page (preserving the `user_code`).
+fn device_login_redirect(user_code: Option<&str>) -> String {
+    let next = match user_code {
+        Some(uc) => format!("/oauth/device?user_code={}", urlencoding_encode(uc)),
+        None => "/oauth/device".to_string(),
+    };
+    format!("/oauth/login?next={}", urlencoding_encode(&next))
+}
+
+/// Classify a device-code row for the verification page: show the
+/// Approve/Deny form only while it's genuinely pending.
+fn render_device_for_row(row: &DeviceCodeRow) -> String {
+    let now = now_unix_ms();
+    if row.consumed_at_unix_ms.is_some() || row.expires_at_unix_ms <= now {
+        render_device_message(
+            "Code expired",
+            "This code has expired or was already used. Start over from your terminal.",
+        )
+    } else if row.approved_at_unix_ms.is_some() {
+        render_device_message(
+            "Already approved",
+            "This device was already approved. Return to your terminal.",
+        )
+    } else if row.denied_at_unix_ms.is_some() {
+        render_device_message("Already denied", "This sign-in request was denied.")
+    } else {
+        render_device_confirm(&row.user_code, &row.client_id)
+    }
+}
+
+/// The Approve/Deny confirmation page for a pending code.
+fn render_device_confirm(user_code: &str, client_id: &str) -> String {
+    let uc = html_escape(user_code);
+    let cid = html_escape(client_id);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>music gateway · authorize device</title>
+<style>
+{DEVICE_PAGE_CSS}
+.code {{ font-family: ui-monospace, monospace; font-size: 1.6rem; letter-spacing: 0.15em; padding: 0.75rem; background: #f2f2f2; border-radius: 0.4rem; text-align: center; }}
+.row {{ display: flex; gap: 0.75rem; margin-top: 1rem; }}
+button {{ padding: 0.6rem 1rem; font-size: 1rem; cursor: pointer; }}
+.approve {{ background: #1a7f37; color: #fff; border: none; border-radius: 0.4rem; }}
+.deny {{ background: #fff; color: #b00; border: 1px solid #b00; border-radius: 0.4rem; }}
+</style>
+</head>
+<body>
+<h1>Authorize device</h1>
+<p>A device (<strong>{cid}</strong>) is requesting access. Confirm this code matches the one shown in your terminal:</p>
+<div class="code">{uc}</div>
+<div class="row">
+<form method="post" action="/oauth/device">
+<input type="hidden" name="user_code" value="{uc}">
+<input type="hidden" name="action" value="approve">
+<button class="approve" type="submit">Approve this device</button>
+</form>
+<form method="post" action="/oauth/device">
+<input type="hidden" name="user_code" value="{uc}">
+<input type="hidden" name="action" value="deny">
+<button class="deny" type="submit">Deny</button>
+</form>
+</div>
+</body>
+</html>"#
+    )
+}
+
+/// The "enter your code" page shown when no `user_code` is in the URL.
+fn render_device_entry() -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>music gateway · authorize device</title>
+<style>
+{DEVICE_PAGE_CSS}
+form {{ display: flex; flex-direction: column; gap: 0.75rem; }}
+input[type=text] {{ padding: 0.5rem; font-size: 1.2rem; font-family: ui-monospace, monospace; letter-spacing: 0.1em; text-transform: uppercase; }}
+button {{ padding: 0.6rem; font-size: 1rem; cursor: pointer; }}
+</style>
+</head>
+<body>
+<h1>Authorize device</h1>
+<p>Enter the code shown in your terminal:</p>
+<form method="get" action="/oauth/device">
+<input type="text" name="user_code" placeholder="XXXX-XXXX" autofocus required>
+<button type="submit">Continue</button>
+</form>
+</body>
+</html>"#
+    )
+}
+
+/// A terminal status page (approved / denied / expired / unknown).
+fn render_device_message(title: &str, body: &str) -> String {
+    let title = html_escape(title);
+    let body = html_escape(body);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>music gateway · {title}</title>
+<style>
+{DEVICE_PAGE_CSS}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<p>{body}</p>
+</body>
+</html>"#
+    )
+}
+
+const DEVICE_PAGE_CSS: &str =
+    "body { font-family: system-ui, sans-serif; max-width: 26rem; margin: 4rem auto; padding: 0 1rem; }";
+
+/// Best-effort public base URL for this request: scheme from
+/// `X-Forwarded-Proto` (default `https`, since the gateway is always
+/// behind TLS), host from `Host`. Empty string when `Host` is absent —
+/// the verification URI then comes out relative (`/oauth/device`), which
+/// the CLI resolves against the gateway URL it already knows.
+fn request_base_url(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if host.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}://{host}")
+    }
+}
+
+fn now_unix_ms() -> i64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    i64::try_from(ms).unwrap_or(i64::MAX)
 }
