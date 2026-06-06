@@ -18,6 +18,7 @@ import {
   useState,
 } from "react";
 import { coverArtUrl, scrobble, streamUrl } from "../api/client";
+import { useAudioCache } from "../cache/AudioCacheContext";
 import { postEvents } from "../api/events";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
@@ -53,6 +54,7 @@ const Ctx = createContext<PlayerCtx | null>(null);
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const { state, trackMeta, submit } = useSync();
+  const { resolveSrc, ensureUrl, notePlayed } = useAudioCache();
   const { queue, now_playing_index, is_playing, session_anchor } = state.playback;
   // Lazy-construct on first render (not in a useEffect) so the element is
   // available to consumers — including the Scrubber that reads
@@ -192,9 +194,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.pause();
       return;
     }
-    audio.src = streamUrl(currentTrackId);
-    startTsRef.current = performance.now();
-    if (is_playing) void audio.play().catch(() => {});
+    // This effect fires from *applied sync state*, not a live click, so no
+    // autoplay gesture is at stake — we can await the cache and prefer a
+    // local blob (the offline-playback path). primePlayback handles the
+    // gesture-critical direct-click case synchronously instead.
+    let cancelled = false;
+    void (async () => {
+      const cachedUrl = await ensureUrl(currentTrackId);
+      if (cancelled) return;
+      const a = audioRef.current;
+      if (!a) return;
+      a.src = cachedUrl ?? streamUrl(currentTrackId);
+      startTsRef.current = performance.now();
+      if (is_playing) void a.play().catch(() => {});
+      // Touch (hit) or fetch-and-cache (miss) for next time.
+      notePlayed(currentTrackId);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [currentTrackId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // One-shot `playing` listener per src change emits the latency mark
@@ -475,9 +493,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         // otherwise duplicate this work later (when set_now_playing's
         // applied frame arrives), but by then the gesture is gone.
         // Setting the same src twice is cheap — the browser dedups.
-        a.src = streamUrl(track.id);
+        // resolveSrc is synchronous: a warmed blob: URL if the track is in
+        // the prefetch window, else the network stream URL.
+        a.src = resolveSrc(track.id);
         startTsRef.current = performance.now();
         void a.play().catch(() => {});
+        notePlayed(track.id);
+        // Offline safety net: if we fell back to the network URL but we're
+        // offline (so it will fail) and the track is actually cached, swap in
+        // the blob once IndexedDB resolves. No-op when online.
+        if (
+          !a.src.startsWith("blob:") &&
+          typeof navigator !== "undefined" &&
+          navigator.onLine === false
+        ) {
+          void ensureUrl(track.id).then((url) => {
+            const el = audioRef.current;
+            if (url && el && el.src !== url) {
+              el.src = url;
+              void el.play().catch(() => {});
+            }
+          });
+        }
       },
     };
   }, [
@@ -489,6 +526,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audio,
     currentTrackId,
     maybeEmitSkip,
+    resolveSrc,
+    ensureUrl,
+    notePlayed,
   ]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

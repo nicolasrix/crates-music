@@ -430,6 +430,40 @@ Diagnostics SQLite layout (`gateway-state.traces.sqlite`):
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
 
+**Web PWA + offline playback (in flight, `feat/web-pwa-offline`).**
+Brings the CLI's L3 audio cache + pinning to the web client and makes the
+SPA an installable, offline-capable PWA:
+
+- `apps/web/src/cache/` — an IndexedDB reimplementation of the
+  `crates/music-cache` contract (content-addressed `(trackId, bitrate,
+  codec)`; two-budget LRU: a regular auto-cached budget + a separate
+  never-evicted pinned budget; `put/get/touch/pin/unpin/listPinned/stats/
+  evict`). Audio is stored as whole-file blobs and served to `<audio>` via
+  `URL.createObjectURL` — chosen over a Service-Worker + Cache-API approach
+  because the gateway stream endpoint has **no HTTP Range support**, so the
+  browser must seek locally against a stored file. 15 vitest unit tests
+  (`audioCache.test.ts`, fake-indexeddb).
+- `AudioCacheContext` bridges cache↔playback. An in-memory
+  `trackId → blob:URL` map, warmed for the queue window, lets the
+  gesture-critical `primePlayback` resolve a src **synchronously**; the
+  natural-advance effect (no live gesture) awaits the cache and prefers the
+  local blob. Played tracks are auto-cached (regular budget); "save for
+  offline" pins (pinned budget) — mirrors CLI semantics.
+- UI: per-track "save for offline" in the row menu, bulk "download
+  album/playlist" buttons, a `/downloads` page (stats + pinned list + "free
+  up space" = evict), budget sliders in Settings (lowering evicts
+  immediately), and a topbar offline indicator.
+- PWA: `vite-plugin-pwa` (`registerType:autoUpdate`) precaches the app
+  shell so it boots with no network; `/v1`, `/rest`, `/oauth` are
+  NetworkOnly and audio never touches the SW. Manifest + maskable SVG icon
+  make it installable. The gateway already serves `sw.js` /
+  `manifest.webmanifest` from the static dir root (no gateway change).
+  `autoUpdate` also fixes the stale-bundle white-screen seen on deploys.
+- **Not yet browser-verified end-to-end** (offline airplane-mode launch +
+  play) — needs a real device against the gateway; install requires the
+  mkcert CA trusted on the device. Deferred: transcode-to-fit caching
+  (opus@128 to pack the ~500 MB budget; needs gateway stream-param wiring).
+
 ### Running the gateway locally
 
 ```

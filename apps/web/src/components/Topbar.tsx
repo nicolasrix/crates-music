@@ -2,11 +2,13 @@
 // breadcrumb is purely decorative for now. The sign-out and settings live on
 // the right.
 
-import { ChevronLeft, ChevronRight, Settings, LogOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, CloudOff, Settings, LogOut } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
+import { useOnline } from "../cache/useOnline";
 
 export function Topbar({ breadcrumb }: { breadcrumb?: string | undefined }) {
   const { logout } = useAuth();
+  const online = useOnline();
   return (
     <header className="topbar">
       <div className="flex gap-1">
@@ -29,6 +31,26 @@ export function Topbar({ breadcrumb }: { breadcrumb?: string | undefined }) {
       </div>
       <div className="breadcrumb">{breadcrumb ?? ""}</div>
       <div className="ml-auto flex items-center gap-1">
+        {!online && (
+          <span
+            className="text-sm"
+            title="You're offline — only downloaded and recently-played tracks will play."
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "3px 8px",
+              marginRight: 4,
+              borderRadius: "var(--radius-1, 2px)",
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              color: "var(--fg-muted)",
+            }}
+          >
+            <CloudOff size={14} strokeWidth={1.5} />
+            offline
+          </span>
+        )}
         <button
           className="arrow"
           aria-label="settings"

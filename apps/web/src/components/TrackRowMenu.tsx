@@ -12,9 +12,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
   Disc3,
+  Download,
   ListPlus,
   MoreHorizontal,
   Plus,
+  Trash2,
   User,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -24,6 +26,8 @@ import {
   createPlaylist,
   listPlaylists,
 } from "../api/client";
+import { useAudioCache } from "../cache/AudioCacheContext";
+import { formatBytes } from "../cache/format";
 import { navigate } from "../router";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
@@ -130,6 +134,31 @@ function Popover({
   const ref = useRef<HTMLDivElement>(null);
   const sync = useSync();
   const queryClient = useQueryClient();
+  const cache = useAudioCache();
+  const downloaded = cache.isDownloaded(track.id);
+  const [busy, setBusy] = useState(false);
+
+  async function toggleDownload() {
+    setBusy(true);
+    try {
+      if (downloaded) {
+        await cache.removeDownload(track.id);
+      } else {
+        const outcome = await cache.download(track.id);
+        if (outcome.kind === "would-exceed-budget") {
+          window.alert(
+            `Not enough offline space — short by ${formatBytes(outcome.overBy)}. ` +
+              `Raise the download budget in Settings.`,
+          );
+        }
+      }
+    } catch (e) {
+      window.alert(`couldn't update download: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+      onClose();
+    }
+  }
 
   // Click-outside + Escape.
   useEffect(() => {
@@ -250,6 +279,15 @@ function Popover({
             <ListPlus size={14} strokeWidth={1.5} />
             <span>add to playlist…</span>
             <ChevronRight size={14} strokeWidth={1.5} className="ml-auto" />
+          </button>
+          <div className="row-menu-sep" />
+          <button className="row-menu-item" onClick={toggleDownload} disabled={busy}>
+            {downloaded ? (
+              <Trash2 size={14} strokeWidth={1.5} />
+            ) : (
+              <Download size={14} strokeWidth={1.5} />
+            )}
+            <span>{downloaded ? "remove download" : "save for offline"}</span>
           </button>
           {(track.albumId || track.artistId) && (
             <div className="row-menu-sep" />

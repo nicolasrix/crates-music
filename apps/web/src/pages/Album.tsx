@@ -19,6 +19,7 @@ import { ArtistHeroCard } from "../components/ArtistHeroCard";
 import { EntityRating } from "../components/EntityRating";
 import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
+import { DownloadAllButton } from "../components/DownloadAllButton";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
@@ -165,6 +166,7 @@ export function Album({ id }: { id: string }) {
             <button className="icon-btn" aria-label="add to queue" title="add to queue">
               <Plus size={18} strokeWidth={1.5} />
             </button>
+            <DownloadAllButton tracks={tracks} label="download album for offline" />
             <button className="icon-btn" aria-label="more" title="more">
               <MoreHorizontal size={18} strokeWidth={1.5} />
             </button>

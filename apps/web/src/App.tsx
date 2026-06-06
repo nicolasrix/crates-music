@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { useAuth } from "./auth/AuthContext";
+import { AudioCacheProvider } from "./cache/AudioCacheContext";
 import { ArtworkProvider } from "./components/ArtworkPalette";
 import { Album } from "./pages/Album";
 import { Albums } from "./pages/Albums";
@@ -8,6 +9,7 @@ import { Artist } from "./pages/Artist";
 import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
 import { DiagnosticsHome } from "./pages/diagnostics/DiagnosticsHome";
+import { Downloads } from "./pages/Downloads";
 import { Ingest } from "./pages/diagnostics/Ingest";
 import { Listening } from "./pages/diagnostics/Listening";
 import { Recommender } from "./pages/diagnostics/Recommender";
@@ -45,16 +47,18 @@ export function App() {
 
   return (
     <SyncProvider>
-      <PlayerProvider>
-        <AutoplayProvider>
-          <ArtworkProvider>
-            <div className="shell">
-              <Routed path={path} />
-              <PlayerBar />
-            </div>
-          </ArtworkProvider>
-        </AutoplayProvider>
-      </PlayerProvider>
+      <AudioCacheProvider>
+        <PlayerProvider>
+          <AutoplayProvider>
+            <ArtworkProvider>
+              <div className="shell">
+                <Routed path={path} />
+                <PlayerBar />
+              </div>
+            </ArtworkProvider>
+          </AutoplayProvider>
+        </PlayerProvider>
+      </AudioCacheProvider>
     </SyncProvider>
   );
 }
@@ -90,6 +94,7 @@ function Routed({ path }: { path: string }) {
   if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
   if (path === "/liked") return <LikedSongs />;
+  if (path === "/downloads") return <Downloads />;
   if (path === "/station") return <Station />;
   if (path === "/settings") return <Settings />;
   if (path === "/diagnostics") return <DiagnosticsHome />;
