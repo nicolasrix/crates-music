@@ -11,6 +11,7 @@
 //! - `remove`: `Remove`      — drop a queue item by id.
 //! - `move`:   `Reorder`     — move an item to a new index.
 //! - `jump`:   `SetNowPlaying`— set the shared now-playing cursor.
+//! - `clear`:  `Clear`       — empty the queue and reset playback state.
 //!
 //! The CLI doesn't drive its own playback off sync state — that's a future
 //! integration. For now, this inspects what other devices are doing and
@@ -158,6 +159,16 @@ pub async fn run_queue(config: &Config, client: &Client) -> Result<()> {
         "paused"
     };
     println!("\n{} item(s), {state_word} (version {})", items.len(), state.version);
+    Ok(())
+}
+
+/// Empty the queue and reset shared playback (cursor, position, playing
+/// flag, session anchor). Always succeeds — `Clear` takes no arguments and
+/// the gateway never rejects it.
+pub async fn run_clear(config: &Config) -> Result<()> {
+    let gw = require_gateway(config)?;
+    let version = submit_op(gw, &http_client(gw)?, &SyncOp::Clear).await?;
+    println!("cleared queue (version {version})");
     Ok(())
 }
 

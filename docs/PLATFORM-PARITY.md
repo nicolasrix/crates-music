@@ -64,7 +64,7 @@ that distinction:
 | Append to queue | ✅ | ✅ `sync push` | 🔭 |
 | Reorder / move | ✅ | ✅ `sync move` (alias `reorder`) | 🔭 |
 | Remove a queue item | ✅ | ✅ `sync remove` | 🔭 |
-| Clear whole queue | ✅ | ❌ (`Clear` op exists, no command) | 🔭 |
+| Clear whole queue | ✅ | ✅ `sync clear` | 🔭 |
 | Jump to track | ✅ | ✅ `sync jump <index>` | 🔭 |
 
 ### Cache & pinning (client-local)
@@ -128,7 +128,7 @@ that distinction:
 | Capability | Web | CLI | Android |
 |---|:--:|:--:|:--:|
 | Read sync snapshot | ✅ | ✅ `sync state` / `sync queue` | 🔭 |
-| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump | 🔭 |
+| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump / clear | 🔭 |
 | Live WebSocket updates | ✅ | ✅ `sync watch` | 🔭 |
 | Optimistic UI + rollback | ✅ | 🚫 | 🔭 |
 
@@ -179,8 +179,8 @@ subcommands onto endpoints that already exist. Rough priority:
 5. ~~**Queue management** — reorder / remove / jump via sync ops.~~
    **Done** — `sync queue` (readable view with resolved titles + ▶
    now-playing marker), `sync remove`, `sync move` (alias `reorder`),
-   `sync jump <index>`. All ops already existed in `music-sync`; this was
-   pure client surface. Clear-whole-queue (`Clear` op) is still unwired.
+   `sync jump <index>`, `sync clear`. All ops already existed in
+   `music-sync`; this was pure client surface.
 6. **Auth** — Device Authorization Grant (RFC 8628) to replace the
    static bearer token.
 

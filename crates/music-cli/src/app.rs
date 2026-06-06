@@ -108,6 +108,7 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
                 new_index,
             } => crate::sync::run_move(&config, &item_id, new_index).await?,
             SyncAction::Jump { index } => crate::sync::run_jump(&config, index).await?,
+            SyncAction::Clear => crate::sync::run_clear(&config).await?,
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
     }

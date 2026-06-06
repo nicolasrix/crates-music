@@ -197,6 +197,10 @@ pub enum SyncAction {
         /// 0-based queue position to make current.
         index: usize,
     },
+    /// Empty the whole queue and reset shared playback: clears the
+    /// now-playing cursor and position, stops playback, and drops the
+    /// session anchor. Affects every device.
+    Clear,
     /// Open the WebSocket and stream every server message to stdout
     /// as JSON, one frame per line. Run with Ctrl-C to exit.
     Watch,
