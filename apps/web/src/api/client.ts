@@ -6,6 +6,7 @@
 
 import { refreshTokens } from "../auth/oauth";
 import { clearTokens, readTokens } from "../auth/tokens";
+import { codecFromContentType } from "../cache/audioKey";
 import {
   Album,
   AlbumWithTracks,
@@ -334,6 +335,22 @@ export function streamUrl(trackId: string): string {
   const tokens = readTokens();
   const auth = tokens ? `&access_token=${encodeURIComponent(tokens.accessToken)}` : "";
   return `/rest/stream?id=${encodeURIComponent(trackId)}${auth}`;
+}
+
+// Download a full track for the offline cache. Unlike streamUrl (which is
+// consumed by an <audio> element and so passes ?access_token=), this goes
+// through apiFetch with an Authorization header and token-refresh, and
+// returns the bytes plus the codec the server actually served (derived
+// from Content-Type — the web Track type carries no suffix). Caller stores
+// it keyed by (trackId, bitrate=null, codec).
+export async function fetchTrackBlob(
+  trackId: string,
+): Promise<{ blob: Blob; codec: string }> {
+  const res = await apiFetch(`/rest/stream?id=${encodeURIComponent(trackId)}`);
+  if (!res.ok) throw new Error(`stream HTTP ${res.status}`);
+  const blob = await res.blob();
+  const codec = codecFromContentType(res.headers.get("content-type"));
+  return { blob, codec };
 }
 
 export function coverArtUrl(

@@ -14,6 +14,7 @@ This directory is the onboarding entry point. Follow the docs in this order:
 | [GETTING-STARTED.md](./GETTING-STARTED.md) | Bring up the gateway, the web app, and (optionally) the embedder on your machine |
 | [CONFIGURATION.md](./CONFIGURATION.md) | Every field of `gateway.toml`, all environment variables, and what each script in `scripts/` does |
 | [API.md](./API.md) | Every endpoint the gateway exposes, with example requests |
+| [PLATFORM-PARITY.md](./PLATFORM-PARITY.md) | What each client (web / CLI / Android) can do today — the feature matrix |
 | [TESTING.md](./TESTING.md) | How tests are organised; how to run a single test or the whole suite |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Run the gateway + embedder in containers (`docker compose`). Operator guide. |
 
