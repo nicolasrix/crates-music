@@ -2,12 +2,14 @@
 
 **Path:** `crates/music-cache/`
 **Type:** library
-**Test count:** 35
+**Test count:** 37
 
 Two caches in one crate:
 
-1. **L2 metadata cache** — SQLite-backed, ETag-keyed. Stores the JSON
-   bodies of cacheable browse responses (`getAlbumList2`, `getAlbum`).
+1. **L2 metadata cache** — SQLite-backed, ETag-keyed. Stores the
+   opaque bodies of cacheable browse responses (`getAlbumList2`,
+   `getAlbum`, `getArtists`, `getArtist`, `search3`) **and** cover-art
+   bytes (keyed under a `getCoverArt|` prefix).
 2. **L3 audio cache** — content-addressed file cache. Stores encoded
    audio files keyed by `(track_id, bitrate, codec)`.
 
@@ -18,25 +20,32 @@ cache; the L3 cache is a pinning-aware file LRU.
 ## L2 metadata cache
 
 ```rust
-use music_cache::{Cache, etag_for};
+use music_cache::Cache;
 
-let cache = Cache::open("gateway-cache.sqlite").await?;
+let cache = Cache::open(Path::new("gateway-cache.sqlite")).await?;
 
 // Try fresh cache first
-if let Some(entry) = cache.get("album:abc").await? {
-    if cache.is_fresh(&entry, ttl) {
+if let Some(entry) = cache.get("getAlbum|id=123").await? {
+    if entry.is_fresh(SystemTime::now()) {
         return Ok(entry.body);
     }
-    // Stale: revalidate with If-None-Match: entry.etag
+    // Stale: revalidate upstream with If-None-Match: entry.etag
 }
 
-// On miss or 200 from upstream:
-let etag = etag_for(&body);
-cache.put("album:abc", &body, &etag).await?;
+// On miss or 200 from upstream — the etag is computed internally
+// (sha256(body) truncated, see `etag_for`):
+cache.put("getAlbum|id=123", body, ttl).await?;
 ```
 
 The cache stores opaque bytes. Whatever wraps it (in the gateway
 proxy handler) decides what JSON shape goes in.
+
+`get` and `put` are `#[tracing::instrument]`ed as `cache.lookup`
+(records `hit`) and `cache.write` (records `bytes`), feeding the
+diagnostics trace store. The gateway runs `put` **off the request hot
+path** — the response is returned to the client before the cache write
+is awaited — so a slow disk write never adds to user-perceived
+latency.
 
 ### ETags
 
@@ -75,21 +84,56 @@ we mark the entry fresh again without re-downloading.
 This is the cheapest possible cache strategy: TTL bounds the *check*
 rate, ETags bound the *transfer* rate.
 
+### Bulk invalidation & cover-art self-healing
+
+Beyond per-key `delete`, the L2 cache exposes etag- and prefix-scoped
+sweeps:
+
+```rust
+cache.keys_with_etag(etag).await?;        // every key whose body hashes to etag
+cache.delete_keys_with_etag(etag).await?; // flush all copies of one body
+cache.clear_browse().await?;              // drop everything except getCoverArt|…
+cache.clear_covers().await?;              // drop only getCoverArt|… entries
+```
+
+`clear_browse` is what `POST /v1/admin/cache/invalidate` calls (gateway
+side) to force a refetch of browse responses without waiting out
+`browse_ttl_seconds`; cover art is left alone because its keys are
+already content-addressed by Navidrome's `coverArt` ids.
+
+The etag pair powers **cover-art placeholder self-healing**. Navidrome
+serves the same default "no artwork" image for any track without
+embedded art, so that body shows up in the cache under many distinct
+`getCoverArt|…` keys with one shared etag. When the gateway classifier
+identifies a hash as the placeholder, `delete_keys_with_etag` flushes
+every cached copy so subsequent requests re-run through detection and
+get the SVG substitute. (The classifier itself and the SVG substitution
+live gateway-side, not in this crate — this crate only provides the
+etag-scoped storage primitives.)
+
 ### Tables
 
 ```sql
-CREATE TABLE entries (
-    key         TEXT PRIMARY KEY,
-    body        BLOB NOT NULL,
-    etag        TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    accessed_at INTEGER NOT NULL
+CREATE TABLE cache_entries (
+    key          TEXT PRIMARY KEY NOT NULL,
+    etag         TEXT NOT NULL,
+    body         BLOB NOT NULL,
+    fetched_at   INTEGER NOT NULL,  -- unix epoch seconds
+    ttl_seconds  INTEGER NOT NULL CHECK (ttl_seconds >= 0)
 );
+CREATE INDEX cache_entries_fetched_at_idx ON cache_entries(fetched_at);
 ```
 
-`accessed_at` is updated on each read, in service of a future LRU
-eviction. There's no eviction yet — it's not needed at single-user
-scale where the metadata DB is in the dozens of MB.
+The same `cache_entries` table backs both browse JSON and cover-art
+bytes; the two are distinguished only by key prefix (`getCoverArt|…`
+for art, otherwise a browse key).
+
+TTL freshness is decided per-entry from `fetched_at + ttl_seconds`
+(see `Entry::is_fresh(now)`), not from a `created_at`/`accessed_at`
+pair. There's no LRU eviction yet — it's not needed at single-user
+scale where the metadata DB is in the dozens of MB. `expire_before`
+trims entries past their deadline; the `fetched_at` index keeps that
+sweep cheap.
 
 ## L3 audio cache
 
@@ -161,11 +205,12 @@ connection. Production never uses this — it's strictly a test seam.
 
 ## Tests
 
-35 tests. Each test gets a `tempfile::tempdir()` so file paths don't
-collide. Coverage:
+37 tests (24 in `tests/audio.rs`, 13 in `tests/cache.rs`). Each test
+gets a `tempfile::tempdir()` so file paths don't collide. Coverage:
 
 - L2: put/get/expire round-trips, ETag computation, TTL semantics,
-  stale-but-revalidatable entries.
+  stale-but-revalidatable entries, and `clear_browse` keeping
+  `getCoverArt|` keys while dropping browse keys.
 - L3: put/get/delete, pinning, eviction, budget arithmetic, pinned
   budget overflow returns an error rather than evicting silently.
 
