@@ -9,14 +9,18 @@
 //   • Direction (travel) — how fast it moves on to new territory.
 // Plus the diversity λ and the master autoplay toggle.
 
-import { HardDrive, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { HardDrive, RotateCcw, SlidersHorizontal, Smartphone } from "lucide-react";
 import { useState } from "react";
 
 import { useAudioCache } from "../cache/AudioCacheContext";
+import { useInstallPrompt } from "../pwa/installPrompt";
 import {
   CACHE_BOUNDS,
   CacheSettings,
+  DOWNLOAD_QUALITIES,
+  DownloadQuality,
   loadCacheSettings,
+  normalizeCacheSettings,
   saveCacheSettings,
 } from "../cache/cacheSettings";
 import { formatBytes } from "../cache/format";
@@ -193,6 +197,12 @@ function StorageKnob({
   );
 }
 
+const QUALITY_LABELS: Record<DownloadQuality, string> = {
+  original: "original (no transcode)",
+  opus128: "opus · 128 kbps (smallest)",
+  mp3128: "mp3 · 128 kbps (most compatible)",
+};
+
 export function Settings() {
   const { autoplay, setAutoplay, settings, setSettings } = useAutoplay();
   const cache = useAudioCache();
@@ -202,11 +212,17 @@ export function Settings() {
     setSettings({ ...settings, [key]: v });
 
   const updateCache = (key: keyof CacheSettings, v: number) => {
-    const next = { ...cacheSettings, [key]: v };
+    const next = normalizeCacheSettings({ ...cacheSettings, [key]: v });
     setCacheSettingsState(next);
     saveCacheSettings(next);
     // Lowering a cap must evict immediately and visibly (no-op if under).
     void cache.evictToBudget();
+  };
+
+  const updateQuality = (q: DownloadQuality) => {
+    const next = { ...cacheSettings, downloadQuality: q };
+    setCacheSettingsState(next);
+    saveCacheSettings(next);
   };
 
   const renderGroup = (title: string, knobs: KnobMeta[]) => (
@@ -317,7 +333,92 @@ export function Settings() {
           bounds={CACHE_BOUNDS.regularBudgetBytes}
           onChange={(v) => updateCache("regularBudgetBytes", v)}
         />
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <label htmlFor="download-quality" style={{ fontWeight: 500 }}>
+              Offline audio quality
+            </label>
+            <select
+              id="download-quality"
+              value={cacheSettings.downloadQuality}
+              onChange={(e) => updateQuality(e.target.value as DownloadQuality)}
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-1, 2px)",
+                color: "var(--fg)",
+                padding: "4px 8px",
+              }}
+            >
+              {DOWNLOAD_QUALITIES.map((q) => (
+                <option key={q} value={q}>
+                  {QUALITY_LABELS[q]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
+            Newly cached audio is transcoded server-side to this target —
+            Opus 128 packs roughly 8× more music into the budget than FLAC
+            originals. Already-cached tracks keep their current quality.
+            Streaming playback is unaffected.
+          </p>
+        </div>
       </div>
+
+      <InstallSection />
     </Layout>
+  );
+}
+
+// "Install as app" — only rendered when actionable: hidden once running
+// standalone, and hidden on browsers that neither fire
+// beforeinstallprompt nor have a manual path we can describe (iOS).
+function InstallSection() {
+  const { canInstall, isStandalone, isIos, promptInstall } = useInstallPrompt();
+  if (isStandalone || (!canInstall && !isIos)) return null;
+  return (
+    <div className="section" style={{ marginTop: 24 }}>
+      <div className="section-head">
+        <h3 style={{ margin: 0 }}>
+          <Smartphone
+            size={16}
+            strokeWidth={1.5}
+            style={{ verticalAlign: "-3px", marginRight: 8 }}
+          />
+          Install as app
+        </h3>
+      </div>
+      <p className="text-fg-muted text-sm" style={{ marginBottom: 12 }}>
+        Adds crates to your home screen / app list. It opens in its own
+        window and launches offline.
+      </p>
+      {canInstall ? (
+        <button
+          type="button"
+          onClick={() => void promptInstall()}
+          className="text-sm"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "8px 14px",
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-1, 2px)",
+            color: "var(--fg)",
+            cursor: "pointer",
+          }}
+        >
+          <Smartphone size={14} strokeWidth={1.5} />
+          install
+        </button>
+      ) : (
+        <p className="text-fg-muted text-sm">
+          On iOS: open the <strong>Share</strong> menu and choose{" "}
+          <strong>Add to Home Screen</strong>.
+        </p>
+      )}
+    </div>
   );
 }

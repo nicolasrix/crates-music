@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { registerSW } from "virtual:pwa-register";
 import { App } from "./App";
 import { AuthProvider } from "./auth/AuthContext";
+// Side effect: starts listening for `beforeinstallprompt` before React
+// mounts — the event fires once, early, and Settings offers it as a button.
+import "./pwa/installPrompt";
 import "./index.css";
 
 // Register the service worker (precached app shell → offline launch). With

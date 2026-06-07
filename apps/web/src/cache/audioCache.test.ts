@@ -7,11 +7,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { AudioCache } from "./audioCache";
 import { type AudioKey } from "./audioKey";
-import { type CacheSettings } from "./cacheSettings";
+import { type CacheBudgets } from "./cacheSettings";
 
 let dbSeq = 0;
 
-function makeCache(budgets: CacheSettings) {
+function makeCache(budgets: CacheBudgets) {
   // Unique db per cache so tests don't share state.
   const dbName = `test-audio-${dbSeq++}`;
   let t = 0;

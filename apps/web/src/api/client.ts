@@ -342,11 +342,21 @@ export function streamUrl(trackId: string): string {
 // through apiFetch with an Authorization header and token-refresh, and
 // returns the bytes plus the codec the server actually served (derived
 // from Content-Type — the web Track type carries no suffix). Caller stores
-// it keyed by (trackId, bitrate=null, codec).
+// it keyed by (trackId, bitrate, codec).
+//
+// `quality` (transcode-to-fit): forwarded verbatim through the gateway's
+// /rest proxy to Navidrome's stream endpoint, which transcodes server-side
+// — the same params the ingest fetcher uses. Omitted = passthrough original.
 export async function fetchTrackBlob(
   trackId: string,
+  quality?: { format: string; maxBitRate: number } | null,
 ): Promise<{ blob: Blob; codec: string }> {
-  const res = await apiFetch(`/rest/stream?id=${encodeURIComponent(trackId)}`);
+  const params = new URLSearchParams({ id: trackId });
+  if (quality) {
+    params.set("format", quality.format);
+    params.set("maxBitRate", String(quality.maxBitRate));
+  }
+  const res = await apiFetch(`/rest/stream?${params.toString()}`);
   if (!res.ok) throw new Error(`stream HTTP ${res.status}`);
   const blob = await res.blob();
   const codec = codecFromContentType(res.headers.get("content-type"));

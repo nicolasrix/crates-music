@@ -19,7 +19,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 
 import { type AudioKey, canonicalKey } from "./audioKey";
-import { type CacheSettings, loadCacheSettings } from "./cacheSettings";
+import { type CacheBudgets, loadCacheSettings } from "./cacheSettings";
 
 export interface AudioEntry {
   key: string;
@@ -92,14 +92,14 @@ function toEntry(r: MetaRecord): AudioEntry {
 interface AudioCacheOptions {
   dbName?: string;
   /** Read live budgets on each call so Settings changes are picked up. */
-  budgets?: () => CacheSettings;
+  budgets?: () => CacheBudgets;
   /** Injectable clock — tests use a monotonic counter for deterministic LRU. */
   now?: () => number;
 }
 
 export class AudioCache {
   private readonly dbName: string;
-  private readonly budgets: () => CacheSettings;
+  private readonly budgets: () => CacheBudgets;
   private readonly now: () => number;
   private dbPromise: Promise<IDBPDatabase<CacheDB>> | null = null;
   private persistTried = false;

@@ -30,6 +30,17 @@ import {
   getAudioCache,
   type PinOutcome,
 } from "./audioCache";
+import { loadCacheSettings, qualityParams } from "./cacheSettings";
+
+// Fetch a track at the user's configured offline quality and return the
+// triple to store it under. Settings are read at call time (cheap
+// localStorage read) so a quality change applies to the next fetch without
+// a reload. Already-cached variants are never re-fetched or migrated.
+async function fetchAtConfiguredQuality(trackId: string) {
+  const q = qualityParams(loadCacheSettings().downloadQuality);
+  const { blob, codec } = await fetchTrackBlob(trackId, q);
+  return { blob, codec, bitrate: q ? q.maxBitRate : null };
+}
 
 // How many upcoming queue items to pre-resolve into blob URLs (plus the one
 // behind, for a quick prev). Bounds the number of live object URLs / pinned
@@ -128,8 +139,8 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       if (fetchInflight.current.has(trackId)) return;
       fetchInflight.current.add(trackId);
       try {
-        const { blob, codec } = await fetchTrackBlob(trackId);
-        await cache.put({ trackId, bitrate: null, codec }, blob);
+        const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
+        await cache.put({ trackId, bitrate, codec }, blob);
         bump();
       } catch {
         /* offline / auth / network — leave the track uncached */
@@ -159,8 +170,8 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       let meta = await cache.getMetaByTrack(trackId);
       if (!meta) {
         // Fetch then store; let a network failure propagate to the caller.
-        const { blob, codec } = await fetchTrackBlob(trackId);
-        meta = await cache.put({ trackId, bitrate: null, codec }, blob);
+        const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
+        meta = await cache.put({ trackId, bitrate, codec }, blob);
       }
       const outcome = await cache.pin(meta.key);
       await refreshDownloaded();
