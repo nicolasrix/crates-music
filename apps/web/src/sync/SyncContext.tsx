@@ -14,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { getSong } from "../api/client";
 import { Track } from "../api/types";
 import { readTokens } from "../auth/tokens";
 import { applyOp } from "./apply";
@@ -60,7 +61,11 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   // only a subset; start_session makes it a binary "empty queue" miss.
   const outboxRef = useRef<SyncOp[]>([]);
   const trackMetaRef = useRef<Map<string, Track>>(new Map());
-  const [, forceMetaTick] = useState(0);
+  // Bumped whenever trackMeta gains entries; included in the context
+  // value's memo deps so consumers re-render on metadata arrival even
+  // when no sync-state change accompanies it (the hydration path).
+  const [metaTick, forceMetaTick] = useState(0);
+  const metaInflight = useRef<Set<string>>(new Set());
 
   const tokens = readTokens();
   const accessToken = tokens?.accessToken;
@@ -110,6 +115,36 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     };
   }, [accessToken]);
 
+  // Hydrate metadata for queue items we didn't push ourselves. trackMeta
+  // is in-memory only, so after a page reload (the *normal* lifecycle for
+  // an installed PWA) a snapshot-restored queue has ids but no titles —
+  // which blanks the player bar, Media Session, and the queue rows' menus.
+  // Backfill via getSong, deduped against in-flight fetches. A failed
+  // fetch is retried only on the next queue change (no hot loop offline).
+  useEffect(() => {
+    const missing = [
+      ...new Set(state.playback.queue.items.map((it) => it.track_id)),
+    ].filter(
+      (id) => !trackMetaRef.current.has(id) && !metaInflight.current.has(id),
+    );
+    if (missing.length === 0) return;
+    for (const id of missing) metaInflight.current.add(id);
+    void Promise.all(
+      missing.map(async (id) => {
+        try {
+          const t = await getSong(id);
+          trackMetaRef.current.set(id, t);
+          return true;
+        } catch {
+          metaInflight.current.delete(id);
+          return false;
+        }
+      }),
+    ).then((results) => {
+      if (results.some(Boolean)) forceMetaTick((n) => n + 1);
+    });
+  }, [state.playback.queue.items]);
+
   const submit = useCallback((op: SyncOp) => {
     const ws = wsRef.current;
     // If the socket isn't open yet (race during connect/reconnect),
@@ -158,7 +193,8 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       startSession,
       ready,
     }),
-    [state, ready, submit, pushTrack, startSession],
+    // metaTick: trackMeta is a mutable ref; the tick is its change signal.
+    [state, ready, submit, pushTrack, startSession, metaTick],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
