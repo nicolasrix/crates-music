@@ -22,7 +22,7 @@ export default defineConfig({
       registerType: "autoUpdate",
       // We call registerSW() ourselves in main.tsx — don't also inject a tag.
       injectRegister: false,
-      includeAssets: ["icon.svg"],
+      includeAssets: ["icon.svg", "icon-192.png", "icon-512.png", "apple-touch-icon.png"],
       manifest: {
         name: "crates music",
         short_name: "crates",
@@ -35,6 +35,12 @@ export default defineConfig({
         icons: [
           { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
           { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" },
+          // PNG fallbacks — Chromium installs fine with SVG-only, but some
+          // Android launchers and all of iOS want raster icons. Generated
+          // from icon.svg via rsvg-convert (full-bleed bg → maskable-safe).
+          { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
       },
       workbox: {
