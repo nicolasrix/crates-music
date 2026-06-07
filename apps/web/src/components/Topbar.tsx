@@ -1,17 +1,35 @@
 // Sticky 56px topbar inside <main>. Back/forward arrows drive history; the
 // breadcrumb is purely decorative for now. The sign-out and settings live on
-// the right.
+// the right. On phones a hamburger (hidden on desktop via .menu-btn CSS)
+// opens the sidebar drawer.
 
-import { ChevronLeft, ChevronRight, CloudOff, Settings, LogOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, CloudOff, Menu, Settings, LogOut } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { useOnline } from "../cache/useOnline";
 
-export function Topbar({ breadcrumb }: { breadcrumb?: string | undefined }) {
+interface TopbarProps {
+  breadcrumb?: string | undefined;
+  /** True while the sidebar drawer is open (mobile only). */
+  navOpen?: boolean;
+  /** Opens the sidebar drawer. */
+  onMenu?: () => void;
+}
+
+export function Topbar({ breadcrumb, navOpen, onMenu }: TopbarProps) {
   const { logout } = useAuth();
   const online = useOnline();
   return (
     <header className="topbar">
       <div className="flex gap-1">
+        <button
+          className="arrow menu-btn"
+          onClick={onMenu}
+          aria-label="menu"
+          aria-expanded={navOpen ?? false}
+          title="menu"
+        >
+          <Menu size={16} strokeWidth={1.5} />
+        </button>
         <button
           className="arrow"
           onClick={() => history.back()}

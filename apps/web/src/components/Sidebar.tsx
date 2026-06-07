@@ -102,7 +102,17 @@ const SYSTEM: NavItem[] = [
   },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  /** Drawer state — only meaningful ≤768px where the sidebar is
+   *  off-canvas; on desktop the class has no effect. */
+  open?: boolean;
+  /** Called when a navigation inside the sidebar should dismiss the
+   *  drawer (same-page navigations don't remount Layout, so closing
+   *  can't rely on remount alone). */
+  onClose?: () => void;
+}
+
+export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
   const { path, search } = useRoute();
   const isParentActive = (item: NavItem) => {
     if (item.prefix && (path === item.prefix || path.startsWith(item.prefix + "/"))) return true;
@@ -133,6 +143,7 @@ export function Sidebar() {
     const q = query.trim();
     if (q.length === 0) return;
     navigate(`/search?q=${encodeURIComponent(q)}`);
+    onClose?.(); // it's a navigation — dismiss the drawer like a link click
   }
 
   const queryClient = useQueryClient();
@@ -172,7 +183,15 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="sidebar">
+    <aside
+      className={`sidebar ${open ? "is-open" : ""}`}
+      // Delegated close-on-navigate: any anchor click inside the drawer
+      // (nav items, sub-items, playlists) dismisses it. Buttons (search
+      // submit, new-playlist) intentionally keep it open.
+      onClick={(e) => {
+        if (onClose && (e.target as HTMLElement).closest("a")) onClose();
+      }}
+    >
       <div className="brand">
         <BrandMark size={28} />
         <span className="word">crates</span>
