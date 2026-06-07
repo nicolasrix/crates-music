@@ -19,7 +19,7 @@ import {
   Trash2,
   User,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   addTrackToPlaylist,
@@ -32,17 +32,32 @@ import { navigate } from "../router";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 
+/** Caller-supplied entry rendered at the top of the root menu view.
+ *  Used by the Queue page for reorder actions — on phones the chevron
+ *  buttons are hidden (≤640px), so the menu is the touch-reachable path. */
+export type RowMenuExtraItem = {
+  key: string;
+  label: string;
+  icon?: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+};
+
 /**
  * @param showQueueActions  Whether to render "play next" / "add to queue".
  *   Default `true`. Set to `false` for rows whose track is *already* in
  *   the queue (the Queue page) — those actions don't make sense there.
+ * @param extraItems  Optional caller-supplied entries prepended to the
+ *   root view (the menu closes itself after invoking one).
  */
 export function TrackRowMenu({
   track,
   showQueueActions = true,
+  extraItems,
 }: {
   track: Track;
   showQueueActions?: boolean;
+  extraItems?: RowMenuExtraItem[];
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"root" | "playlists">("root");
@@ -106,6 +121,7 @@ export function TrackRowMenu({
           setView={setView}
           track={track}
           showQueueActions={showQueueActions}
+          extraItems={extraItems}
         />
       )}
     </>
@@ -123,6 +139,7 @@ function Popover({
   setView,
   track,
   showQueueActions,
+  extraItems,
 }: {
   coords: PopoverCoords;
   onClose: () => void;
@@ -130,6 +147,7 @@ function Popover({
   setView: (v: "root" | "playlists") => void;
   track: Track;
   showQueueActions: boolean;
+  extraItems?: RowMenuExtraItem[] | undefined;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const sync = useSync();
@@ -260,6 +278,25 @@ function Popover({
     >
       {view === "root" && (
         <>
+          {extraItems && extraItems.length > 0 && (
+            <>
+              {extraItems.map((it) => (
+                <button
+                  key={it.key}
+                  className="row-menu-item"
+                  disabled={it.disabled}
+                  onClick={() => {
+                    it.onClick();
+                    onClose();
+                  }}
+                >
+                  {it.icon}
+                  <span>{it.label}</span>
+                </button>
+              ))}
+              <div className="row-menu-sep" />
+            </>
+          )}
           {showQueueActions && (
             <>
               <button className="row-menu-item" onClick={playNext}>
