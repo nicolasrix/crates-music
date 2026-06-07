@@ -246,6 +246,7 @@ fn render_login(error: Option<&str>, next: Option<&str>) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>music gateway · sign in</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 22rem; margin: 4rem auto; padding: 0 1rem; }}
@@ -258,7 +259,7 @@ input, button {{ padding: 0.5rem; font-size: 1rem; }}
 <h1>music gateway</h1>
 {error_block}
 <form method="post" action="/oauth/login{action_query}">
-<label>master password<input type="password" name="password" required autofocus></label>
+<label>master password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
 <button type="submit">sign in</button>
 </form>
 </body>
@@ -970,6 +971,7 @@ fn render_device_confirm(user_code: &str, client_id: &str) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>music gateway · authorize device</title>
 <style>
 {DEVICE_PAGE_CSS}
@@ -1008,6 +1010,7 @@ fn render_device_entry() -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>music gateway · authorize device</title>
 <style>
 {DEVICE_PAGE_CSS}
@@ -1020,7 +1023,7 @@ button {{ padding: 0.6rem; font-size: 1rem; cursor: pointer; }}
 <h1>Authorize device</h1>
 <p>Enter the code shown in your terminal:</p>
 <form method="get" action="/oauth/device">
-<input type="text" name="user_code" placeholder="XXXX-XXXX" autofocus required>
+<input type="text" name="user_code" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required>
 <button type="submit">Continue</button>
 </form>
 </body>
@@ -1037,6 +1040,7 @@ fn render_device_message(title: &str, body: &str) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>music gateway · {title}</title>
 <style>
 {DEVICE_PAGE_CSS}
