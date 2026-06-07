@@ -423,14 +423,67 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (!a || details.seekTime === undefined) return;
       a.currentTime = details.seekTime;
     });
+    // ±N s nudges from headphone / watch / notification controls. The OS
+    // supplies seekOffset when the surface has a preference; 10 s is the
+    // conventional fallback.
+    ms.setActionHandler("seekbackward", (details) => {
+      const a = audioRef.current;
+      if (!a) return;
+      a.currentTime = Math.max(0, a.currentTime - (details.seekOffset ?? 10));
+    });
+    ms.setActionHandler("seekforward", (details) => {
+      const a = audioRef.current;
+      if (!a) return;
+      const dur = Number.isFinite(a.duration) ? a.duration : Infinity;
+      a.currentTime = Math.min(dur, a.currentTime + (details.seekOffset ?? 10));
+    });
     return () => {
       ms.setActionHandler("play", null);
       ms.setActionHandler("pause", null);
       ms.setActionHandler("nexttrack", null);
       ms.setActionHandler("previoustrack", null);
       ms.setActionHandler("seekto", null);
+      ms.setActionHandler("seekbackward", null);
+      ms.setActionHandler("seekforward", null);
     };
   }, [now_playing_index, queue.items, submit, maybeEmitSkip]);
+
+  // Position state: the lock-screen / notification scrubber only renders
+  // a progress bar if we report it. The OS extrapolates position from
+  // playbackRate between calls, so we only need to re-report on
+  // discontinuities (metadata arrival, seeks, play/pause, rate changes) —
+  // not every timeupdate.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
+    const ms = navigator.mediaSession;
+    const audio = audioRef.current;
+    if (!audio || !currentTrackId) return;
+    const report = () => {
+      // setPositionState throws on non-finite duration (e.g. before
+      // metadata, or live streams) — skip those ticks.
+      if (!Number.isFinite(audio.duration)) return;
+      try {
+        ms.setPositionState({
+          duration: audio.duration,
+          position: Math.min(audio.currentTime, audio.duration),
+          playbackRate: audio.playbackRate,
+        });
+      } catch {
+        // Older engines without setPositionState, or transient bad values.
+      }
+    };
+    const events = ["loadedmetadata", "durationchange", "seeked", "play", "pause", "ratechange"];
+    for (const ev of events) audio.addEventListener(ev, report);
+    report();
+    return () => {
+      for (const ev of events) audio.removeEventListener(ev, report);
+      try {
+        ms.setPositionState();
+      } catch {
+        // ignore
+      }
+    };
+  }, [currentTrackId]);
 
   // Auto-advance on end. Submitting an op rather than mutating local
   // state keeps the gateway authoritative.
