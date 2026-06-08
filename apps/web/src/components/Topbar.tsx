@@ -6,6 +6,7 @@
 import { ChevronLeft, ChevronRight, CloudOff, Menu, Settings, LogOut } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { useOnline } from "../cache/useOnline";
+import { navigate } from "../router";
 
 interface TopbarProps {
   breadcrumb?: string | undefined;
@@ -73,9 +74,7 @@ export function Topbar({ breadcrumb, navOpen, onMenu }: TopbarProps) {
           className="arrow"
           aria-label="settings"
           title="settings"
-          onClick={() => {
-            /* settings not implemented yet */
-          }}
+          onClick={() => navigate("/settings")}
         >
           <Settings size={16} strokeWidth={1.5} />
         </button>

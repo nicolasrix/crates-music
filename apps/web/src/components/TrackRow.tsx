@@ -80,6 +80,13 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
         )}
         <td className="col-title is-clickable" onClick={() => onPlay(index)}>
           {t.title}
+          {/* Phone-only second line: the dedicated artist column is
+              hidden at ≤640px (see components.css) and the artist is
+              stacked under the title instead — the standard mobile list
+              row. Plain text, not a Link, so it can't fight the row's
+              play-on-tap; artist navigation stays reachable via the row
+              menu's "go to artist". */}
+          <span className="row-sub-artist">{t.artist ?? "—"}</span>
         </td>
         <td className="col-artist">
           {t.artistId && t.artist ? (

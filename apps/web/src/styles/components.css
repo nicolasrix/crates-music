@@ -558,6 +558,9 @@ a.tile-title:hover {
    the row's left edge. */
 .tracks .col-cover:first-child { padding-left: var(--space-4); }
 .tracks .col-title { color: var(--fg); }
+/* Phone-only artist sub-line inside the title cell; hidden on desktop
+   where the dedicated .col-artist column is shown instead. */
+.row-sub-artist { display: none; }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
 /* When the artist or album cell wraps a navigation link, mirror the
@@ -1622,6 +1625,29 @@ a.search-hero-title:hover {
   }
   .topbar .menu-btn { display: inline-flex; }
   .topbar { padding: 0 var(--space-3); }
+
+  /* Reclaim horizontal space. The 48px (--space-7) gutters on .section /
+     .hero are a desktop luxury; on a ~390px phone they ate ~25% of the
+     width and squeezed tables, cards, and the hero into a narrow column.
+     Drop to 16px so content runs near edge-to-edge. */
+  .section { padding: var(--space-4) var(--space-4); }
+  /* Title + action-button rows wrap instead of overflowing when a long
+     heading meets a button (e.g. "downloads & cache" + "free up space"). */
+  .section .section-head { flex-wrap: wrap; row-gap: var(--space-2); }
+  /* Stack the hero: cover on top, meta below. The desktop layout pins
+     the cover beside the meta with align-items:flex-end — at phone width
+     the short cover floats mid-column while the title wraps above it,
+     an awkward L-shape. A vertical stack reads as a normal mobile header
+     and lets the artwork be a proper focal point again. */
+  .hero {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: var(--space-5) var(--space-4) var(--space-4);
+    gap: var(--space-4);
+  }
+  .hero .cover-lg { width: 160px; height: 160px; }
+  .hero h1 { font-size: var(--text-display-sm); }
+  .hero .actions { flex-wrap: wrap; }
 }
 /* Backdrop behind the open drawer. Rendered by Layout only while the
    drawer is open; display gated to the drawer breakpoint so a rotate-
@@ -1672,18 +1698,53 @@ a.search-hero-title:hover {
   .tracks { table-layout: fixed; }
   .tracks .col-num { display: none; }
   .tracks .col-time { width: 52px; }
-  .tracks .col-artist { width: 34%; }
+  /* Stack artist under the title (see TrackRow.tsx) and drop the
+     separate artist column — fixed columns wasted a wide gap between a
+     short title and the artist while truncating long titles. The title
+     now owns the full row width; the artist rides underneath. Scoped
+     with :has() to tables that actually render the stacked sub-line
+     (track lists, queue) so AlbumTable / diagnostics tables, which have
+     no sub-line, keep their artist column. */
+  .tracks:has(.row-sub-artist) .col-artist { display: none; }
+  /* Any still-visible artist column (AlbumTable) keeps truncating. */
   .tracks .col-title,
   .tracks .col-artist {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .tracks .col-title .row-sub-artist {
+    display: block;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Denser rows: trim the 12px vertical cell padding to 8px and shrink
+     the cover thumb a touch so more tracks fit per screen. The cover
+     cell (36px thumb + 8px) sets a 44px floor — kept deliberately at
+     the 44px touch-target minimum, since the whole row plays on tap. */
   .tracks thead th,
-  .tracks tbody td { padding: var(--space-3) var(--space-2); }
+  .tracks tbody td { padding: var(--space-2); }
+  .tracks .cover-thumb { width: 36px; height: 36px; }
+  .tracks .col-cover { width: 44px; }
   /* .col-cover's zero left padding relied on the row-number gutter,
      which is hidden here — restore the table's edge padding. */
   .tracks .col-cover { padding-left: var(--space-2); }
+  /* The ⋯ trigger was 28px — below the 44px touch floor. Grow its hit
+     area to a 44px square (icon stays visually centered). Zero the
+     cell's vertical padding so the taller button matches the 44px
+     cover-driven row floor instead of stacking on top of it and
+     making rows grow. Scoped to the direct child so the queue's dense
+     .queue-row-actions cluster (remove + ⋯ in one cell) is untouched. */
+  .tracks .col-menu > .row-menu-trigger { width: 44px; height: 44px; }
+  .tracks .col-menu:not(:has(.queue-row-actions)) {
+    width: 48px;
+    padding: 0 var(--space-2) 0 0;
+  }
 
   /* Queue rows: the four-button action cluster (move-up / move-down /
      remove / ⋯-menu) is wider than any phone-sized cell. Drop the
@@ -1697,4 +1758,14 @@ a.search-hero-title:hover {
      this, but the topbar breadcrumb is pure decoration — reclaim the
      space for the title cluster. */
   .topbar .breadcrumb { display: none; }
+
+  /* Guarantee a 2-up album/artist grid on phones. The desktop
+     minmax(160px) + 24px gap needs 344px of content, which a 360px
+     phone (≈328px after gutters) can't supply — so it silently
+     collapsed to one giant tile per row. Drop the floor to 140px and
+     tighten the gap so two tiles always fit, down to ~320px screens. */
+  .tile-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: var(--space-3);
+  }
 }
