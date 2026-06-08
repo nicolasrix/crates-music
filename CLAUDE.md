@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project goal
 
-Build a music player for a self-hosted [Navidrome](https://www.navidrome.org/) backend, served to three clients: **CLI**, **web UI**, and **Android** (via Compose Multiplatform; iOS may follow). Single-user, local-network-first.
+Build a music player for a self-hosted [Navidrome](https://www.navidrome.org/) backend, served to three clients: **CLI**, **web UI**, and **mobile**. Single-user, local-network-first. Mobile is the **installable PWA** (the web client, added to the home screen), not a native app — see "Mobile is the PWA" below.
 
 Navidrome speaks the **Subsonic API** (with OpenSubsonic extensions). Treat the [Subsonic](http://www.subsonic.org/pages/api.jsp) / [OpenSubsonic](https://opensubsonic.netlify.app/) spec as the source of truth for endpoint shapes and error codes. We do not fork Navidrome; it remains the catalog source of truth.
 
@@ -23,18 +23,15 @@ Navidrome speaks the **Subsonic API** (with OpenSubsonic extensions). Treat the 
                     │  • Recommender (CLAP + track2vec)│
                     │  • Event log + WebSocket sync    │
                     │  • SQLite (gateway state)        │
-                    └──┬──────────────┬─────────────┬──┘
-                       │              │             │
-                ┌──────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐
-                │  CLI       │ │  Web       │ │  Mobile   │
-                │  (Rust)    │ │  (TS+React │ │  (Compose │
-                │            │ │   + WASM)  │ │   MP+KMP) │
-                └────────────┘ └────────────┘ └───────────┘
-                       └──────────────┴─────────────┘
-                              shared Rust core (UniFFI / WASM)
+                    └──────┬───────────────────┬───────────┘
+                           │                   │
+                ┌──────────▼───────┐ ┌─────────▼───────────────────┐
+                │  CLI  (Rust)     │ │  Web  (TS+React)            │
+                │                  │ │  └─ installable PWA = mobile│
+                └──────────────────┘ └─────────────────────────────┘
 ```
 
-**Key shape:** thin clients, gateway holds anything that benefits from being shared (cache, recommender, sync). A **shared Rust core** is consumed by the CLI directly, by the web as WASM, and by the mobile app as Kotlin via [UniFFI](https://mozilla.github.io/uniffi-rs/) bindings. UI is per-platform: native CLI, React for web, Compose for mobile.
+**Key shape:** thin clients, gateway holds anything that benefits from being shared (cache, recommender, sync). The CLI consumes the Rust crates directly; the web is a React SPA talking to the gateway over HTTP/WS. **Mobile is that same web app installed as a PWA** — no separate codebase. The original plan of a shared Rust core compiled to WASM (web) and Kotlin via UniFFI (native mobile) was **dropped**: the WASM core was descoped at P3, and native mobile (P4) was retired in favour of the PWA — see "Mobile is the PWA" below.
 
 ## Repo layout (Cargo workspace monorepo)
 
@@ -48,14 +45,17 @@ crates/
   music-recommend/   # SERVER-ONLY: CLAP embedder, ANN index, track2vec
   music-gateway/     # the gateway binary
   music-cli/         # the CLI binary
-  music-ffi/         # UniFFI bindings consumed by the mobile app
 
 apps/
-  web/               # TS + React + WASM-compiled core
-  mobile/            # Compose Multiplatform, Android first
+  web/               # TS + React SPA (also the installable PWA = mobile)
 ```
 
-`music-ffi` exposes `music-cache`, `music-sync`, and `music-subsonic` to Kotlin — **not** `music-player`, since mobile playback uses Media3 directly. Web playback uses MediaSource Extensions (MSE), not symphonia-in-WASM.
+> **Planned but never built:** `crates/music-ffi` (UniFFI bindings) and
+> `apps/mobile` (Compose Multiplatform). Both belonged to the native-mobile
+> plan (P4), which was retired — the PWA is the mobile client. They do not
+> exist in the tree; references to them in older notes are historical.
+
+Web playback uses a plain `<audio>` element (MediaSource Extensions remain a deferred option if gapless boundaries are audibly gappy). The web client's offline audio cache is a TypeScript reimplementation of the `music-cache` contract in IndexedDB (`apps/web/src/cache/`), not the Rust crate via WASM.
 
 ## Caching (multi-layer)
 
@@ -108,9 +108,8 @@ Ingest runs in a background queue at low priority. Recommender works in **degrad
 Single-user means OAuth does the job of *device pairing + token rotation*, not user identification.
 
 - **Bootstrap:** gateway prints a one-time setup URL on first run; user sets a master password.
-- **Web:** Authorization Code + PKCE.
+- **Web / PWA (mobile):** Authorization Code + PKCE. Mobile is the installed PWA, so it uses the same browser-based flow — no separate native/Custom-Tabs path.
 - **CLI:** [Device Authorization Grant (RFC 8628)](https://datatracker.ietf.org/doc/html/rfc8628). CLI prints a code; user confirms in browser.
-- **Mobile:** Authorization Code + PKCE via system browser (Custom Tabs).
 - Per-device refresh tokens; revocable individually from a "Devices" page.
 
 Library: [`oxide-auth`](https://github.com/HeroicKatora/oxide-auth) or hand-rolled (surface is small for a single user).
@@ -159,7 +158,7 @@ Vertical slices, each end-to-end usable:
 | **P1** | Gateway + L2 metadata cache. ETag refresh. CLI uses gateway. |
 | **P2** | L3 audio cache, pinning, gapless playback. Single-client offline-capable. |
 | **P3** | Web UI. TS/React on gateway API, WASM core for caching. MSE playback. |
-| **P4** | Mobile. UniFFI bindings, Compose Multiplatform, Media3 + foreground service for background playback. |
+| ~~**P4**~~ | ~~Native mobile (UniFFI + Compose Multiplatform + Media3).~~ **Retired** — mobile is the installable PWA (the P3 web client). See "Mobile is the PWA". |
 | **P5** | WebSocket sync. Queue CRDT. Cross-device state. |
 | **P6** | Recommender. CLAP ingest pipeline + content ANN. Behavioural index + nightly retrain. Text-query stations. |
 
@@ -432,9 +431,23 @@ Diagnostics SQLite layout (`gateway-state.traces.sqlite`):
 P1/P2 still hold: gateway + L2 metadata cache + ETag refresh, audio
 cache + pinning + gapless CLI playback.
 
-**Web PWA + offline playback (in flight, `feat/web-pwa-offline`).**
+## Mobile is the PWA (P4 native app retired)
+
+The original plan had a native Android client (Compose Multiplatform +
+Media3, Rust core via UniFFI) as phase P4. That was **retired** — the
+mobile client is the **web app installed as a PWA**. Reasoning: a
+single-user LAN player gets ~100% of what a native app would give it
+(home-screen install, offline playback, background audio, lock-screen
+controls) from the PWA, at zero additional codebase. The web client is
+therefore *the* cross-platform client; "mobile parity" means making the
+web UI good on phone viewports + wiring the mobile-browser web APIs, not
+shipping a second app.
+
+**Web PWA + offline playback — DONE, merged to `dev` 2026-06-07.**
 Brings the CLI's L3 audio cache + pinning to the web client and makes the
-SPA an installable, offline-capable PWA:
+SPA an installable, offline-capable PWA (branch `feat/web-pwa-offline`,
+plus `feat/web-mobile-responsive`, `fix/oauth-mobile-viewport`,
+`feat/mobile-touch-polish`):
 
 - `apps/web/src/cache/` — an IndexedDB reimplementation of the
   `crates/music-cache` contract (content-addressed `(trackId, bitrate,
@@ -461,10 +474,47 @@ SPA an installable, offline-capable PWA:
   make it installable. The gateway already serves `sw.js` /
   `manifest.webmanifest` from the static dir root (no gateway change).
   `autoUpdate` also fixes the stale-bundle white-screen seen on deploys.
-- **Not yet browser-verified end-to-end** (offline airplane-mode launch +
-  play) — needs a real device against the gateway; install requires the
-  mkcert CA trusted on the device. Deferred: transcode-to-fit caching
-  (opus@128 to pack the ~500 MB budget; needs gateway stream-param wiring).
+
+**Mobile polish shipped on top (same merge):**
+
+- **Responsive layout** — sidebar collapses to a drawer, the player bar
+  becomes a two-row phone layout, tables reflow, touch targets enlarged.
+- **OAuth pages fixed for phones** (`6190d2c`) — the four server-rendered
+  pages (login + the three RFC 8628 device pages) gained a
+  `width=device-width` viewport meta; phones had been rendering them at
+  980px / 0.37× scale. Plus `autocomplete`/`autocapitalize` hints on the
+  password + device-code inputs. These live in `oauth/handlers.rs`,
+  *outside* the SPA, which is why they needed a separate fix.
+- **Install prompt** (`apps/web/src/pwa/installPrompt.ts`) — captures
+  `beforeinstallprompt` at module load (Chromium fires it once, early) and
+  surfaces an "Install as app" button on the Settings page; iOS shows a
+  Share → Add to Home Screen hint instead (Safari never fires the event).
+- **Lock-screen controls** — Media Session `setActionHandler` for
+  play/pause/next/prev/seek + `setPositionState` for the scrubber.
+- **Queue reorder via the row menu** (move to top/up/down) so reordering
+  works on phones where the chevron buttons are hidden.
+- **Transcode-to-fit** (`downloadQuality`: original | opus128 | mp3128 in
+  `cacheSettings.ts`) — needed **no gateway work**. The planned `/v1/stream`
+  endpoint was never built; audio rides the verbatim `/rest/*` proxy, and
+  Navidrome itself honors `format`/`maxBitRate` (the same params ingest
+  uses). Verified live: opus@128 → 4.3 MB vs 10.4 MB original. Cache keys
+  now carry the real `(bitrate, codec)` instead of null.
+- **Queue metadata hydration after reload** (`SyncContext.tsx`) — an
+  installed PWA's normal lifecycle is relaunch-from-snapshot, which left
+  queue items with ids but no titles (blank player bar, Media Session, row
+  menus). A `getSong` backfill effect re-hydrates `trackMeta`; the context
+  value keys on a `metaTick` so consumers re-render when it arrives.
+
+The whole stack was rebuilt into the gateway image, shipped to the NAS host, and
+verified live (manifest 200, apple-touch-icon 200, `beforeinstallprompt`
+present in the running bundle).
+
+- **Open (real-device only, can't be done headless):** install to home
+  screen, airplane-mode offline launch + playback, screen-off background
+  audio. The prod gateway (`crates.example.com:8443`) serves a Let's
+  Encrypt cert, so **no mkcert CA trust is needed on the device** for
+  install — the earlier mkcert caveat only applies to the `gateway.local`
+  dev cert.
 
 ### Running the gateway locally
 

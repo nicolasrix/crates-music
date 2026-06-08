@@ -209,7 +209,9 @@ Subsonic-the-spec don't invalidate code we never wrote.
 
 ## Future shape
 
-When mobile lands (P4), this crate gets compiled to a UniFFI binding
-(`music-ffi`) so Kotlin can drive it without re-implementing Subsonic.
-That's why the public surface is kept narrow — wide APIs are painful
-through UniFFI.
+The original plan compiled this crate to a UniFFI binding (`music-ffi`)
+for a native Kotlin mobile app. That plan (P4) was **retired** — mobile
+is the installable PWA, which talks to the gateway over HTTP and never
+links this crate. So `music-ffi` will not be built; this crate stays a
+CLI/gateway-side Rust dependency. The narrow public surface is still
+worth keeping for readability and test cost.

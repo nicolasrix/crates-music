@@ -1,23 +1,28 @@
 # Platform feature parity
 
-What each client can actually do today. The three clients sit at very
-different maturity levels because features were built in *vertical
-slices* (see the phasing table in [../CLAUDE.md](../CLAUDE.md)) and each
-slice landed on one client first:
+What each client can actually do today. There are **two** clients, not
+three:
 
-- **Web** — the P3/P6 vertical. Has the full recommender, ratings,
-  station, autoplay, and diagnostics surface.
-- **CLI** — stalled at its P0–P2 + P5 scope (browse, native playback,
-  cache/pin, sync). **Next focus** for parity work.
-- **Android** — P4, **not started**. `apps/mobile/` and
-  `crates/music-ffi/` do not exist yet; every row below is "planned".
+- **Web / PWA** — the P3/P6 vertical, and **also the mobile client**: the
+  same React app installed to a phone home screen as a PWA. Has the full
+  recommender, ratings, station, autoplay, diagnostics surface, and an
+  offline audio cache. One column below covers both desktop browser and
+  installed-on-phone use.
+- **CLI** — its P0–P2 + P5 scope (browse, native playback, cache/pin,
+  sync) plus the CLI-parity backlog, which is now **cleared** (see bottom).
+
+> **Native mobile (P4) was retired.** `apps/mobile/` (Compose
+> Multiplatform) and `crates/music-ffi/` (UniFFI bindings) were never built
+> and will not be — the installable PWA is the mobile client. Anything in
+> older notes about a Kotlin/Media3 app is historical. See
+> [../CLAUDE.md](../CLAUDE.md) → "Mobile is the PWA".
 
 ## How to read this
 
 Almost every capability lives behind a gateway `/v1/*` endpoint (the
-source of truth). So a gap on a client usually means *"no UI/command
-calls that endpoint yet"*, not *"impossible here"*. The legend keeps
-that distinction:
+source of truth). So a gap on the CLI usually means *"no command calls
+that endpoint yet"*, not *"impossible here"*. The legend keeps that
+distinction:
 
 | Symbol | Meaning |
 |---|---|
@@ -25,143 +30,183 @@ that distinction:
 | ⚠️ | Partial / limited |
 | ❌ | Not implemented on this client, **but the gateway endpoint exists** — purely a client-surface gap |
 | 🚫 | Not applicable to this client by design |
-| 🔭 | Planned (Android: nothing built yet) |
+
+Because mobile *is* the Web/PWA client, the Web column applies on a phone
+too. The handful of capabilities that behave differently on a phone
+(install, background audio, lock-screen controls, touch reachability) are
+called out in **Mobile specifics** below the matrix.
 
 ## Matrix
 
 ### Browsing & library
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Server connectivity check (`ping`) | 🚫 | ✅ | 🔭 |
-| Browse albums | ✅ | ✅ | 🔭 |
-| Album detail + track list | ✅ | ✅ | 🔭 |
-| Browse artists | ✅ | ✅ `artists` | 🔭 |
-| Artist detail + discography | ✅ | ✅ `artist <id>` | 🔭 |
-| Browse all tracks (paginated) | ✅ | ✅ `tracks` | 🔭 |
-| Browse filters (recent / most-played / random) | ✅ | ⚠️ albums only | 🔭 |
-| Global search (artists / albums / tracks) | ✅ | ✅ `search <q>` | 🔭 |
-| Home / overview page | ✅ | 🚫 | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Server connectivity check (`ping`) | 🚫 | ✅ |
+| Browse albums | ✅ | ✅ |
+| Album detail + track list | ✅ | ✅ |
+| Browse artists | ✅ | ✅ `artists` |
+| Artist detail + discography | ✅ | ✅ `artist <id>` |
+| Browse all tracks (paginated) | ✅ | ✅ `tracks` |
+| Browse filters (recent / most-played / random) | ✅ | ⚠️ albums only |
+| Global search (artists / albums / tracks) | ✅ | ✅ `search <q>` |
+| Home / overview page | ✅ | 🚫 |
 
 ### Playback
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Stream & play a track | ✅ `<audio>` | ✅ rodio/symphonia | 🔭 Media3 |
-| Gapless playback | ⚠️ deferred (MSE) | ✅ | 🔭 |
-| Offline playback (cache-only) | ✅ (IndexedDB) | ✅ `play --offline` | 🔭 |
-| Installable / offline launch (PWA) | ✅ service worker | 🚫 | 🔭 |
-| Transport: play / pause / seek | ✅ | ⚠️ no transport UI | 🔭 |
-| Skip forward / back | ✅ | ❌ | 🔭 |
-| Volume control | ✅ | ❌ | 🔭 |
-| Background / foreground-service playback | 🚫 | 🚫 | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Stream & play a track | ✅ `<audio>` | ✅ rodio/symphonia |
+| Gapless playback | ⚠️ deferred (MSE) | ✅ |
+| Offline playback (cache-only) | ✅ (IndexedDB) | ✅ `play --offline` |
+| Installable / offline launch (PWA) | ✅ service worker | 🚫 |
+| Transport: play / pause / seek | ✅ | ⚠️ no transport UI |
+| Skip forward / back | ✅ | ❌ |
+| Volume control | ✅ | ❌ |
+| Lock-screen / Media Session controls | ✅ (phone) | 🚫 |
+| Background playback | ⚠️ Android: yes; iOS: limited | 🚫 |
 
 ### Queue
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| View queue + now-playing | ✅ | ✅ `sync queue` (resolved titles + ▶) | 🔭 |
-| Append to queue | ✅ | ✅ `sync push` | 🔭 |
-| Reorder / move | ✅ | ✅ `sync move` (alias `reorder`) | 🔭 |
-| Remove a queue item | ✅ | ✅ `sync remove` | 🔭 |
-| Clear whole queue | ✅ | ✅ `sync clear` | 🔭 |
-| Jump to track | ✅ | ✅ `sync jump <index>` | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| View queue + now-playing | ✅ | ✅ `sync queue` (resolved titles + ▶) |
+| Append to queue | ✅ | ✅ `sync push` |
+| Reorder / move | ✅ (buttons + row-menu on phones) | ✅ `sync move` (alias `reorder`) |
+| Remove a queue item | ✅ | ✅ `sync remove` |
+| Clear whole queue | ✅ | ✅ `sync clear` |
+| Jump to track | ✅ | ✅ `sync jump <index>` |
 
 ### Cache & pinning (client-local)
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Pin / unpin tracks | ✅ "save for offline" | ✅ | 🔭 |
-| List pinned | ✅ `/downloads` | ✅ `pinned` | 🔭 |
-| Cache stats | ✅ `/downloads` | ✅ `cache stats` | 🔭 |
-| Force eviction | ✅ "free up space" | ✅ `cache evict` | 🔭 |
-| Bulk download album/playlist | ✅ | ⚠️ per-track `pin` | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Pin / unpin tracks | ✅ "save for offline" | ✅ |
+| List pinned | ✅ `/downloads` | ✅ `pinned` |
+| Cache stats | ✅ `/downloads` | ✅ `cache stats` |
+| Force eviction | ✅ "free up space" | ✅ `cache evict` |
+| Bulk download album/playlist | ✅ | ⚠️ per-track `pin` |
+| Transcode-to-fit downloads | ✅ original / opus128 / mp3128 | ❌ |
 
-> The web client now mirrors the CLI's two-budget L3 cache in the browser
+> The web client mirrors the CLI's two-budget L3 cache in the browser
 > (IndexedDB blobs + `URL.createObjectURL`), reusing the exact `music-cache`
 > contract: content-addressed `(trackId, bitrate, codec)`, a regular LRU
 > budget (auto-cached recents) and a separate never-evicted pinned budget.
-> See `apps/web/src/cache/`. Android (P4) is expected to reuse this same
-> browser cache if it ships as a PWA, or the Rust `music-cache` crate via
-> UniFFI if it ships native.
+> See `apps/web/src/cache/`. Because mobile is this same PWA, the phone gets
+> this cache for free — there is no separate native cache. Transcode-to-fit
+> (`downloadQuality` in `cacheSettings.ts`) forwards `format`/`maxBitRate`
+> on the verbatim `/rest/*` proxy to Navidrome; no gateway endpoint was
+> needed.
 
 ### Stations & recommendations
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ✅ `station` | 🔭 |
-| Station from album / artist (seed) | ✅ | ❌ | 🔭 |
-| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ✅ `recommend next` | 🔭 |
-| Similar albums / artists | ✅ | ❌ | 🔭 |
-| Playlist "suggest more tracks" | ✅ | ❌ | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Text-prompt station (`/v1/recommend/station?text=`) | ✅ | ✅ `station` |
+| Station from album / artist (seed) | ✅ | ❌ |
+| "Recommend next" / autoplay refill (`/v1/recommend/next`) | ✅ | ✅ `recommend next` |
+| Similar albums / artists | ✅ | ❌ |
+| Playlist "suggest more tracks" | ✅ | ❌ |
 
 ### Autoplay (tethered-drift)
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Autoplay on/off ("keep queue topped up") | ✅ | ❌ | 🔭 |
-| Tuning knobs (vibe radius, leash, travel, diversity) | ✅ `/settings` | ❌ | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Autoplay on/off ("keep queue topped up") | ✅ | ❌ |
+| Tuning knobs (vibe radius, leash, travel, diversity) | ✅ `/settings` | ❌ |
 
 ### Ratings & feedback
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Like / dislike track | ✅ | ✅ `like`/`dislike` | 🔭 |
-| Like / dislike album / artist | ✅ | ✅ `--kind album\|artist` | 🔭 |
-| Liked page (tracks / albums / artists) | ✅ | ✅ `liked` | 🔭 |
-| Clear a rating | ✅ | ✅ `unrate` | 🔭 |
-| Recommendation feedback (thumbs, session-scoped) | ✅ | ❌ | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Like / dislike track | ✅ | ✅ `like`/`dislike` |
+| Like / dislike album / artist | ✅ | ✅ `--kind album\|artist` |
+| Liked page (tracks / albums / artists) | ✅ | ✅ `liked` |
+| Clear a rating | ✅ | ✅ `unrate` |
+| Recommendation feedback (thumbs, session-scoped) | ✅ | ❌ |
 
 > Ratings have **no Navidrome writeback** by design — they are
-> gateway-owned. Any CLI/Android implementation must keep that constraint.
+> gateway-owned. Any CLI implementation must keep that constraint.
 
 ### Playlists
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| View playlist detail | ✅ | ❌ | 🔭 |
-| Create / rename / delete | ✅ | ❌ | 🔭 |
-| Add tracks / add suggestions | ✅ | ❌ | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| View playlist detail | ✅ | ❌ |
+| Create / rename / delete | ✅ | ❌ |
+| Add tracks / add suggestions | ✅ | ❌ |
 
 ### Sync (cross-device)
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Read sync snapshot | ✅ | ✅ `sync state` / `sync queue` | 🔭 |
-| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump / clear | 🔭 |
-| Live WebSocket updates | ✅ | ✅ `sync watch` | 🔭 |
-| Optimistic UI + rollback | ✅ | 🚫 | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Read sync snapshot | ✅ | ✅ `sync state` / `sync queue` |
+| Push ops (append, etc.) | ✅ | ✅ append / remove / move / jump / clear |
+| Live WebSocket updates | ✅ | ✅ `sync watch` |
+| Optimistic UI + rollback | ✅ | 🚫 |
 
 ### Diagnostics
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| Recommender metrics | ✅ | ❌ | 🚫 |
-| Latent-space visualization (2-D/3-D) | ✅ | 🚫 | 🚫 |
-| Ingest backlog | ✅ | ❌ | 🚫 |
-| Listening history | ✅ | ❌ | 🚫 |
-| Tracing waterfalls | ✅ | ❌ | 🚫 |
-| Browser RUM / web-vitals | ✅ | 🚫 | 🚫 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| Recommender metrics | ✅ | ❌ |
+| Latent-space visualization (2-D/3-D) | ✅ | 🚫 |
+| Ingest backlog | ✅ | ❌ |
+| Listening history | ✅ | ❌ |
+| Tracing waterfalls | ✅ | ❌ |
+| Browser RUM / web-vitals | ✅ | 🚫 |
 
 ### Auth
 
-| Capability | Web | CLI | Android |
-|---|:--:|:--:|:--:|
-| OAuth flow | ✅ Auth Code + PKCE | ✅ `auth login` (Device Grant, RFC 8628) | 🔭 PKCE via Custom Tabs |
-| Direct Subsonic creds (no gateway) | 🚫 | ✅ `[server]` config | 🔭 |
+| Capability | Web / PWA | CLI |
+|---|:--:|:--:|
+| OAuth flow | ✅ Auth Code + PKCE | ✅ `auth login` (Device Grant, RFC 8628) |
+| Direct Subsonic creds (no gateway) | 🚫 | ✅ `[server]` config |
 
 > The CLI authenticates with the gateway via the **Device Authorization
 > Grant** (RFC 8628): `music auth login` prints a short code + URL, you
 > approve it in a logged-in browser, and the CLI stores rotating
 > per-device tokens in `cli-tokens.json` (next to the config, `0600`).
 > `auth status` / `auth logout` manage that store; the access token
-> refreshes automatically. The old static `[gateway].bearer_token` has
-> been removed. Direct mode still uses `[server]` creds against Navidrome.
+> refreshes automatically. There is no static `[gateway].bearer_token`.
+> Direct mode still uses `[server]` creds against Navidrome.
+
+## Mobile specifics (the PWA on a phone)
+
+The mobile client is the Web column installed as a PWA, so it inherits
+every ✅ above. What's *phone-specific* (and shipped, merged to `dev`
+2026-06-07):
+
+- **Install** — Chromium (Android Chrome/Edge/Brave/Samsung Internet)
+  shows an in-app "Install as app" button on the Settings page (captured
+  `beforeinstallprompt`) and a browser-menu "Install app" entry; iOS Safari
+  installs via Share → Add to Home Screen (the UI shows a hint, since Safari
+  never fires `beforeinstallprompt`). DuckDuckGo and other non-Chromium
+  Android browsers cannot install PWAs.
+- **Secure context** — install/offline/Media Session all require HTTPS. The
+  production gateway serves a Let's Encrypt cert (trusted by default), so no
+  manual CA trust is needed on the device. The `gateway.local` mkcert dev
+  cert *does* need the CA trusted to install from the dev origin.
+- **Background audio** — Android keeps the PWA's `<audio>` playing in the
+  background with lock-screen controls via the Media Session API. iOS is
+  more restrictive (background audio for a home-screen PWA works but is
+  flakier than a native app).
+- **Lock-screen controls** — Media Session action handlers (play/pause/
+  next/prev/seek) + `setPositionState` drive the OS scrubber.
+- **Responsive UI / touch** — sidebar→drawer, two-row phone player,
+  reflowing tables, enlarged touch targets, queue reorder reachable from the
+  row menu (the desktop chevron buttons are hidden on phones), and a
+  phone-correct viewport on the server-rendered OAuth pages.
+
+**Open (real-device only, can't be verified headless):** install to home
+screen, airplane-mode offline launch + playback, screen-off background
+audio.
 
 ## CLI parity backlog (the ❌ rows)
 
 Bringing the CLI toward the web UI is mostly mechanical — wiring clap
-subcommands onto endpoints that already exist. Rough priority:
+subcommands onto endpoints that already exist. The original backlog is
+**cleared**:
 
 1. ~~**Browse parity** — `artists`, `tracks`, `search`.~~ **Done** —
    `artists`, `artist <id>`, `tracks`, `search <q>` via new typed
@@ -192,23 +237,6 @@ subcommands onto endpoints that already exist. Rough priority:
    (`0600`), and auto-refreshes. The static `[gateway].bearer_token` was
    removed.
 
-The CLI parity backlog is now clear. Remaining ❌ rows are smaller,
-lower-priority items (seed-from-album station, similar albums/artists,
-playlist CRUD, recommendation thumbs, diagnostics views).
-
-## Android (P4) — not started
-
-`apps/mobile/` (Compose Multiplatform) and `crates/music-ffi` (UniFFI
-bindings) do not exist yet. Two viable roads:
-
-- **PWA-as-mobile** (favoured for a single-user LAN app): install the web
-  app (now a PWA — service worker app shell + manifest, see
-  `apps/web/vite.config.ts`) to the home screen, or wrap it as a TWA. This
-  reuses 100% of the web client, **including the offline audio cache and
-  service worker built here** — offline playback "just works" on Android
-  Chrome. Caveat: the device must trust the mkcert CA for a secure context.
-- **Native Compose** (the original CLAUDE.md plan): UniFFI exposes
-  `music-cache`, `music-sync`, `music-subsonic` to Kotlin (**not**
-  `music-player` — mobile playback uses Media3 directly), Compose
-  Multiplatform UI, foreground service for background playback. Offline
-  cache would come from the Rust `music-cache` crate, not the web TS cache.
+Remaining ❌ rows are smaller, lower-priority items (seed-from-album
+station, similar albums/artists, playlist CRUD, recommendation thumbs,
+diagnostics views).

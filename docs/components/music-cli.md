@@ -134,17 +134,17 @@ Three subcommands under `music sync`:
 
 Implementation in `sync.rs` uses `tokio-tungstenite`.
 
-## Bearer token only (for now)
+## Auth: OAuth Device Authorization Grant (RFC 8628)
 
-The CLI uses the static bearer from `gateway.toml` (and
-`~/.config/crates-music/config.toml`). OAuth Device Grant (RFC 8628)
-is the planned replacement at P4 — the user runs `music auth login`,
-the CLI prints a URL + code, the user confirms in their browser, the
-CLI gets a per-device refresh token.
+The CLI authenticates to the gateway with the **Device Authorization
+Grant**. `music auth login` prints a short code + URL; the user approves
+it in a logged-in browser; the CLI receives a per-device refresh token
+and stores rotating tokens in `cli-tokens.json` next to the config
+(`0600`). The access token refreshes automatically; `music auth status`
+shows token state and `music auth logout` revokes + clears them.
 
-Until then, the bearer is a shared secret. Every device the user
-uses the CLI on has the same token. Acceptable at single-user
-home-network scale; not acceptable at multi-user scale.
+The old static `[gateway].bearer_token` shared secret has been
+**removed** — each device now holds its own revocable refresh token.
 
 ## Tests
 
@@ -168,5 +168,3 @@ were made" or "the formatter produced the right string."
   future work.
 - **No completions yet.** `clap` supports `clap_complete` for shell
   completions; we just haven't wired it.
-- **`music auth` doesn't exist.** Login is "edit your config file."
-  This becomes a real subcommand at P4.

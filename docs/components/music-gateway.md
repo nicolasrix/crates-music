@@ -261,8 +261,8 @@ embedding store, and ANN — so every test runs against a fresh state.
   cache.
 - **No rate limiting.** Single-user, local network — not yet
   needed.
-- **CLI uses static bearer**. Will move to OAuth Device Authorization
-  Grant (RFC 8628) at P4.
+- ~~**CLI uses static bearer**~~. **Done** — the CLI now uses the OAuth
+  Device Authorization Grant (RFC 8628); the static bearer was removed.
 - **No Prometheus `/metrics`.** The M0 trace ring covers the same
   ground for now and the `/diagnostics` page is enough for a single
   operator; we'll add `/metrics` if external scraping ever matters.

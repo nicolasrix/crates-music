@@ -1,8 +1,9 @@
 # crates-music documentation
 
 A music-player gateway for self-hosted [Navidrome](https://www.navidrome.org/),
-served to CLI, web, and (eventually) Android clients. Single-user,
-local-network-first.
+served to a CLI and a web client. The web client doubles as the **mobile**
+client — it's an installable PWA (the native-mobile plan, P4, was retired).
+Single-user, local-network-first.
 
 This directory is the onboarding entry point. Follow the docs in this order:
 
@@ -14,7 +15,7 @@ This directory is the onboarding entry point. Follow the docs in this order:
 | [GETTING-STARTED.md](./GETTING-STARTED.md) | Bring up the gateway, the web app, and (optionally) the embedder on your machine |
 | [CONFIGURATION.md](./CONFIGURATION.md) | Every field of `gateway.toml`, all environment variables, and what each script in `scripts/` does |
 | [API.md](./API.md) | Every endpoint the gateway exposes, with example requests |
-| [PLATFORM-PARITY.md](./PLATFORM-PARITY.md) | What each client (web / CLI / Android) can do today — the feature matrix |
+| [PLATFORM-PARITY.md](./PLATFORM-PARITY.md) | What each client (web/PWA / CLI) can do today — the feature matrix, plus mobile-PWA specifics |
 | [TESTING.md](./TESTING.md) | How tests are organised; how to run a single test or the whole suite |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev environment setup, every command (build / test / lint / bench), branch workflow, PR checklist |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Run the gateway + embedder in containers (`docker compose`). Operator guide. |

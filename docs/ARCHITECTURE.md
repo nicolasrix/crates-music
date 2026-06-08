@@ -22,16 +22,18 @@ source of truth.
                     │  • WebSocket sync                │
                     │  • Diagnostics ring + RUM        │
                     │  • SQLite (gateway state, 3 DBs) │
-                    └──┬──────────────┬─────────────┬──┘
-                       │              │             │
-                ┌──────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐
-                │  CLI       │ │  Web       │ │  Mobile   │
-                │  (Rust)    │ │  (TS+React │ │  (Compose │
-                │            │ │   + Vite)  │ │   MP+KMP) │
-                └────────────┘ └────────────┘ └───────────┘
+                    └──────┬───────────────────┬───────────┘
+                           │                   │
+                ┌──────────▼───────┐ ┌─────────▼───────────────────┐
+                │  CLI  (Rust)     │ │  Web  (TS+React+Vite)       │
+                │                  │ │  └─ installable PWA = mobile│
+                └──────────────────┘ └─────────────────────────────┘
 ```
 
-The mobile client is planned (P4); it does not exist in the codebase yet.
+There is no separate mobile client. The web app is an installable PWA,
+and that **is** the mobile client; native mobile (P4) was retired. See
+[PLATFORM-PARITY.md](./PLATFORM-PARITY.md) and [/CLAUDE.md](../CLAUDE.md)
+→ "Mobile is the PWA".
 
 ## Why a gateway?
 
@@ -115,8 +117,7 @@ rotation*, not user identification.
 
 | Client | Flow | Status |
 |---|---|---|
-| Web | Authorization Code + PKCE | Implemented |
-| Mobile | Authorization Code + PKCE via Custom Tabs | Planned (P4) |
+| Web / PWA (mobile) | Authorization Code + PKCE | Implemented |
 | CLI | Device Authorization Grant (RFC 8628) | Implemented (`music auth login`) |
 
 **Bootstrap:** the gateway prints a one-time setup URL on first run.
@@ -364,8 +365,9 @@ Tactics that load-bear:
 
 ## Phasing
 
-Vertical slices, each end-to-end usable. Current phase is **P3 in
-flight**, with the **P6 recommender minimum-viable scope shipped** in
+Vertical slices, each end-to-end usable. **P3 is done** (web UI +
+installable PWA, which doubles as the mobile client), **P4 native mobile
+was retired**, and the **P6 recommender minimum-viable scope shipped** in
 parallel.
 
 | Phase | Deliverable | Status |
@@ -373,8 +375,8 @@ parallel.
 | P0 | CLI + `music-core` + `music-subsonic`. Lists albums, plays a track via rodio. No cache, no gateway. | Done |
 | P1 | Gateway + L2 metadata cache. ETag refresh. | Done |
 | P2 | L3 audio cache, pinning, gapless playback. | Done |
-| P3 | Web UI. TS/React on gateway API. OAuth login. | In progress |
-| P4 | Mobile. UniFFI bindings, Compose Multiplatform, Media3. | Not started |
+| P3 | Web UI. TS/React on gateway API. OAuth login. Installable PWA + offline cache (= mobile client). | Done |
+| ~~P4~~ | ~~Native mobile (UniFFI + Compose Multiplatform + Media3).~~ | Retired — mobile is the PWA |
 | P5 | WebSocket sync. Queue CRDT. Cross-device state. | Done |
 | P6 | Recommender. CLAP ingest + content ANN + event log. | Minimum viable shipped |
 | P6.8 | Behavioural index + nightly track2vec retrain. | Deferred |

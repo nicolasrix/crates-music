@@ -12,9 +12,10 @@ Native audio playback. Two layers:
    `tokio::task::spawn_blocking` because `rodio::OutputStream` holds
    a non-Send handle to the OS audio device.
 
-Used by the CLI. The web app uses the browser's `<audio>` element
-(MSE in a future phase). The mobile app will use Media3 directly.
-This crate is **CLI-only**.
+Used by the CLI. The web app — which is also the mobile client, as an
+installable PWA — uses the browser's `<audio>` element (MSE remains a
+deferred option). There is no native mobile app (P4 retired), so this
+crate is **CLI-only**.
 
 ## Public API
 
