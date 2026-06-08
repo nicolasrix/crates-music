@@ -57,6 +57,11 @@ interface AudioCacheCtx {
   /** Record that a track was played: LRU-touch on hit, or fetch-and-cache the
    *  miss (regular budget) when online. Fire-and-forget. */
   notePlayed: (trackId: string) => void;
+  /** Warm a track into the regular (auto-evicted) budget: LRU-touch on hit,
+   *  fetch-and-`put` on miss. Unlike `download`, never pins — overflow rolls
+   *  off LRU like any auto-cached track. Awaitable, and throws on fetch
+   *  failure so bulk callers can count misses. */
+  cacheTrack: (trackId: string) => Promise<"fetched" | "hit">;
   /** Pin a track for offline ("download"): fetch if needed, then pin. */
   download: (trackId: string) => Promise<PinOutcome>;
   /** Unpin a downloaded track (the blob stays under the LRU budget). */
@@ -165,6 +170,21 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
     [cache, cacheOnPlay],
   );
 
+  const cacheTrack = useCallback(
+    async (trackId: string): Promise<"fetched" | "hit"> => {
+      const meta = await cache.getMetaByTrack(trackId);
+      if (meta) {
+        await cache.touch(meta.key);
+        return "hit";
+      }
+      const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
+      await cache.put({ trackId, bitrate, codec }, blob);
+      bump();
+      return "fetched";
+    },
+    [cache, bump],
+  );
+
   const download = useCallback(
     async (trackId: string): Promise<PinOutcome> => {
       let meta = await cache.getMetaByTrack(trackId);
@@ -248,6 +268,7 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       resolveSrc,
       ensureUrl,
       notePlayed,
+      cacheTrack,
       download,
       removeDownload,
       isDownloaded,
@@ -261,6 +282,7 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       resolveSrc,
       ensureUrl,
       notePlayed,
+      cacheTrack,
       download,
       removeDownload,
       isDownloaded,

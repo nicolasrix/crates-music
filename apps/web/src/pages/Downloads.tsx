@@ -10,6 +10,7 @@ import { Download, HardDrive, Trash2 } from "lucide-react";
 import { getSong } from "../api/client";
 import { useAudioCache } from "../cache/AudioCacheContext";
 import { formatBytes } from "../cache/format";
+import { CacheLikedButton } from "../components/CacheLikedButton";
 import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import { usePlayback } from "../sync/usePlayback";
@@ -156,6 +157,24 @@ export function Downloads() {
             )}
           </div>
         )}
+
+        {/* Bulk warm the auto-cache (regular budget) from liked songs, albums,
+            and artists. Distinct from "save for offline", which pins. */}
+        <div
+          style={{
+            marginTop: 16,
+            paddingTop: 16,
+            borderTop: "1px solid var(--border-subtle, var(--border))",
+          }}
+        >
+          <CacheLikedButton />
+          <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
+            Pre-loads liked songs and every track of liked albums &amp; artists
+            into the auto-cache above. They stay LRU-evicted — if your liked
+            library is larger than the budget, the most recent fill wins. To
+            keep tracks permanently, “save for offline” instead.
+          </p>
+        </div>
       </div>
 
       <div className="section">
