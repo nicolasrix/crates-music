@@ -261,6 +261,9 @@ function QueueRow({
       </td>
       <td className="col-title is-clickable" onClick={onJump}>
         {track?.title ?? "(unknown — not in local cache)"}
+        {/* Phone-only artist sub-line — the .col-artist column is hidden
+            at ≤640px (see components.css). Mirrors TrackRow. */}
+        <span className="row-sub-artist">{track?.artist ?? "—"}</span>
       </td>
       <td className="col-artist">
         {track?.artistId && track.artist ? (

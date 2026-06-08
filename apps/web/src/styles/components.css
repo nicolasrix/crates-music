@@ -558,6 +558,9 @@ a.tile-title:hover {
    the row's left edge. */
 .tracks .col-cover:first-child { padding-left: var(--space-4); }
 .tracks .col-title { color: var(--fg); }
+/* Phone-only artist sub-line inside the title cell; hidden on desktop
+   where the dedicated .col-artist column is shown instead. */
+.row-sub-artist { display: none; }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
 /* When the artist or album cell wraps a navigation link, mirror the
@@ -1695,18 +1698,53 @@ a.search-hero-title:hover {
   .tracks { table-layout: fixed; }
   .tracks .col-num { display: none; }
   .tracks .col-time { width: 52px; }
-  .tracks .col-artist { width: 34%; }
+  /* Stack artist under the title (see TrackRow.tsx) and drop the
+     separate artist column — fixed columns wasted a wide gap between a
+     short title and the artist while truncating long titles. The title
+     now owns the full row width; the artist rides underneath. Scoped
+     with :has() to tables that actually render the stacked sub-line
+     (track lists, queue) so AlbumTable / diagnostics tables, which have
+     no sub-line, keep their artist column. */
+  .tracks:has(.row-sub-artist) .col-artist { display: none; }
+  /* Any still-visible artist column (AlbumTable) keeps truncating. */
   .tracks .col-title,
   .tracks .col-artist {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .tracks .col-title .row-sub-artist {
+    display: block;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Denser rows: trim the 12px vertical cell padding to 8px and shrink
+     the cover thumb a touch so more tracks fit per screen. The cover
+     cell (36px thumb + 8px) sets a 44px floor — kept deliberately at
+     the 44px touch-target minimum, since the whole row plays on tap. */
   .tracks thead th,
-  .tracks tbody td { padding: var(--space-3) var(--space-2); }
+  .tracks tbody td { padding: var(--space-2); }
+  .tracks .cover-thumb { width: 36px; height: 36px; }
+  .tracks .col-cover { width: 44px; }
   /* .col-cover's zero left padding relied on the row-number gutter,
      which is hidden here — restore the table's edge padding. */
   .tracks .col-cover { padding-left: var(--space-2); }
+  /* The ⋯ trigger was 28px — below the 44px touch floor. Grow its hit
+     area to a 44px square (icon stays visually centered). Zero the
+     cell's vertical padding so the taller button matches the 44px
+     cover-driven row floor instead of stacking on top of it and
+     making rows grow. Scoped to the direct child so the queue's dense
+     .queue-row-actions cluster (remove + ⋯ in one cell) is untouched. */
+  .tracks .col-menu > .row-menu-trigger { width: 44px; height: 44px; }
+  .tracks .col-menu:not(:has(.queue-row-actions)) {
+    width: 48px;
+    padding: 0 var(--space-2) 0 0;
+  }
 
   /* Queue rows: the four-button action cluster (move-up / move-down /
      remove / ⋯-menu) is wider than any phone-sized cell. Drop the
