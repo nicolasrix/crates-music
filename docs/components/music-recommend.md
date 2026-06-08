@@ -26,6 +26,11 @@ tables.
 | `mmr` | Maximal Marginal Relevance reranker | n/a |
 | `queue_filter` | Queue-aware diversity filter (per-artist cap, dedup, MMR) | n/a |
 | `sessions` | `recommend_sessions` (session_id PK, anchor_track, started/ended_ms) — durable lifecycle mirror of `SyncOp::StartSession`/`StopSession` | `0008_recommend_sessions.sql` |
+| `track_affinity` | `track_affinity` (track_id PK, decayed like/skip/play counter) — feeds the gated `preference_enabled` re-scoring | `0013_track_affinity.sql` |
+| `rating` | `entity_rating` (kind, entity_id) — durable, always-on like/dislike for track/album/artist | `0014` → `0015_entity_rating.sql` |
+| `preference` | Pure compute: `preference_bonus`, affinity-event decay (`half_life_days_to_ms`) | n/a |
+| `leash` | Pure compute: anchor-leash demotion (`LeashParams`, `nearest_anchor_sim`) for travelling stations | n/a |
+| `provenance` | `recommendation` + `recommendation_item` tables — append-only log of what was served, with what scores, in what context (training substrate) | `0016_recommendation_log.sql` |
 
 This crate is **server-only**. It pulls in `usearch` (ships C++),
 `sqlx`, `reqwest`. Mobile clients won't link this.
@@ -181,6 +186,50 @@ Source: `mmr::mmr_rerank`. Pure function — no I/O, no SQLite. The
 queue filter assembles inputs (vectors via `AnnIndex::get_vector`,
 metadata via `MetadataStore::get_many`) and calls it.
 
+### 4b. Preference & rating re-scoring (pre-truncate)
+
+Before the top-N truncation on the `/next` path, ANN results are nudged by
+two durable, per-entity signals so a loved track sitting just outside the
+raw top-N can be pulled in (`rescore_ann_by_preference` + `affinity_bonuses`
+in `recommend.rs`):
+
+- **Decayed affinity** (`preference` module, gated by
+  `[recommend].preference_enabled`, default off). Each track carries a
+  half-life-decayed counter (`track_affinity`) fed by likes/plays (positive)
+  and skips (negative). `preference_bonus` maps `affinity ∈ [-1, 1]` to
+  `β · affinity` with `β = preference_weight` (default `0.15`). Always
+  *captured*; only *read* when the flag is on, so enabling it later works
+  with full history.
+- **Durable like/dislike** (`rating` module, **always-on**). A liked
+  track/album/artist adds `like_bonus` / `like_bonus_album` /
+  `like_bonus_artist` (`0.15 / 0.06 / 0.03`, `album+artist < track`); a
+  dislike hard-excludes the entity's tracks from the candidate pool
+  entirely (see `disliked_exclusions`). Never decays.
+
+These two channels are deliberately separate — folding ratings into the
+decaying affinity would let a dislike fade and would double-count. See
+`RatingStore` / `TrackAffinityStore` below.
+
+### 4c. Anchor leash — travelling stations
+
+`/next` (and seed stations) accept an optional `anchor_track_ids` list. When
+present, every aggregated candidate is demoted by
+
+```
+penalty(c) = λ · max(0, τ − sim(c, nearest_anchor))²        (whitened cosine)
+```
+
+before the final top-N walk (`leash::LeashParams::apply`). This keeps a
+*travelling* autoplay station tethered near the user's actual picks while it
+explores — candidates that drift past `τ` cosine of the nearest anchor are
+pulled back. `τ` / `λ` come from `[recommend].leash_tau` / `leash_lambda`
+(defaults `0.28` / `16`), with per-request overrides from the web Settings
+page; `λ ≤ 0` disables it (legacy behaviour). A low-weight **recency
+frontier** seed steers direction without being added to the anchor set, so
+it biases travel without widening the leash.
+
+Source: `leash::{LeashParams, nearest_anchor_sim, apply}`.
+
 ### 5. Session-scoped downvotes
 
 When the client supplies `session_id` and the user has thumbs-downed
@@ -222,6 +271,11 @@ use music_recommend::{
     MmrCandidate, mmr_rerank,
     QueueFilter, QueueFilterConfig, DiversityMode,
     Whitening, WhiteningStore, default_k,
+    RatingStore, RatedKind, Rating,
+    TrackAffinityStore, AffinityRow, AffinityEvent, preference_bonus,
+    LeashParams, LeashCandidate, LeashStats,
+    RecommendationLogStore, RecommendationRecord, RecommendationItemRecord,
+    RecommendationKind, RecommendationOutcome, StoredRecommendation,
     ann::AnnIndex,
     aggregate::sample_indices,
     ingest::{IngestWorker, AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store},
@@ -461,6 +515,51 @@ How the recommend handlers consume it (per-request, in `recommend.rs`):
   liked only through its parents. The magnitudes are config-overridable
   (`[recommend] like_bonus*`).
 
+### `TrackAffinityStore`
+
+The decaying play/skip/like **affinity** counter — one row per track,
+half-life-decayed (`affinity_half_life_days`, default 30). Distinct from
+`RatingStore` (durable, never-decay) and `FeedbackStore` (session-scoped).
+Feeds the `preference_enabled` re-scoring; always written, only read when
+the flag is on.
+
+```rust
+let store = TrackAffinityStore::new(embedding_pool.clone());
+store.apply_event(&track_id, AffinityEvent::Like, now_ms).await?;   // +signal
+store.apply_event(&track_id, AffinityEvent::Skip, now_ms).await?;   // −signal
+let aff = store.affinity_many(&track_ids, now_ms).await?;  // HashMap<TrackId, f32> in [-1,1]
+```
+
+`preference_bonus(affinity, weight)` (pure fn) maps the decayed value to the
+`β · affinity` relevance nudge applied in `recommend.rs`.
+
+### `RecommendationLogStore`
+
+Append-only **provenance** of what the recommender served — one
+`recommendation` row per served request (the context: kind, seed, session,
+served_ms) plus one `recommendation_item` row per served candidate (entity
+id, rank, score, optional feature JSON). The training substrate for future
+learning-to-rank models; it has **no effect on what gets recommended**.
+
+```rust
+let store = RecommendationLogStore::new(embedding_pool.clone());
+store.record(&RecommendationRecord {
+    kind: RecommendationKind::Next,
+    session_id, seed_track_id, served_ms,
+    items: vec![RecommendationItemRecord::new("tr-1", Some(0.83))
+        .with_features(json!({ "affinity_bonus": 0.15 }))],
+    /* … */
+}).await?;
+let recent = store.recent(50).await?;
+let labelled = store.recent_with_outcomes(50).await?;   // joins events at read time
+```
+
+Outcomes (skip/play/like) are **not** stored here — they're joined in from
+the event log at training time (`recent_with_outcomes`), preserving the
+write-once-at-serve-time property. Write is best-effort: a failed log warns
+and never blocks serving. Gated by `[recommend].log_provenance` (default on).
+Surfaced read-only at `GET /v1/diagnostics/recommendations`.
+
 ### `ProjectionStore`
 
 UMAP/PCA projection of every embedded track for the latent-space
@@ -584,6 +683,7 @@ the broadcast path zero-dependency.
 | `0013_track_affinity.sql` | `track_affinity` (track_id PK, decayed counter + last-update ms). Feeds the `preference_enabled` re-scoring. |
 | `0014_track_rating.sql` | `track_rating` (track_id PK, ±1 verdict, updated_ms) — the original track-only durable like/dislike. Superseded by `0015`. |
 | `0015_entity_rating.sql` | Generalises ratings to any entity: `entity_rating(kind, entity_id, rating, updated_ms)`, `WITHOUT ROWID`, PK `(kind, entity_id)`. Copies the live `track_rating` rows forward as `kind='track'`, then drops `track_rating`. Forward-only. |
+| `0016_recommendation_log.sql` | Provenance: `recommendation` (one row per served request — context) + `recommendation_item` (one row per served candidate — slate, score, features). Append-only, write-once-at-serve. Outcomes joined from the event log at training time, not stored here. |
 
 The store owns its own SQLite file
 (`gateway-state.recommend.sqlite`), separate from the OAuth state DB.
