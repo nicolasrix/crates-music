@@ -43,3 +43,24 @@ redirect_uris = [
 client_id     = "cli"
 name          = "CLI"
 redirect_uris = []
+
+# Optional recommender embedder sidecar. Omit the whole section to run the
+# recommender in tag-only degraded mode.
+# [embedder]
+# # Primary endpoint, tried first. On a split-host setup this is the GPU box.
+# url = "http://gpu-box.lan:9000"
+# # Failover endpoints, tried in order after `url` when the primary is
+# # unreachable — e.g. a CPU sidecar a watchdog brings up on the gateway
+# # host (see docker-compose.embedder-failover.yml). The gateway re-probes
+# # the whole list in the background and switches the active endpoint with
+# # no restart. Every endpoint must serve the SAME model_version + dim
+# # (same checkpoint), or its vectors aren't comparable in the shared ANN.
+# fallback_urls = ["http://embedder-fallback:9000"]
+# # Background re-probe cadence (seconds). 0 disables the loop (boot-time
+# # probe only — the legacy behaviour). Default 20.
+# probe_interval_seconds = 20
+# # Per-request timeout. CPU inference of a 120 s clip can take 10+ s.
+# timeout_seconds = 30
+# # Shared bearer for split-host deploys; must match the embedder's
+# # EMBEDDER_BEARER_TOKEN. Applies to the primary and all fallbacks.
+# # bearer_token = "CHANGE-ME"

@@ -97,6 +97,7 @@ async fn readyz_ok_when_navidrome_and_embedder_both_ready() {
         url: embedder_server.uri(),
         timeout_seconds: 2,
         bearer_token: None,
+        ..Default::default()
     };
     let handle = boot_probe(Some(&embedder_cfg)).await;
     assert!(handle.ready(), "embedder boot probe should mark ready");
@@ -166,6 +167,7 @@ async fn readyz_503_when_embedder_configured_but_not_loaded() {
         url: embedder_server.uri(),
         timeout_seconds: 2,
         bearer_token: None,
+        ..Default::default()
     };
     let handle = boot_probe(Some(&embedder_cfg)).await;
     assert!(!handle.ready());
@@ -186,6 +188,7 @@ async fn readyz_503_when_embedder_configured_but_unreachable() {
         url: "http://127.0.0.1:1".to_string(),
         timeout_seconds: 1,
         bearer_token: None,
+        ..Default::default()
     };
     let handle = boot_probe(Some(&embedder_cfg)).await;
     assert!(!handle.ready());

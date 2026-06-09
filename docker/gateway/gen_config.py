@@ -21,6 +21,11 @@ Optional env (with defaults):
     GATEWAY_BROWSE_TTL_SECONDS  86400
     OAUTH_WEB_REDIRECT_URIS     https://gateway.local:8443/oauth/callback
     EMBEDDER_URL                (unset → no [embedder] section)
+    EMBEDDER_FALLBACK_URLS      (comma-separated failover endpoints, tried
+                                 in order after EMBEDDER_URL; only used if
+                                 EMBEDDER_URL set)
+    EMBEDDER_PROBE_INTERVAL_SECONDS  (unset → gateway default 20; background
+                                 re-probe cadence for failover)
     EMBEDDER_TIMEOUT_SECONDS    30 (only used if EMBEDDER_URL set)
     EMBEDDER_BEARER_TOKEN       (unset/empty → no bearer_token field;
                                  only used if EMBEDDER_URL set)
@@ -113,6 +118,8 @@ def build_config(env: Mapping[str, str]) -> str:
     embedder_url = env.get("EMBEDDER_URL", "").strip()
     embedder_timeout: int | None = None
     embedder_bearer: str | None = None
+    embedder_fallbacks: list[str] = []
+    embedder_probe_interval: int | None = None
     if embedder_url:
         # Empty string treated as "unset" — matches the embedder side
         # so a misconfigured deploy fails closed, not silently open.
@@ -126,6 +133,23 @@ def build_config(env: Mapping[str, str]) -> str:
             raise ConfigError(
                 f"EMBEDDER_TIMEOUT_SECONDS must be an integer: {e}"
             ) from e
+        # Comma-separated failover endpoints, tried in order after the
+        # primary. Typically a CPU fallback sidecar (e.g.
+        # http://embedder-fallback:9000) that a watchdog brings up when the
+        # GPU box is down. All must serve the same model_version + dim.
+        fallback_raw = env.get("EMBEDDER_FALLBACK_URLS", "")
+        embedder_fallbacks = [u.strip() for u in fallback_raw.split(",") if u.strip()]
+        # Background re-probe cadence. Only emitted when explicitly set, so
+        # existing deploys render byte-identical (the gateway defaults to 20
+        # and re-probes regardless).
+        interval_raw = env.get("EMBEDDER_PROBE_INTERVAL_SECONDS", "").strip()
+        if interval_raw:
+            try:
+                embedder_probe_interval = int(interval_raw)
+            except ValueError as e:
+                raise ConfigError(
+                    f"EMBEDDER_PROBE_INTERVAL_SECONDS must be an integer: {e}"
+                ) from e
 
     # Optional [recommend] section. Only emitted when explicitly set, so
     # existing CLAP/stub deploys render byte-identical config (the gateway
@@ -228,6 +252,11 @@ def build_config(env: Mapping[str, str]) -> str:
     if embedder_url:
         parts.append("[embedder]")
         parts.append(f"url = {_str(embedder_url)}")
+        if embedder_fallbacks:
+            inner = ", ".join(_str(u) for u in embedder_fallbacks)
+            parts.append(f"fallback_urls = [{inner}]")
+        if embedder_probe_interval is not None:
+            parts.append(f"probe_interval_seconds = {embedder_probe_interval}")
         parts.append(f"timeout_seconds = {embedder_timeout}")
         if embedder_bearer is not None:
             parts.append(f"bearer_token = {_str(embedder_bearer)}")

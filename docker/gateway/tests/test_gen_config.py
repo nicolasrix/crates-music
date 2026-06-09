@@ -109,6 +109,67 @@ def test_embedder_bearer_token_empty_treated_as_unset() -> None:
     assert "bearer_token" not in parsed["embedder"]
 
 
+def test_embedder_fallback_urls_omitted_when_unset() -> None:
+    env = _minimum_env() | {"EMBEDDER_URL": "http://embedder:9000"}
+    parsed = tomllib.loads(build_config(env))
+    assert "fallback_urls" not in parsed["embedder"]
+    # probe_interval not emitted unless explicitly overridden (gateway
+    # defaults it) — keeps existing deploys byte-identical.
+    assert "probe_interval_seconds" not in parsed["embedder"]
+
+
+def test_embedder_fallback_urls_parsed_in_order() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://gpu-box.lan:9000",
+        "EMBEDDER_FALLBACK_URLS": (
+            "http://embedder-fallback:9000, http://spare.lan:9000"
+        ),
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["embedder"]["fallback_urls"] == [
+        "http://embedder-fallback:9000",
+        "http://spare.lan:9000",
+    ]
+
+
+def test_embedder_fallback_urls_drops_blank_entries() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://gpu-box.lan:9000",
+        "EMBEDDER_FALLBACK_URLS": "http://a:9000,, ,http://b:9000",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["embedder"]["fallback_urls"] == [
+        "http://a:9000",
+        "http://b:9000",
+    ]
+
+
+def test_embedder_probe_interval_override() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://embedder:9000",
+        "EMBEDDER_PROBE_INTERVAL_SECONDS": "10",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["embedder"]["probe_interval_seconds"] == 10
+
+
+def test_embedder_probe_interval_rejects_non_integer() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_URL": "http://embedder:9000",
+        "EMBEDDER_PROBE_INTERVAL_SECONDS": "soon",
+    }
+    with pytest.raises(ConfigError):
+        build_config(env)
+
+
+def test_embedder_fallback_urls_ignored_when_url_unset() -> None:
+    env = _minimum_env() | {
+        "EMBEDDER_FALLBACK_URLS": "http://embedder-fallback:9000"
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert "embedder" not in parsed
+
+
 def test_embedder_bearer_token_ignored_when_url_unset() -> None:
     # A token without a URL is meaningless — no [embedder] section at all.
     env = _minimum_env() | {"EMBEDDER_BEARER_TOKEN": "stray"}
