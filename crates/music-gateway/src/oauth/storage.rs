@@ -139,6 +139,18 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Input for `insert_user`. `created_at` is stamped by the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUser {
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    /// `'admin' | 'user' | 'guest'` — validated by the schema CHECK.
+    pub role: String,
+    pub password_hash: Option<String>,
+    pub host_user_id: Option<i64>,
+    pub expires_at_unix_ms: Option<i64>,
+}
+
 /// Input shape for `register_client`. Created-at timestamp is filled in by
 /// the store so callers can't forge it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,11 +531,29 @@ impl OauthStore {
         Ok(())
     }
 
+    /// Mint an access token with no explicit user attribution. The bearer
+    /// middleware resolves a NULL `user_id` to the owner — see
+    /// `resolve_principal`. PR B threads the real user via
+    /// `mint_access_token_for_user`.
     pub async fn mint_access_token(
         &self,
         client_id: &str,
         refresh_token_hash: Option<&str>,
         ttl: Duration,
+    ) -> Result<IssuedAccessToken> {
+        self.mint_access_token_for_user(client_id, refresh_token_hash, ttl, None)
+            .await
+    }
+
+    /// Mint an access token attributed to `user_id` (or unattributed when
+    /// `None`). Once PR B's multi-user login lands, the token endpoint
+    /// passes the logged-in user's id here.
+    pub async fn mint_access_token_for_user(
+        &self,
+        client_id: &str,
+        refresh_token_hash: Option<&str>,
+        ttl: Duration,
+        user_id: Option<i64>,
     ) -> Result<IssuedAccessToken> {
         let token = session::mint_token();
         let token_hash = session::hash_token(&token);
@@ -532,14 +562,15 @@ impl OauthStore {
             issued_at.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX));
         sqlx::query(
             "INSERT INTO access_tokens \
-                (token_hash, client_id, refresh_token_hash, issued_at, expires_at) \
-             VALUES (?, ?, ?, ?, ?)",
+                (token_hash, client_id, refresh_token_hash, issued_at, expires_at, user_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&token_hash)
         .bind(client_id)
         .bind(refresh_token_hash)
         .bind(issued_at)
         .bind(expires_at)
+        .bind(user_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedAccessToken {
@@ -587,6 +618,110 @@ impl OauthStore {
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
         }))
+    }
+
+    /// Insert a user row and return its assigned id. Roles are validated
+    /// at the schema level (`CHECK (role IN ...)`). `password_hash` is the
+    /// Argon2id PHC string for real accounts and `None` for guests;
+    /// `host_user_id`/`expires_at` are guest-only.
+    ///
+    /// This is the low-level row insert; the admin-facing provisioning
+    /// endpoint and guest-code redemption (PR B / PR D) call it after
+    /// their own validation. Exposed in PR A so the authorization layer
+    /// can be tested against real non-admin principals.
+    pub async fn insert_user(&self, user: NewUser) -> Result<i64> {
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "INSERT INTO users \
+                (username, display_name, role, password_hash, host_user_id, expires_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&user.username)
+        .bind(&user.display_name)
+        .bind(user.role)
+        .bind(&user.password_hash)
+        .bind(user.host_user_id)
+        .bind(user.expires_at_unix_ms)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    /// Fetch a user's display fields for `whoami`. Returns
+    /// `(username, display_name)` (both nullable — guests have neither).
+    /// `None` if the id doesn't exist.
+    pub async fn user_profile(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let row = sqlx::query("SELECT username, display_name FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| {
+            (
+                r.get::<Option<String>, _>("username"),
+                r.get::<Option<String>, _>("display_name"),
+            )
+        }))
+    }
+
+    /// Resolve an active access token to its owning principal. Returns
+    /// `(user_id, role_str, host_user_id)`.
+    ///
+    /// Identity rules (the `users` join is a LEFT JOIN so we can tell the
+    /// two cases apart):
+    ///   * **NULL `user_id`** — a legacy token (pre-multi-user) or a PR-A
+    ///     token whose mint path doesn't set `user_id` yet. Resolves to the
+    ///     owner/admin (id=1), mirroring the static-bearer fallback. We do
+    ///     *not* require a `users` row for this case, so it works even on a
+    ///     not-yet-bootstrapped store.
+    ///   * **Explicit `user_id`** — must map to a live `users` row. A
+    ///     missing row (deleted user) or an elapsed `expires_at` (lapsed
+    ///     guest) yields `None`, so a token can't outlive its account even
+    ///     while its own short TTL is unspent.
+    ///
+    /// Returns `None` for missing, expired, or revoked tokens — the
+    /// identity-aware companion to `find_access_token`.
+    pub async fn resolve_principal(
+        &self,
+        token: &str,
+    ) -> Result<Option<(i64, String, Option<i64>)>> {
+        let token_hash = session::hash_token(token);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "SELECT a.user_id AS raw_user_id, u.role AS role, \
+                    u.host_user_id AS host_user_id, u.expires_at AS user_expires_at \
+             FROM access_tokens a \
+             LEFT JOIN users u ON u.id = a.user_id \
+             WHERE a.token_hash = ? \
+               AND a.revoked_at IS NULL \
+               AND a.expires_at > ?",
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let raw_user_id: Option<i64> = row.get("raw_user_id");
+        match raw_user_id {
+            // Legacy / PR-A token → owner/admin, no users row required.
+            None => Ok(Some((1, "admin".to_string(), None))),
+            Some(user_id) => {
+                // LEFT JOIN miss => user deleted out from under the token.
+                let Some(role) = row.get::<Option<String>, _>("role") else {
+                    return Ok(None);
+                };
+                let user_expires_at: Option<i64> = row.get("user_expires_at");
+                if user_expires_at.is_some_and(|e| e <= now) {
+                    return Ok(None); // lapsed guest account
+                }
+                let host_user_id: Option<i64> = row.get("host_user_id");
+                Ok(Some((user_id, role, host_user_id)))
+            }
+        }
     }
 
     // -----------------------------------------------------------------

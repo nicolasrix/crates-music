@@ -5,13 +5,15 @@
 //     reachable without a 12-row scroller eating the viewport.
 // CSS toggles which one shows at the 768px breakpoint.
 
+import { useIsAdmin } from "../auth/useWhoami";
 import { Link, navigate } from "../router";
-import { panelRoute, SETTINGS_NAV } from "./nav";
+import { panelRoute, visibleGroups } from "./nav";
 
 export function SettingsRail({ active }: { active: string }) {
+  const groups = visibleGroups(useIsAdmin());
   return (
     <nav className="settings-rail" aria-label="settings sections">
-      {SETTINGS_NAV.map((group) => (
+      {groups.map((group) => (
         <div className="settings-rail-group" key={group.title}>
           <div className="settings-rail-head">{group.title}</div>
           {group.items.map((item) => (
@@ -40,6 +42,7 @@ export function SettingsRail({ active }: { active: string }) {
 }
 
 export function SettingsRailSelect({ active }: { active: string }) {
+  const groups = visibleGroups(useIsAdmin());
   return (
     <div className="settings-rail-mobile">
       <select
@@ -48,7 +51,7 @@ export function SettingsRailSelect({ active }: { active: string }) {
         onChange={(e) => navigate(panelRoute(e.target.value))}
         aria-label="settings section"
       >
-        {SETTINGS_NAV.map((group) => (
+        {groups.map((group) => (
           <optgroup key={group.title} label={group.title}>
             {group.items.map((item) => (
               <option key={item.id} value={item.id}>
