@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { ComponentType, useEffect } from "react";
 
 import { useAuth } from "./auth/AuthContext";
 import { AudioCacheProvider } from "./cache/AudioCacheContext";
@@ -8,7 +8,6 @@ import { Albums } from "./pages/Albums";
 import { Artist } from "./pages/Artist";
 import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
-import { DiagnosticsHome } from "./pages/diagnostics/DiagnosticsHome";
 import { Downloads } from "./pages/Downloads";
 import { Ingest } from "./pages/diagnostics/Ingest";
 import { Listening } from "./pages/diagnostics/Listening";
@@ -22,7 +21,6 @@ import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
 import { SearchBucket } from "./pages/SearchBucket";
-import { Settings } from "./pages/Settings";
 import { SignIn } from "./pages/SignIn";
 import { Station } from "./pages/Station";
 import { Tracks } from "./pages/Tracks";
@@ -32,6 +30,14 @@ import { PlayerProvider } from "./player/PlayerContext";
 import { modeFromSlug } from "./pages/listMode";
 import { useRoute } from "./router";
 import { initRum } from "./rum";
+import { DEFAULT_PANEL } from "./settings/nav";
+import { AboutPanel } from "./settings/panels/AboutPanel";
+import { AccountPanel } from "./settings/panels/AccountPanel";
+import { AppearancePanel } from "./settings/panels/AppearancePanel";
+import { AutoplayPanel } from "./settings/panels/AutoplayPanel";
+import { PlaybackPanel } from "./settings/panels/PlaybackPanel";
+import { StoragePanel } from "./settings/panels/StoragePanel";
+import { SettingsShell } from "./settings/SettingsShell";
 import { SyncProvider } from "./sync/SyncContext";
 
 export function App() {
@@ -96,13 +102,54 @@ function Routed({ path }: { path: string }) {
   if (path === "/liked") return <LikedSongs />;
   if (path === "/downloads") return <Downloads />;
   if (path === "/station") return <Station />;
-  if (path === "/settings") return <Settings />;
-  if (path === "/diagnostics") return <DiagnosticsHome />;
-  if (path === "/diagnostics/recommender") return <Recommender />;
-  if (path === "/diagnostics/latent") return <LatentSpace />;
-  if (path === "/diagnostics/ingest") return <Ingest />;
-  if (path === "/diagnostics/tracing") return <Tracing />;
-  if (path === "/diagnostics/rum") return <Rum />;
-  if (path === "/diagnostics/listening") return <Listening />;
+  // Settings shell — /settings and /settings/<panel>. Bare /settings renders
+  // the default panel without redirecting (no history churn); an unknown
+  // panel falls back to the default too.
+  m = path.match(/^\/settings(?:\/([^/]+))?$/);
+  if (m) {
+    const id = m[1] && SETTINGS_PANELS[m[1]] ? m[1] : DEFAULT_PANEL;
+    const Panel = SETTINGS_PANELS[id]!;
+    return (
+      <SettingsShell active={id}>
+        <Panel />
+      </SettingsShell>
+    );
+  }
+
+  // Legacy /diagnostics/* → /settings/* (old bookmarks / external links).
+  m = path.match(/^\/diagnostics(?:\/([^/]+))?$/);
+  if (m) {
+    const target = m[1] && SETTINGS_PANELS[m[1]] ? m[1] : "recommender";
+    return <Redirect to={`/settings/${target}`} />;
+  }
+
   return <Home />;
+}
+
+// Maps a settings/diagnostics panel id (also the URL slug) to its component.
+// Single source for the router; the rail's order + labels live in
+// settings/nav, keyed by the same ids.
+const SETTINGS_PANELS: Record<string, ComponentType> = {
+  account: AccountPanel,
+  playback: PlaybackPanel,
+  appearance: AppearancePanel,
+  autoplay: AutoplayPanel,
+  storage: StoragePanel,
+  about: AboutPanel,
+  recommender: Recommender,
+  listening: Listening,
+  latent: LatentSpace,
+  ingest: Ingest,
+  tracing: Tracing,
+  rum: Rum,
+};
+
+// URL-replace redirect (no extra history entry, so Back doesn't bounce off
+// the old path straight back to where the user came from).
+function Redirect({ to }: { to: string }) {
+  useEffect(() => {
+    history.replaceState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [to]);
+  return null;
 }

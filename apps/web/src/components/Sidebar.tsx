@@ -8,7 +8,7 @@
 // below the parent. Sub-items match the URL exactly; the parent stays
 // active for any sub-page (via `prefix`).
 
-import { Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Activity, Search, Plus, SlidersHorizontal } from "lucide-react";
+import { Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { createPlaylist, listPlaylists } from "../api/client";
@@ -78,27 +78,14 @@ const BROWSE: NavItem[] = [
   },
 ];
 
-const DIAGNOSTICS_SUBS: readonly SubItem[] = [
-  { to: "/diagnostics/recommender", label: "recommender" },
-  { to: "/diagnostics/latent", label: "latent space" },
-  { to: "/diagnostics/ingest", label: "ingest" },
-  { to: "/diagnostics/tracing", label: "tracing" },
-  { to: "/diagnostics/rum", label: "client RUM" },
-  { to: "/diagnostics/listening", label: "listening" },
-];
-
 const SYSTEM: NavItem[] = [
   {
-    to: "/settings",
+    // Settings now also hosts diagnostics (interleaved by domain in the
+    // settings rail), so the sidebar's "system" group is a single link.
+    to: "/settings/account",
     label: "settings",
     icon: <SlidersHorizontal size={18} strokeWidth={1.5} />,
-  },
-  {
-    to: "/diagnostics",
-    label: "diagnostics",
-    icon: <Activity size={18} strokeWidth={1.5} />,
-    prefix: "/diagnostics",
-    subs: DIAGNOSTICS_SUBS,
+    prefix: "/settings",
   },
 ];
 

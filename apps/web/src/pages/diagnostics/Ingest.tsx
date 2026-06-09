@@ -3,7 +3,6 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchQueueDepth } from "../../api/diagnostics";
-import { Layout } from "../../components/Layout";
 import { DiagSection, ErrorLine, REFRESH_MS } from "./shared";
 
 export function Ingest() {
@@ -14,19 +13,17 @@ export function Ingest() {
   });
 
   return (
-    <Layout breadcrumb="diagnostics / ingest">
-      <div className="section">
-        <div className="section-head">
-          <h2>ingest</h2>
-          <span className="count">refresh {REFRESH_MS / 1000}s</span>
-        </div>
-
-        <DiagSection title="ingest queue">
-          {queue.error && <ErrorLine error={queue.error} />}
-          {queue.data && <QueueDepth data={queue.data} />}
-        </DiagSection>
+    <div className="section">
+      <div className="section-head">
+        <h2>ingest</h2>
+        <span className="count">refresh {REFRESH_MS / 1000}s</span>
       </div>
-    </Layout>
+
+      <DiagSection title="ingest queue">
+        {queue.error && <ErrorLine error={queue.error} />}
+        {queue.data && <QueueDepth data={queue.data} />}
+      </DiagSection>
+    </div>
   );
 }
 

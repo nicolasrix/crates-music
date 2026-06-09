@@ -4,7 +4,6 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { ClientEventEntry, fetchClientEvents } from "../../api/diagnostics";
-import { Layout } from "../../components/Layout";
 import { fmtMs } from "../../utils/format";
 import { DiagSection, ErrorLine, REFRESH_MS, fmtRecentTime } from "./shared";
 
@@ -12,18 +11,16 @@ const CLIENT_EVENTS_LIMIT = 100;
 
 export function Rum() {
   return (
-    <Layout breadcrumb="diagnostics / rum">
-      <div className="section">
-        <div className="section-head">
-          <h2>client RUM</h2>
-          <span className="count">refresh {REFRESH_MS / 1000}s</span>
-        </div>
-
-        <DiagSection title="client events">
-          <ClientEventsSection />
-        </DiagSection>
+    <div className="section">
+      <div className="section-head">
+        <h2>client RUM</h2>
+        <span className="count">refresh {REFRESH_MS / 1000}s</span>
       </div>
-    </Layout>
+
+      <DiagSection title="client events">
+        <ClientEventsSection />
+      </DiagSection>
+    </div>
   );
 }
 
