@@ -31,7 +31,6 @@ import {
   LatentSpacePoint,
   SessionItem,
 } from "../api/diagnostics";
-import { Layout } from "../components/Layout";
 import { Link } from "../router";
 import { usePlayback } from "../sync/usePlayback";
 
@@ -185,12 +184,11 @@ export function LatentSpace() {
   });
 
   return (
-    <Layout breadcrumb="diagnostics / latent space">
       <div className="section">
         <div className="section-head">
           <h2>latent space</h2>
           <span className="count">
-            <Link to="/diagnostics">← back to diagnostics</Link>
+            <Link to="/settings/recommender">← recommender</Link>
           </span>
         </div>
 
@@ -282,7 +280,6 @@ export function LatentSpace() {
 
         {isLoading && !data && <p className="text-sm">loading projection…</p>}
       </div>
-    </Layout>
   );
 }
 

@@ -22,7 +22,6 @@ import {
   fetchSpanSeries,
   fetchTraces,
 } from "../../api/diagnostics";
-import { Layout } from "../../components/Layout";
 import { fmtMs } from "../../utils/format";
 import { DiagSection, ErrorLine, REFRESH_MS } from "./shared";
 
@@ -77,7 +76,6 @@ export function Tracing() {
   });
 
   return (
-    <Layout breadcrumb="diagnostics / tracing">
       <div className="section">
         <div className="section-head">
           <h2>tracing</h2>
@@ -162,7 +160,6 @@ export function Tracing() {
           {traces.data && <TraceList entries={traces.data.traces} />}
         </DiagSection>
       </div>
-    </Layout>
   );
 }
 
