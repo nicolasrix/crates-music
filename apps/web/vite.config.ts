@@ -1,13 +1,34 @@
 /// <reference types="vitest/config" />
+import { execSync } from "node:child_process";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+
+// Build stamp surfaced in Settings → About, so "which deploy is this?" is
+// answerable from the running app. Prefer an injected GIT_SHA (the Docker
+// web-builder stage has no .git, so it passes one as a build-arg → env);
+// fall back to a local `git` call for `npm run build` on the GPU host;
+// "unknown" if neither is available (e.g. a tarball build).
+function gitSha(): string {
+  if (process.env.GIT_SHA) return process.env.GIT_SHA;
+  try {
+    return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    return "unknown";
+  }
+}
 
 // Dev server proxies the gateway on https://gateway.local:8443. The
 // gateway uses a mkcert TLS cert (locally trusted, but the dev
 // machine's Node has no preinstalled trust store for it), so we let
 // the proxy skip certificate verification — only on the dev origin.
 export default defineConfig({
+  define: {
+    __GIT_SHA__: JSON.stringify(gitSha()),
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   plugins: [
     react(),
     // PWA shell: precache the built app shell so the SPA boots with no

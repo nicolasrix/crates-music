@@ -7,6 +7,7 @@
 import { refreshTokens } from "../auth/oauth";
 import { clearTokens, readTokens } from "../auth/tokens";
 import { codecFromContentType } from "../cache/audioKey";
+import { streamQualityParams } from "../settings/playback";
 import {
   Album,
   AlbumWithTracks,
@@ -334,7 +335,14 @@ export function streamUrl(trackId: string): string {
   // header OR ?access_token= for media URLs; see auth.rs comment.
   const tokens = readTokens();
   const auth = tokens ? `&access_token=${encodeURIComponent(tokens.accessToken)}` : "";
-  return `/rest/stream?id=${encodeURIComponent(trackId)}${auth}`;
+  // Streaming quality (Settings → Playback): transcode live playback to fit
+  // a metered connection. Forwarded verbatim through the /rest proxy to
+  // Navidrome. Independent of the offline-cache download quality; null =
+  // passthrough original. Read at src-build time so a change applies to the
+  // next track load.
+  const q = streamQualityParams();
+  const fmt = q ? `&format=${q.format}&maxBitRate=${q.maxBitRate}` : "";
+  return `/rest/stream?id=${encodeURIComponent(trackId)}${fmt}${auth}`;
 }
 
 // Download a full track for the offline cache. Unlike streamUrl (which is

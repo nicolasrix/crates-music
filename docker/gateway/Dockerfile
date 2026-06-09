@@ -22,6 +22,11 @@ COPY apps/web/package.json apps/web/package-lock.json ./
 RUN npm ci
 
 COPY apps/web/ ./
+# Inject the git SHA for the Settings → About build stamp. The build
+# context carries no .git, so vite.config.ts reads it from GIT_SHA instead
+# of calling `git`. Pass with: --build-arg GIT_SHA=$(git rev-parse --short HEAD)
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 RUN npm run build
 
 # ─── Stage 2: build the Rust gateway binary ───────────────────────────

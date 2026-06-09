@@ -1,19 +1,27 @@
-// Settings: user-facing knobs for the "tethered drift" autoplay refill.
+// Settings — one card per concern, general → advanced:
+//   Account · Playback · Autoplay · Offline & storage · Appearance · App
 //
-// Every parameter that shapes a refill is exposed here. They all live
-// client-side (localStorage, via AutoplayContext) and ride to the gateway
-// in each refill request, so retuning is instant — no rebuild, no restart.
-//
-// Two conceptual groups mirror the recommender design:
-//   • Boundary (leash) — how far a station may wander from your anchors.
-//   • Direction (travel) — how fast it moves on to new territory.
-// Plus the diversity λ and the master autoplay toggle.
+// Persistence is split across small localStorage-backed stores (autoplay
+// knobs via AutoplayContext, cache budgets via cacheSettings, stream quality
+// via settings/playback, theme via settings/theme). Every control writes
+// through immediately, so retuning is instant — no rebuild, no restart.
 
-import { HardDrive, RotateCcw, SlidersHorizontal, Smartphone } from "lucide-react";
+import {
+  Activity,
+  HardDrive,
+  Info,
+  LogOut,
+  Palette,
+  RotateCcw,
+  SlidersHorizontal,
+  Smartphone,
+  User,
+  Volume2,
+} from "lucide-react";
 import { useState } from "react";
 
+import { useAuth } from "../auth/AuthContext";
 import { useAudioCache } from "../cache/AudioCacheContext";
-import { useInstallPrompt } from "../pwa/installPrompt";
 import {
   CACHE_BOUNDS,
   CacheSettings,
@@ -31,12 +39,23 @@ import {
   DEFAULT_AUTOPLAY_SETTINGS,
   SETTINGS_BOUNDS,
 } from "../player/autoplaySettings";
+import { useInstallPrompt } from "../pwa/installPrompt";
+import {
+  InfoRow,
+  SelectRow,
+  SettingsButton,
+  SettingsSection,
+  SettingsSubgroup,
+  SliderRow,
+  ToggleRow,
+} from "../settings/controls";
+import { loadStreamQuality, saveStreamQuality, StreamQuality } from "../settings/playback";
+import { loadTheme, saveTheme, Theme } from "../settings/theme";
 
 interface KnobMeta {
   key: keyof AutoplaySettings;
   label: string;
   help: string;
-  /** Short hints for the two ends of the slider. */
   lowHint: string;
   highHint: string;
 }
@@ -92,109 +111,8 @@ const DIVERSITY_KNOBS: KnobMeta[] = [
   },
 ];
 
-function fmt(key: keyof AutoplaySettings, v: number): string {
+function fmtKnob(key: keyof AutoplaySettings, v: number): string {
   return key === "frontierWindow" ? String(v) : v.toFixed(2);
-}
-
-function KnobRow({
-  meta,
-  value,
-  onChange,
-}: {
-  meta: KnobMeta;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  const b = SETTINGS_BOUNDS[meta.key];
-  return (
-    <div style={{ marginBottom: 18 }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "baseline",
-          marginBottom: 2,
-        }}
-      >
-        <label htmlFor={`knob-${meta.key}`} style={{ fontWeight: 500 }}>
-          {meta.label}
-        </label>
-        <span
-          className="text-sm"
-          style={{ fontVariantNumeric: "tabular-nums", color: "var(--fg)" }}
-        >
-          {fmt(meta.key, value)}
-        </span>
-      </div>
-      <input
-        id={`knob-${meta.key}`}
-        type="range"
-        min={b.min}
-        max={b.max}
-        step={b.step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ width: "100%", accentColor: "var(--accent, #f0a020)" }}
-      />
-      <div
-        className="text-fg-muted text-sm"
-        style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}
-      >
-        <span>{meta.lowHint}</span>
-        <span>{meta.highHint}</span>
-      </div>
-      <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
-        {meta.help}
-      </p>
-    </div>
-  );
-}
-
-function StorageKnob({
-  label,
-  help,
-  value,
-  bounds,
-  onChange,
-}: {
-  label: string;
-  help: string;
-  value: number;
-  bounds: { min: number; max: number; step: number };
-  onChange: (v: number) => void;
-}) {
-  return (
-    <div style={{ marginBottom: 18 }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "baseline",
-          marginBottom: 2,
-        }}
-      >
-        <label style={{ fontWeight: 500 }}>{label}</label>
-        <span
-          className="text-sm"
-          style={{ fontVariantNumeric: "tabular-nums", color: "var(--fg)" }}
-        >
-          {formatBytes(value)}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={bounds.min}
-        max={bounds.max}
-        step={bounds.step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ width: "100%", accentColor: "var(--accent, #f0a020)" }}
-      />
-      <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
-        {help}
-      </p>
-    </div>
-  );
 }
 
 const QUALITY_LABELS: Record<DownloadQuality, string> = {
@@ -203,12 +121,26 @@ const QUALITY_LABELS: Record<DownloadQuality, string> = {
   mp3128: "mp3 · 128 kbps (most compatible)",
 };
 
+const QUALITY_OPTIONS = DOWNLOAD_QUALITIES.map((q) => ({ value: q, label: QUALITY_LABELS[q] }));
+
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: "system", label: "System" },
+  { value: "dark", label: "Dark" },
+  { value: "light", label: "Light" },
+];
+
+const ICON = { size: 18, strokeWidth: 1.5 } as const;
+
 export function Settings() {
   const { autoplay, setAutoplay, settings, setSettings } = useAutoplay();
   const cache = useAudioCache();
-  const [cacheSettings, setCacheSettingsState] = useState(loadCacheSettings);
+  const { tokens, logout } = useAuth();
 
-  const update = (key: keyof AutoplaySettings, v: number) =>
+  const [cacheSettings, setCacheSettingsState] = useState(loadCacheSettings);
+  const [streamQuality, setStreamQuality] = useState<StreamQuality>(loadStreamQuality);
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+
+  const updateKnob = (key: keyof AutoplaySettings, v: number) =>
     setSettings({ ...settings, [key]: v });
 
   const updateCache = (key: keyof CacheSettings, v: number) => {
@@ -219,206 +151,205 @@ export function Settings() {
     void cache.evictToBudget();
   };
 
-  const updateQuality = (q: DownloadQuality) => {
+  const updateDownloadQuality = (q: DownloadQuality) => {
     const next = { ...cacheSettings, downloadQuality: q };
     setCacheSettingsState(next);
     saveCacheSettings(next);
   };
 
-  const renderGroup = (title: string, knobs: KnobMeta[]) => (
-    <div className="section" style={{ marginTop: 24 }}>
-      <div className="section-head">
-        <h3 style={{ margin: 0 }}>{title}</h3>
-      </div>
-      {knobs.map((m) => (
-        <KnobRow
-          key={m.key}
-          meta={m}
-          value={settings[m.key]}
-          onChange={(v) => update(m.key, v)}
-        />
-      ))}
-    </div>
+  const updateStreamQuality = (q: StreamQuality) => {
+    setStreamQuality(q);
+    saveStreamQuality(q);
+  };
+
+  const updateTheme = (t: Theme) => {
+    setTheme(t);
+    saveTheme(t); // also applies <html data-theme> immediately
+  };
+
+  const renderKnobs = (title: string, knobs: KnobMeta[]) => (
+    <SettingsSubgroup title={title}>
+      {knobs.map((m) => {
+        const b = SETTINGS_BOUNDS[m.key];
+        return (
+          <SliderRow
+            key={m.key}
+            id={`knob-${m.key}`}
+            label={m.label}
+            displayValue={fmtKnob(m.key, settings[m.key])}
+            min={b.min}
+            max={b.max}
+            step={b.step}
+            value={settings[m.key]}
+            lowHint={m.lowHint}
+            highHint={m.highHint}
+            help={m.help}
+            onChange={(v) => updateKnob(m.key, v)}
+          />
+        );
+      })}
+    </SettingsSubgroup>
   );
 
   return (
     <Layout breadcrumb="settings">
-      <div className="section">
-        <div className="section-head">
-          <h2>
-            <SlidersHorizontal
-              size={18}
-              strokeWidth={1.5}
-              style={{ verticalAlign: "-3px", marginRight: 8 }}
-            />
-            autoplay
-          </h2>
-          <button
-            type="button"
-            onClick={() => setSettings({ ...DEFAULT_AUTOPLAY_SETTINGS })}
-            className="text-sm"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "6px 10px",
-              background: "var(--bg-elevated)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-1, 2px)",
-              color: "var(--fg)",
-              cursor: "pointer",
-            }}
-          >
+      {/* ── Account ─────────────────────────────────────────────── */}
+      <SettingsSection
+        icon={<User {...ICON} />}
+        title="account"
+        action={
+          <SettingsButton danger onClick={() => void logout()}>
+            <LogOut size={14} strokeWidth={1.5} />
+            sign out
+          </SettingsButton>
+        }
+      >
+        <InfoRow label="Status" value="Signed in" />
+        <InfoRow label="Server" value={location.origin} />
+        {tokens && (
+          <InfoRow label="Session expires" value={new Date(tokens.expiresAt).toLocaleString()} />
+        )}
+      </SettingsSection>
+
+      {/* ── Playback ────────────────────────────────────────────── */}
+      <SettingsSection icon={<Volume2 {...ICON} />} title="playback">
+        <SelectRow
+          id="stream-quality"
+          label="Streaming quality"
+          value={streamQuality}
+          options={QUALITY_OPTIONS}
+          help="Transcode target for live playback of tracks that aren't cached. Lower it on a metered connection — opus 128 streams ~8× lighter than FLAC. Independent of offline-download quality; affects the next track loaded."
+          onChange={updateStreamQuality}
+        />
+      </SettingsSection>
+
+      {/* ── Autoplay ────────────────────────────────────────────── */}
+      <SettingsSection
+        icon={<SlidersHorizontal {...ICON} />}
+        title="autoplay"
+        action={
+          <SettingsButton onClick={() => setSettings({ ...DEFAULT_AUTOPLAY_SETTINGS })}>
             <RotateCcw size={14} strokeWidth={1.5} />
-            reset to defaults
-          </button>
-        </div>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            marginBottom: 8,
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={autoplay}
-            onChange={(e) => setAutoplay(e.target.checked)}
-            style={{ accentColor: "var(--accent, #f0a020)" }}
-          />
-          <span style={{ fontWeight: 500 }}>Keep the queue topped up</span>
-        </label>
-        <p className="text-fg-muted text-sm">
-          When on, the player refills the upcoming queue with recommendations
-          that travel outward from your picks while staying tethered to them.
-          The knobs below shape that drift; defaults are tuned to stay close.
-        </p>
-      </div>
+            reset autoplay
+          </SettingsButton>
+        }
+      >
+        <ToggleRow
+          label="Keep the queue topped up"
+          checked={autoplay}
+          help="When on, the player refills the upcoming queue with recommendations that travel outward from your picks while staying tethered to them. The knobs below shape that drift; defaults are tuned to stay close."
+          onChange={setAutoplay}
+        />
+        {renderKnobs("Boundary — how far it strays", BOUNDARY_KNOBS)}
+        {renderKnobs("Direction — how it travels", TRAVEL_KNOBS)}
+        {renderKnobs("Diversity", DIVERSITY_KNOBS)}
+      </SettingsSection>
 
-      {renderGroup("Boundary — how far it strays", BOUNDARY_KNOBS)}
-      {renderGroup("Direction — how it travels", TRAVEL_KNOBS)}
-      {renderGroup("Diversity", DIVERSITY_KNOBS)}
-
-      <div className="section" style={{ marginTop: 24 }}>
-        <div className="section-head">
-          <h3 style={{ margin: 0 }}>
-            <HardDrive
-              size={16}
-              strokeWidth={1.5}
-              style={{ verticalAlign: "-3px", marginRight: 8 }}
-            />
-            Offline storage
-          </h3>
-        </div>
+      {/* ── Offline & storage ───────────────────────────────────── */}
+      <SettingsSection icon={<HardDrive {...ICON} />} title="offline & storage">
         <p className="text-fg-muted text-sm" style={{ marginBottom: 16 }}>
-          Audio is cached in the browser for offline playback. Lowering a
-          budget frees space immediately. See what's stored on the{" "}
+          Audio is cached in the browser for offline playback. Lowering a budget frees space
+          immediately. See what's stored on the{" "}
           <a href="/downloads" style={{ color: "var(--accent, #f0a020)" }}>
             downloads
           </a>{" "}
           page.
         </p>
-        <StorageKnob
+        <SliderRow
+          id="pinned-budget"
           label="Download budget"
-          help="Space for tracks you save for offline. Never auto-evicted."
+          displayValue={formatBytes(cacheSettings.pinnedBudgetBytes)}
+          min={CACHE_BOUNDS.pinnedBudgetBytes.min}
+          max={CACHE_BOUNDS.pinnedBudgetBytes.max}
+          step={CACHE_BOUNDS.pinnedBudgetBytes.step}
           value={cacheSettings.pinnedBudgetBytes}
-          bounds={CACHE_BOUNDS.pinnedBudgetBytes}
+          help="Space for tracks you save for offline. Never auto-evicted."
           onChange={(v) => updateCache("pinnedBudgetBytes", v)}
         />
-        <StorageKnob
+        <SliderRow
+          id="regular-budget"
           label="Recent cache budget"
-          help="Space for automatically-cached recent plays. Oldest is evicted first when full."
+          displayValue={formatBytes(cacheSettings.regularBudgetBytes)}
+          min={CACHE_BOUNDS.regularBudgetBytes.min}
+          max={CACHE_BOUNDS.regularBudgetBytes.max}
+          step={CACHE_BOUNDS.regularBudgetBytes.step}
           value={cacheSettings.regularBudgetBytes}
-          bounds={CACHE_BOUNDS.regularBudgetBytes}
+          help="Space for automatically-cached recent plays. Oldest is evicted first when full."
           onChange={(v) => updateCache("regularBudgetBytes", v)}
         />
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-            <label htmlFor="download-quality" style={{ fontWeight: 500 }}>
-              Offline audio quality
-            </label>
-            <select
-              id="download-quality"
-              value={cacheSettings.downloadQuality}
-              onChange={(e) => updateQuality(e.target.value as DownloadQuality)}
-              style={{
-                background: "var(--bg-elevated)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-1, 2px)",
-                color: "var(--fg)",
-                padding: "4px 8px",
-              }}
-            >
-              {DOWNLOAD_QUALITIES.map((q) => (
-                <option key={q} value={q}>
-                  {QUALITY_LABELS[q]}
-                </option>
-              ))}
-            </select>
-          </div>
-          <p className="text-fg-muted text-sm" style={{ marginTop: 6 }}>
-            Newly cached audio is transcoded server-side to this target —
-            Opus 128 packs roughly 8× more music into the budget than FLAC
-            originals. Already-cached tracks keep their current quality.
-            Streaming playback is unaffected.
-          </p>
-        </div>
-      </div>
+        <SelectRow
+          id="download-quality"
+          label="Offline audio quality"
+          value={cacheSettings.downloadQuality}
+          options={QUALITY_OPTIONS}
+          help="Newly cached audio is transcoded server-side to this target — opus 128 packs roughly 8× more music into the budget than FLAC originals. Already-cached tracks keep their current quality. Streaming playback is unaffected."
+          onChange={updateDownloadQuality}
+        />
+      </SettingsSection>
 
-      <InstallSection />
+      {/* ── Appearance ──────────────────────────────────────────── */}
+      <SettingsSection icon={<Palette {...ICON} />} title="appearance">
+        <SelectRow
+          id="theme"
+          label="Theme"
+          value={theme}
+          options={THEME_OPTIONS}
+          help="System follows your device's light/dark preference."
+          onChange={updateTheme}
+        />
+      </SettingsSection>
+
+      {/* ── App ─────────────────────────────────────────────────── */}
+      <AppSection />
     </Layout>
   );
 }
 
-// "Install as app" — only rendered when actionable: hidden once running
-// standalone, and hidden on browsers that neither fire
-// beforeinstallprompt nor have a manual path we can describe (iOS).
-function InstallSection() {
+// Install offer + diagnostics link + build stamp. Install button is shown
+// only when actionable: hidden once running standalone, and on browsers that
+// neither fire beforeinstallprompt nor have a manual path (everything but iOS).
+function AppSection() {
   const { canInstall, isStandalone, isIos, promptInstall } = useInstallPrompt();
-  if (isStandalone || (!canInstall && !isIos)) return null;
+  const showInstall = !isStandalone && (canInstall || isIos);
+
   return (
-    <div className="section" style={{ marginTop: 24 }}>
-      <div className="section-head">
-        <h3 style={{ margin: 0 }}>
-          <Smartphone
-            size={16}
-            strokeWidth={1.5}
-            style={{ verticalAlign: "-3px", marginRight: 8 }}
-          />
-          Install as app
-        </h3>
-      </div>
-      <p className="text-fg-muted text-sm" style={{ marginBottom: 12 }}>
-        Adds crates to your home screen / app list. It opens in its own
-        window and launches offline.
-      </p>
-      {canInstall ? (
-        <button
-          type="button"
-          onClick={() => void promptInstall()}
-          className="text-sm"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "8px 14px",
-            background: "var(--bg-elevated)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-1, 2px)",
-            color: "var(--fg)",
-            cursor: "pointer",
-          }}
-        >
-          <Smartphone size={14} strokeWidth={1.5} />
-          install
-        </button>
-      ) : (
-        <p className="text-fg-muted text-sm">
-          On iOS: open the <strong>Share</strong> menu and choose{" "}
-          <strong>Add to Home Screen</strong>.
-        </p>
+    <SettingsSection icon={<Info {...ICON} />} title="app">
+      {showInstall && (
+        <div style={{ marginBottom: 18 }}>
+          <p className="text-fg-muted text-sm" style={{ marginBottom: 12 }}>
+            <Smartphone
+              size={16}
+              strokeWidth={1.5}
+              style={{ verticalAlign: "-3px", marginRight: 6 }}
+            />
+            Install crates to your home screen / app list — it opens in its own window and launches
+            offline.
+          </p>
+          {canInstall ? (
+            <SettingsButton onClick={() => void promptInstall()}>
+              <Smartphone size={14} strokeWidth={1.5} />
+              install
+            </SettingsButton>
+          ) : (
+            <p className="text-fg-muted text-sm">
+              On iOS: open the <strong>Share</strong> menu and choose{" "}
+              <strong>Add to Home Screen</strong>.
+            </p>
+          )}
+        </div>
       )}
-    </div>
+
+      <InfoRow
+        label="Diagnostics"
+        value={
+          <a href="/diagnostics" style={{ color: "var(--accent, #f0a020)" }}>
+            <Activity size={13} strokeWidth={1.5} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+            open
+          </a>
+        }
+      />
+      <InfoRow label="Build" value={__GIT_SHA__} />
+      <InfoRow label="Built" value={new Date(__BUILD_TIME__).toLocaleString()} />
+    </SettingsSection>
   );
 }

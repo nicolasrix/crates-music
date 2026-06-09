@@ -7,7 +7,11 @@ import { AuthProvider } from "./auth/AuthContext";
 // Side effect: starts listening for `beforeinstallprompt` before React
 // mounts — the event fires once, early, and Settings offers it as a button.
 import "./pwa/installPrompt";
+import { applyTheme, loadTheme } from "./settings/theme";
 import "./index.css";
+
+// Apply the saved colour theme before first paint (no flash-of-wrong-theme).
+applyTheme(loadTheme());
 
 // Register the service worker (precached app shell → offline launch). With
 // registerType:"autoUpdate" a new shell self-activates and reloads. No-op in
