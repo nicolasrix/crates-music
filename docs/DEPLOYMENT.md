@@ -762,6 +762,91 @@ tag-only similarity); restart the gateway after fixing connectivity.
   Caddy/Traefik on the GPU box and point `EMBEDDER_URL` at the
   https:// fronting URL.
 
+## Embedder failover (CPU fallback + watchdog)
+
+In the split-host topology the gateway depends on a remote GPU embedder.
+When that box is off, text-prompt **stations** break (they're the one
+path that must embed a query live — `/v1/recommend/next` keeps working
+from stored vectors). Two cooperating pieces make the gateway ride out a
+primary outage with **no restart**:
+
+1. **Gateway-side failover.** `[embedder]` accepts a `fallback_urls`
+   list tried in order after the primary `url`, and a background loop
+   re-probes every `probe_interval_seconds` (default 20), pointing the
+   active client at the first healthy endpoint. So the moment a fallback
+   sidecar answers, stations recover. This also fixes the older
+   boot-only health latch — a sidecar appearing after boot is now picked
+   up automatically.
+
+2. **The watchdog** (`docker-compose.embedder-failover.yml`) brings a
+   **local CPU CLaMP 3 sidecar** up when the primary goes down and stops
+   it when the primary recovers, so it isn't holding ~3–4 GB of RAM
+   while the GPU box is healthy. It controls the fallback container via
+   the host Docker socket; the gateway is what actually switches traffic
+   (piece 1).
+
+> **Why a CPU fallback is fine for stations.** Embedding a text query is
+> a single xlm-roberta-base forward over ≤128 tokens — tens of
+> milliseconds on CPU. The slow CPU path is *audio* embedding (ingest),
+> which is idle once the library is embedded. See
+> [components/embedder.md](./components/embedder.md).
+
+### Wiring
+
+On the gateway host, in `.env`:
+
+```bash
+EMBEDDER_URL=http://gpu-box.lan:9000              # primary (the gateway also dials this)
+EMBEDDER_FALLBACK_URLS=http://embedder-fallback:9000
+EMBEDDER_AUTOSTART=true                            # arms the watchdog
+CRATES_CONFIG_DIR=/mnt/pool/configs/crates        # must contain models/<saas .pth>
+# Optional shared secret across primary + fallback + gateway:
+# EMBEDDER_BEARER_TOKEN=...
+```
+
+`gen_config.py` turns `EMBEDDER_FALLBACK_URLS` (comma-separated) into the
+gateway's `[embedder] fallback_urls`. Bring the stack up with the overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.embedder-failover.yml up -d
+```
+
+Prerequisites on the gateway host:
+
+- the `crates-music/embedder-clamp3:dev` image is built/loaded (the
+  watchdog runs it with `--no-build`);
+- the CLaMP 3 saas `.pth` sits at `$CRATES_CONFIG_DIR/models/` — the
+  image bakes MERT + xlm-roberta but **operators provide the
+  checkpoint**, and it must be the **same checkpoint** the GPU primary
+  serves (same `model_version` + 768 dim), or its vectors aren't
+  comparable in the shared ANN.
+
+### Behaviour & tuning
+
+| Env | Default | Effect |
+|---|---|---|
+| `EMBEDDER_AUTOSTART` | `false` | Master on/off. The watchdog container is always deployed by the overlay but idles unless this is exactly `true`. |
+| `EMBEDDER_CHECK_INTERVAL` | `30` | Watchdog poll cadence (independent of the gateway's `probe_interval_seconds`). |
+| `EMBEDDER_FAIL_THRESHOLD` | `2` | Consecutive primary misses before starting the fallback (hysteresis — avoids flapping on a blip). |
+| `EMBEDDER_OK_THRESHOLD` | `3` | Consecutive primary hits before stopping the fallback again. |
+| `EMBEDDER_PROBE_INTERVAL_SECONDS` | gateway `20` | How often the **gateway** re-probes its endpoint list. |
+| `EMBEDDER_FALLBACK_MEM_LIMIT` | `6g` | RAM cap for the CPU fallback embedder. |
+| `WATCHDOG_IMAGE` | `docker:cli` | Must bundle the `docker compose` plugin. |
+
+End-to-end on a primary outage: watchdog sees `FAIL_THRESHOLD` misses →
+`docker compose up -d embedder-fallback` → fallback loads (CLaMP 3 on CPU,
+tens of seconds) → the gateway's next re-probe finds it healthy and
+switches → stations work. On recovery: gateway prefers the primary again
+(it's first in the list) → watchdog sees `OK_THRESHOLD` hits → stops the
+fallback to reclaim RAM.
+
+> **the NAS host note.** The watchdog needs the Docker socket, which the
+> k3s-based NAS app platform doesn't cleanly expose. Run the failover
+> overlay on a real `docker compose` host, or keep a small always-on CPU
+> sidecar as a `fallback_urls` entry instead of using the watchdog (the
+> gateway-side failover in piece 1 works on its own — the watchdog is
+> only the RAM-saving lifecycle manager).
+
 ## Known limitations (Phase A + B)
 
 - **No multi-arch builds.** x86-64 only; ARM hosts (Pi 5, Apple

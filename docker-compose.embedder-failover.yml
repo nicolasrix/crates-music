@@ -1,0 +1,104 @@
+# Embedder failover overlay.
+#
+# Adds a local CPU CLaMP 3 fallback embedder plus a watchdog that brings it
+# up when the primary embedder (typically the GPU sidecar on another host)
+# goes down, and stops it again when the primary recovers. Pairs with the
+# gateway's `[embedder]` fallback list: the gateway re-probes its endpoints
+# every `probe_interval_seconds` and switches the active sidecar with no
+# restart — this overlay only manages the fallback container's lifecycle so
+# it isn't holding ~3-4 GB of RAM while the GPU box is healthy.
+#
+# Use (on the gateway host):
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.embedder-failover.yml up -d
+#
+# Enable the behaviour by setting these in .env:
+#   EMBEDDER_URL=http://<gpu-box>:9000            # primary (also the gateway's)
+#   EMBEDDER_FALLBACK_URLS=http://embedder-fallback:9000
+#   EMBEDDER_AUTOSTART=true
+#   CRATES_CONFIG_DIR=/mnt/pool/configs/crates    # must contain models/<saas .pth>
+#
+# Prerequisites on the gateway host:
+#   - the `crates-music/embedder-clamp3:dev` image is built or loaded
+#     (the watchdog runs it with --no-build);
+#   - the CLaMP 3 saas .pth sits at $CRATES_CONFIG_DIR/models/ (the image
+#     bakes MERT + xlm-roberta, but operators provide the checkpoint);
+#   - the Docker socket is reachable (NAS app platforms: prefer a real compose
+#     host — the socket mount is unsupported under the k3s app system).
+
+services:
+  # The CPU fallback embedder. Gated behind the `fallback` profile so a
+  # normal `up` never starts it; the watchdog starts it explicitly by name
+  # (which activates a profiled service) only when the primary is down.
+  embedder-fallback:
+    profiles: ["fallback"]
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clamp3
+    image: crates-music/embedder-clamp3:dev
+    container_name: crates-embedder-fallback
+    environment:
+      EMBEDDER_BACKEND: clamp3
+      # Must match the primary's model_version (= checkpoint filename) and
+      # dim, or its vectors aren't comparable in the shared ANN.
+      CLAMP3_CHECKPOINT: ${CLAMP3_CHECKPOINT:-/models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth}
+      MERT_FOLDER: ${MERT_FOLDER:-m-a-p/MERT-v1-95M}
+      # Shared secret with the gateway (and the primary). Omit for a
+      # same-host bridge-network trust boundary.
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+    volumes:
+      - type: bind
+        source: ${CRATES_CONFIG_DIR:?set CRATES_CONFIG_DIR to the crates dir under your configs dataset}/models
+        target: /models
+        read_only: true
+    expose:
+      - "9000"
+    # Not `unless-stopped`: the watchdog owns this container's lifecycle, so
+    # it must stay stopped once stopped (otherwise it'd resurrect on daemon
+    # restart and defeat the RAM reclaim).
+    restart: "no"
+    # saas checkpoint + MERT-95M + xlm-roberta-base in float32 + torch
+    # working memory. 6 GB conservative; lower once measured.
+    mem_limit: ${EMBEDDER_FALLBACK_MEM_LIMIT:-6g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
+
+  # The watchdog. Always deployed by this overlay, but inert unless
+  # EMBEDDER_AUTOSTART=true — that env var is the on/off switch the operator
+  # toggles. Controls the fallback via the host Docker socket + compose.
+  embedder-watchdog:
+    image: ${WATCHDOG_IMAGE:-docker:cli}
+    container_name: crates-embedder-watchdog
+    environment:
+      EMBEDDER_AUTOSTART: ${EMBEDDER_AUTOSTART:-false}
+      # Probe the same primary the gateway prefers.
+      EMBEDDER_PRIMARY_URL: ${EMBEDDER_URL:?set EMBEDDER_URL to the primary embedder}
+      EMBEDDER_HEALTH_PATH: ${EMBEDDER_HEALTH_PATH:-/healthz}
+      EMBEDDER_CHECK_INTERVAL: ${EMBEDDER_CHECK_INTERVAL:-30}
+      EMBEDDER_FAIL_THRESHOLD: ${EMBEDDER_FAIL_THRESHOLD:-2}
+      EMBEDDER_OK_THRESHOLD: ${EMBEDDER_OK_THRESHOLD:-3}
+      EMBEDDER_PROBE_TIMEOUT: ${EMBEDDER_PROBE_TIMEOUT:-5}
+      EMBEDDER_FALLBACK_SERVICE: ${EMBEDDER_FALLBACK_SERVICE:-embedder-fallback}
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+      # compose-in-compose: target the same project + files so the watchdog
+      # controls *this* stack's fallback service. Keep the file list in sync
+      # with what you `-f` on the host.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-crates-music}
+      COMPOSE_FILE: ${WATCHDOG_COMPOSE_FILE:-/project/docker-compose.yml:/project/docker-compose.embedder-failover.yml}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The project tree, for the compose files the watchdog drives. Read-only.
+      - ./:/project:ro
+    working_dir: /project
+    entrypoint: ["/bin/sh", "/project/docker/embedder/watchdog.sh"]
+    restart: unless-stopped
+    mem_limit: ${WATCHDOG_MEM_LIMIT:-128m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
