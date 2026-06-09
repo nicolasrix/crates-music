@@ -18,9 +18,9 @@ Navidrome speaks the **Subsonic API** (with OpenSubsonic extensions). Treat the 
                     ┌────────┴─────────────────────────┐
                     │  music-gateway (Rust, axum)      │
                     │  • Subsonic proxy + augments     │
-                    │  • Transcoded-stream LRU cache   │
+                    │  • ETag metadata cache (L2)      │
                     │  • OAuth 2.1 server              │
-                    │  • Recommender (CLAP + track2vec)│
+                    │  • Recommender (CLaMP 3 + ANN)   │
                     │  • Event log + WebSocket sync    │
                     │  • SQLite (gateway state)        │
                     └──────┬───────────────────┬───────────┘
@@ -42,12 +42,17 @@ crates/
   music-cache/       # SQLite metadata cache + on-disk LRU audio cache
   music-player/      # native playback (rodio + symphonia)
   music-sync/        # WebSocket client, optimistic state, queue merge
-  music-recommend/   # SERVER-ONLY: CLAP embedder, ANN index, track2vec
+  music-recommend/   # SERVER-ONLY: CLaMP 3 embedder client, ANN index, whitening
+                     #   (track2vec / behavioural index deferred — P6.8)
   music-gateway/     # the gateway binary
   music-cli/         # the CLI binary
 
 apps/
   web/               # TS + React SPA (also the installable PWA = mobile)
+
+services/
+  embedder/          # Python (FastAPI) inference sidecar — CLaMP 3 (live)
+                     #   or LAION CLAP (legacy); see Status for backends
 ```
 
 > **Planned but never built:** `crates/music-ffi` (UniFFI bindings) and
@@ -64,7 +69,7 @@ Web playback uses a plain `<audio>` element (MediaSource Extensions remain a def
 | L1 — UI state | RAM, each client | Currently-displayed views | LRU, small |
 | L2 — Metadata | SQLite, each client | Tracks/albums/artists/playlists | TTL + ETag refresh |
 | L3 — Audio | Disk, each client | Encoded audio files | LRU by bytes; **pinned tracks have a separate budget and are never LRU-evicted** |
-| L4 — Transcoded | Disk, gateway | Pre-transcoded variants | LRU by bytes |
+| L4 — Transcoded | Disk, gateway | Pre-transcoded variants | **Planned, never built** — audio rides the verbatim `/rest/*` proxy and Navidrome transcodes on demand (`format`/`maxBitRate`) |
 
 Two strict invariants:
 
@@ -77,7 +82,7 @@ Cache budgets are user-configurable per client (sensible defaults: ~2 GB Android
 
 Backend-only. Two indices, blended at query time — they capture different things:
 
-- **Content embeddings** (CLAP, [LAION-AI/CLAP](https://github.com/LAION-AI/CLAP)) — computed once per track at ingest. Captures "these tracks sound similar." Bonus: text-aligned, so natural-language queries ("rainy sunday afternoon") work via the same index.
+- **Content embeddings** (CLaMP 3, [sanderwood/clamp3](https://github.com/sanderwood/clamp3), 768-dim — LAION CLAP, 512-dim, was the original and is now the legacy/fallback backend) — computed once per track at ingest. Captures "these tracks sound similar." Bonus: text-aligned, so natural-language queries ("rainy sunday afternoon") work via the same index.
 - **Behavioural embeddings** (track2vec on listening sessions) — retrained nightly. Captures "this user plays these together," which can diverge from acoustic similarity.
 
 Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (single user, ~10⁴ tracks) an in-process index is sufficient — no separate vector DB.
@@ -94,8 +99,8 @@ ROCm coverage for newest AMD generations sometimes lags.
 ```
 New track discovered (Subsonic poll)
   → fetch first ~120s of audio from Navidrome (range request)
-  → decode + resample to CLAP's expected rate (symphonia + rubato)
-  → CLAP forward pass (ort, batched 32–64)
+  → decode + resample to the model's expected rate (symphonia + rubato)
+  → embed via the Python sidecar over HTTP (CLaMP 3 / MERT, PyTorch — not ort)
   → upsert into content-ANN index (mmap'd HNSW)
   → also extract: BPM, key, duration  ← cheap; exposed as filterable metadata
   → mark track ready in catalog
@@ -129,12 +134,25 @@ Plain HTTP is **not** acceptable — Service Workers, `navigator.storage.persist
 - **Pass-through:** anything under `/rest/*` we don't override forwards to Navidrome verbatim. Lets clients use existing Subsonic SDK shapes.
 - **Augmentations** (versioned under `/v1/`):
   - `GET /v1/recommend/next?seed=<trackId>&n=20`
-  - `GET /v1/recommend/station?seed=…|text=…`  ← text query uses CLAP's text encoder
+  - `GET /v1/recommend/station?seed=…|text=…`  ← text query uses the embedder's text encoder (CLaMP 3)
   - `POST /v1/events` (scrobble, skip, like, seek — feeds the recommender; **batched**, not per-event)
-  - `GET /v1/sync/snapshot` + `WS /v1/sync` (queue + playback state across devices)
-  - `GET /v1/stream/<trackId>?bitrate=…` — wraps Navidrome's `/rest/stream` with the L4 cache
+  - `PUT /v1/library/rating` + `GET /v1/library/ratings` (per-track/album/artist like/dislike — gateway-owned, no Navidrome writeback)
+  - `GET /v1/sync/snapshot` + `POST /v1/sync/ops` + `WS /v1/sync` (queue + playback state across devices)
 
-HTTP/2 throughout. Audio uses HTTP range requests. Events are coalesced client-side into batches every few seconds or on app background.
+The actual `/v1` surface is much larger than this short-list — there are
+also `/v1/recommend/{from-seeds,from-any,similar_albums,similar_artists,
+refit_whitening,feedback}`, a `/v1/diagnostics/*` family (traces,
+histogram, queue_depth, client_events, and a dozen `recommend/*`
+inspectors), and `/v1/admin/cache/*`. The router in
+`crates/music-gateway/src/app.rs` is the source of truth; see
+[`docs/`](./docs/) for the full reference.
+
+**No audio `/v1` route exists.** The originally-planned
+`GET /v1/stream/<trackId>` + L4 transcoded cache was **never built** —
+audio rides the verbatim `/rest/*` proxy and Navidrome transcodes on
+demand (`format`/`maxBitRate`).
+
+HTTP/2 throughout. Events are coalesced client-side into batches every few seconds or on app background.
 
 ## Responsiveness budget
 
@@ -160,7 +178,7 @@ Vertical slices, each end-to-end usable:
 | **P3** | Web UI. TS/React on gateway API, WASM core for caching. MSE playback. |
 | ~~**P4**~~ | ~~Native mobile (UniFFI + Compose Multiplatform + Media3).~~ **Retired** — mobile is the installable PWA (the P3 web client). See "Mobile is the PWA". |
 | **P5** | WebSocket sync. Queue CRDT. Cross-device state. |
-| **P6** | Recommender. CLAP ingest pipeline + content ANN. Behavioural index + nightly retrain. Text-query stations. |
+| **P6** | Recommender. CLaMP 3 ingest pipeline + content ANN. Behavioural index + nightly retrain. Text-query stations. |
 
 ## Status
 
@@ -168,7 +186,7 @@ For comprehensive onboarding documentation (architecture, getting
 started, per-component reference, API), see [`docs/`](./docs/). This
 section is the high-level "what's done, what isn't" view.
 
-**P3 in flight.** OAuth 2.1 server complete (P3.1):
+**P3 done.** OAuth 2.1 server complete (P3.1):
 
 - Hand-rolled, single-tenant. Six tables in `gateway-state.sqlite` —
   `users` (Argon2id master password), `oauth_clients`, `auth_codes`,
@@ -219,13 +237,15 @@ web has the optimistic-update sync provider. Single-linearizer model
 - `usearch` HNSW with cosine metric, persisted alongside a JSON
   sidecar for the `(TrackId ↔ u64)` map. ANN is a derived cache —
   rebuildable from SQLite at boot.
-- Python sidecar (`services/embedder/`): FastAPI + LAION CLAP for
-  audio + text embeddings. Stub backend for tests / dev. ROCm GPU
-  inference enabled — `pyproject.toml` routes torch through PyTorch's
-  ROCm wheel index; `/healthz` reports `device: "cuda" | "cpu"` so
-  silent CPU fallback is visible. ~6× wall-clock speedup over CPU on a
-  RDNA4 (5-track drain: 31 s CPU → 5 s GPU; pipeline now
-  Subsonic-bound, not compute-bound).
+- Python sidecar (`services/embedder/`): FastAPI; backend selected via
+  `EMBEDDER_BACKEND` — **CLaMP 3 (768-dim) is the default
+  backend**, LAION CLAP (512-dim) is the legacy fallback, plus a stub
+  backend for tests / dev. ROCm GPU inference enabled —
+  `pyproject.toml` routes torch through PyTorch's ROCm wheel index;
+  `/healthz` reports `device: "cuda" | "cpu"` and `dim` so silent CPU
+  fallback is visible. ~6× wall-clock speedup over CPU on an RDNA4 GPU
+  (5-track drain: 31 s CPU → 5 s GPU; pipeline now Subsonic-bound, not
+  compute-bound).
 - Gateway endpoints: `GET /v1/recommend/next`, `POST /v1/recommend/enqueue`,
   `POST /v1/events`. Boot-time embedder probe with degraded-mode
   fallback if unreachable.
@@ -235,12 +255,12 @@ web has the optimistic-update sync provider. Single-linearizer model
 
 **Deferred from P6:** behavioural index + nightly track2vec retrain
 (P6.8). The event log is in place to capture signal for P6.8 when it
-lands. **P6.9 (text-query stations) now done on the CLaMP 3 branch** —
-`embed_text` is implemented in `Clamp3Embedder` and the gateway's
-`GET /v1/recommend/station?text=…` was already wired; see the CLaMP 3
-migration notes below.
+lands. **P6.9 (text-query stations) done (CLaMP 3)** — `embed_text` is
+implemented in `Clamp3Embedder` and the gateway's
+`GET /v1/recommend/station?text=…` is wired; see the CLaMP 3 migration
+notes below.
 
-**CLaMP 3 migration — in flight (`feat/clamp3-migration`).** Swapping
+**CLaMP 3 migration — DONE (merged to `dev`, PR #13).** Swapped
 the content embedder from LAION CLAP (512-dim) to
 [CLaMP 3](https://github.com/sanderwood/clamp3) (768-dim) for stronger
 music-specific acoustic similarity. Done so far:
@@ -270,7 +290,7 @@ music-specific acoustic similarity. Done so far:
   Cached per-model in `embedding_whitening` (migration 0011), fit-or-load
   at boot, gated by `[recommend].whitening_enabled` (default true). Refit
   via `POST /v1/recommend/refit_whitening`.
-- **Cross-modal text mean** (migration 0012, `whitening_text.rs`): ABTT is
+- **Cross-modal text mean** (migration 0012; code in `music-gateway/src/whitening_text.rs`): ABTT is
   fit on audio, but CLaMP 3 text embeddings sit at a modality-gap offset —
   so audio-fit whitening *collapses* text station queries (verified live:
   thrash vs ballad went 3/10 → 9/10 overlap). Fix: estimate `μ_text` by
@@ -325,9 +345,12 @@ music-specific acoustic similarity. Done so far:
 
 - **the NAS host** is the **gateway host** and is **CPU-only** (no GPU). It
   runs `crates-gateway` (the live recommender consumer) + `crates-caddy`.
-  Its `EMBEDDER_URL` dials the GPU host's GPU sidecar over the LAN.
-  the NAS host's own `crates-embedder` (CLAP CPU) is vestigial — unused while
-  `EMBEDDER_URL` points off-box.
+  Its primary `EMBEDDER_URL` dials the GPU host's GPU sidecar over the
+  LAN. Since the failover work (PR #22) its local `crates-embedder` was
+  swapped to a **CPU CLaMP 3** image (same checkpoint → same
+  `model_version`/768-dim as the GPU primary, so ANN-compatible) and
+  registered as a `fallback_urls` entry — no longer vestigial; it carries
+  text-station traffic when the GPU box is down.
 - **The GPU host** (`192.0.2.53`) has the **AMD RDNA4
   XT** and runs the **GPU embedder sidecar** (`crates-embedder`,
   `embedder-clamp3-rocm:dev`) on `:9000`. It additionally runs a
@@ -360,6 +383,39 @@ GPU drains the queue. The cached ABTT whitening (`embedding_whitening`
 table) does **not** need a manual wipe — `load_or_fit_whitening` detects
 a stale-dim cached row at boot, logs a warning, and refits from the
 corpus automatically.
+
+**Post-P6-MVP recommender + ratings work — all merged to `dev`.** Built
+on top of the CLaMP 3 base after the P6 minimum-viable slice:
+
+- **Track / entity ratings (PR #16, migrations 0014 `track_rating` +
+  0015 `entity_rating`).** Gateway-owned per-song/album/artist
+  like/dislike with **no Navidrome writeback** (deliberate constraint):
+  dislike = exclude from recommendations + auto-skip, like = score boost
+  + a Liked page. Always-on. Endpoints `PUT /v1/library/rating` +
+  `GET /v1/library/ratings`; the web skip producer feeds `/v1/events`.
+- **Rules-based preference affinity (migration 0013 `track_affinity`).**
+  Server-side re-scoring of recommendation candidates from accumulated
+  like/skip signal; `HardCap` is the live default blend mode.
+- **Tethered-drift autoplay (PR #19).** Fixes the ~20-track single-anchor
+  ceiling with a recency frontier (travel) + anchor leash (boundary);
+  all params user-tunable in the web `/settings`.
+- **Recommendation provenance (migration 0016 `recommendation_log`).**
+  Logs what was served + context + scores as a training substrate for a
+  future ranking model; readable at `GET /v1/diagnostics/recommendations`.
+- Migrations in `crates/music-recommend/migrations/` now run through
+  **0016** (the P6-MVP notes above only cover 0011–0012).
+
+**Embedder failover + watchdog (PR #22, merged to `dev` 2026-06-09;
+live on the NAS host).** Text-prompt **stations** now survive the GPU
+embedder sidecar being down (`/v1/recommend/next` was never affected —
+it reads stored vectors). Root cause was a boot-latched health flag
+(`record_health` was dead code). Fix: `[embedder]` gained
+`fallback_urls` + a `probe_interval_seconds` re-probe loop that switches
+the active client to the first healthy URL. A CPU CLaMP 3 fallback runs
+on the NAS host (`http://embedder:9000`) behind the GPU primary; an optional
+docker watchdog (`docker-compose.embedder-failover.yml` +
+`docker/embedder/watchdog.sh`) can start/stop a local CPU fallback on
+demand. See `docs/DEPLOYMENT.md` "Embedder failover".
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
@@ -585,26 +641,35 @@ uv sync                # or: pip install -e '.[dev]'
 uv run uvicorn embedder.app:app --port 9000
 ```
 
-For real CLAP inference (production):
+For real inference (production), the live backend is **CLaMP 3** (768-dim):
 
 ```bash
-uv sync --extra clap   # pulls torch + laion-clap + librosa
-EMBEDDER_BACKEND=clap CLAP_CHECKPOINT=/path/to/clap.pt \
+uv sync --extra clamp3   # pulls torch + transformers + MERT deps
+EMBEDDER_BACKEND=clamp3 CLAMP3_CHECKPOINT=/path/to/clamp3_saas.pth \
+  MERT_FOLDER=m-a-p/MERT-v1-95M \
   uv run uvicorn embedder.app:app --port 9000
 ```
 
-Then add to `gateway.toml`:
+The legacy CLAP backend (512-dim) is still available via
+`uv sync --extra clap` + `EMBEDDER_BACKEND=clap CLAP_CHECKPOINT=…`, but
+the production deployment runs CLaMP 3 (see the CLaMP 3 migration notes
+in Status). Then add to `gateway.toml`:
 
 ```toml
 [embedder]
 url = "http://localhost:9000"
-timeout_seconds = 30        # default; CLAP on CPU can take 10+ s
+# fallback_urls = ["http://cpu-fallback:9000"]  # re-probed; survives a primary outage
+timeout_seconds = 30        # default; inference on CPU can take 10+ s
 ```
 
-Restart the gateway; you should see
-`embedder: probe ok model=… dim=512` in the logs. If the sidecar is
-unreachable at boot, the gateway logs a warning and continues without
-it (no auto-retry — restart the gateway after starting the sidecar).
+The gateway's `[recommend] embedding_dim` must match the backend's dim
+(768 for CLaMP 3, 512 for CLAP) — a dim change is non-migratable and
+requires wiping/rebuilding the ANN sidecar. Restart the gateway; you
+should see `embedder: probe ok model=… dim=768 device=cuda` in the
+logs. Unlike the original boot-only probe, the gateway now re-probes on
+an interval (`probe_interval_seconds`, default 20) and fails over to
+`fallback_urls`, so a sidecar that comes up after the gateway is picked
+up automatically.
 
 ### Audio cache (`[cache]` block, optional)
 
