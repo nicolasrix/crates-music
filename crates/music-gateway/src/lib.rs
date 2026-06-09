@@ -16,6 +16,7 @@ pub mod events;
 pub mod ingest;
 pub mod library_rating;
 pub mod oauth;
+pub mod principal;
 pub mod proxy;
 pub mod ratelimit;
 pub mod readyz;

@@ -3,7 +3,7 @@
 
 use axum::{
     Json, Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     middleware::from_fn_with_state,
     routing::{any, get, post, put},
@@ -68,26 +68,16 @@ pub fn build_router(state: AppState) -> Router {
             get(oauth_handlers::device_verify_get).post(oauth_handlers::device_verify_post),
         );
 
-    let v1 = Router::new()
-        .route("/v1/whoami", get(whoami))
-        .route("/v1/sync/snapshot", get(sync_handlers::snapshot))
-        .route("/v1/sync/ops", post(sync_handlers::submit_op))
-        .route("/v1/sync", get(crate::sync::ws::ws_handler))
-        .route("/v1/recommend/next", get(recommend::next))
-        .route("/v1/recommend/station", get(recommend::station))
-        .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
-        .route("/v1/recommend/from-any", post(recommend::from_any))
-        .route("/v1/recommend/similar_albums", post(recommend::similar_albums))
-        .route("/v1/recommend/similar_artists", post(recommend::similar_artists))
+    // Admin-only tier: maintenance + introspection. Guarded by
+    // `require_admin`, which reads the `Principal` injected upstream by
+    // `require_bearer` and 403s a non-admin. A User or Guest token
+    // authenticates (passes `require_bearer`) but is rejected here.
+    let v1_admin = Router::new()
         .route("/v1/recommend/enqueue", post(recommend::enqueue))
         .route(
             "/v1/recommend/refit_whitening",
             post(recommend::refit_whitening),
         )
-        .route("/v1/recommend/feedback", post(recommend_feedback::submit))
-        .route("/v1/library/rating", put(library_rating::put_rating))
-        .route("/v1/library/ratings", get(library_rating::list_ratings))
-        .route("/v1/events", post(events::submit))
         .route(
             "/v1/admin/cache/invalidate",
             post(admin::invalidate_cache),
@@ -158,6 +148,28 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/diagnostics/recommendations",
             get(diagnostics_handlers::recommendations),
         )
+        .layer(axum::middleware::from_fn(crate::principal::require_admin));
+
+    // Any-authenticated tier: browse, play, recommend reads, room
+    // control, ratings/events, whoami.
+    let v1_general = Router::new()
+        .route("/v1/whoami", get(whoami))
+        .route("/v1/sync/snapshot", get(sync_handlers::snapshot))
+        .route("/v1/sync/ops", post(sync_handlers::submit_op))
+        .route("/v1/sync", get(crate::sync::ws::ws_handler))
+        .route("/v1/recommend/next", get(recommend::next))
+        .route("/v1/recommend/station", get(recommend::station))
+        .route("/v1/recommend/from-seeds", post(recommend::from_seeds))
+        .route("/v1/recommend/from-any", post(recommend::from_any))
+        .route("/v1/recommend/similar_albums", post(recommend::similar_albums))
+        .route("/v1/recommend/similar_artists", post(recommend::similar_artists))
+        .route("/v1/recommend/feedback", post(recommend_feedback::submit))
+        .route("/v1/library/rating", put(library_rating::put_rating))
+        .route("/v1/library/ratings", get(library_rating::list_ratings))
+        .route("/v1/events", post(events::submit));
+
+    let v1 = v1_general
+        .merge(v1_admin)
         // Coarse body cap on the JSON API only — see MAX_V1_BODY_BYTES.
         // Scoped here so it does NOT reach the /rest proxy once merged.
         .layer(DefaultBodyLimit::max(MAX_V1_BODY_BYTES));
@@ -236,9 +248,28 @@ async fn healthz() -> Json<serde_json::Value> {
     }))
 }
 
-async fn whoami() -> Json<serde_json::Value> {
-    Json(json!({
-        "service": "music-gateway",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+/// Identity of the calling principal, for clients to drive role-gated UI.
+///
+/// Returns the resolved `Principal` plus the display fields from `users`.
+/// Replaces the former static `{service, version}` stub.
+async fn whoami(
+    State(state): State<AppState>,
+    crate::principal::AuthPrincipal(principal): crate::principal::AuthPrincipal,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let (username, display_name) = state
+        .oauth()
+        .user_profile(principal.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("whoami user_profile lookup failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or((None, None));
+    Ok(Json(json!({
+        "user_id": principal.user_id,
+        "role": principal.role,
+        "username": username,
+        "display_name": display_name,
+        "host_user_id": principal.host_user_id,
+    })))
 }

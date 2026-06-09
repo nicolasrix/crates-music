@@ -17,31 +17,52 @@ use axum::{
     response::Response,
 };
 
+use crate::principal::{Principal, Role};
 use crate::state::AppState;
 
+/// Authenticate the request and inject an `Extension<Principal>` for
+/// downstream handlers.
+///
+/// Two accepted credentials, both resolving to a principal:
+///   1. An OAuth access token — joined to `users` for the real role/host.
+///   2. The legacy static config bearer — resolves to the owner/admin.
+///
+/// Establishing the `Principal` here (PR A of the user-system plan) means
+/// every protected handler can trust `AuthPrincipal` without re-checking
+/// auth, and the admin-gating layers downstream read identity from the
+/// same source of truth.
 pub async fn require_bearer(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let presented = extract_bearer(&request).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // 1. OAuth access token? sha256 + index lookup; cheap.
-    let oauth_ok = match state.oauth().find_access_token(&presented).await {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
+    // 1. OAuth access token? sha256 + index lookup joined to users; cheap.
+    match state.oauth().resolve_principal(&presented).await {
+        Ok(Some((user_id, role_str, host_user_id))) => {
+            let Some(role) = Role::from_db_str(&role_str) else {
+                // Corrupt role column — fail closed rather than guess.
+                tracing::error!("user {user_id} has unparseable role {role_str:?}");
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            request.extensions_mut().insert(Principal {
+                user_id,
+                role,
+                host_user_id,
+            });
+            return Ok(next.run(request).await);
+        }
+        Ok(None) => {}
         Err(e) => {
             tracing::error!("oauth access-token lookup failed: {e}");
-            false
         }
-    };
-    if oauth_ok {
-        return Ok(next.run(request).await);
     }
 
     // 2. Static bearer fallback (legacy CLI; goes away when CLI moves
-    //    to OAuth in P4).
+    //    to OAuth in P4). Resolves to the owner/admin.
     if constant_time_eq(presented.as_bytes(), state.bearer_token().as_bytes()) {
+        request.extensions_mut().insert(Principal::owner());
         return Ok(next.run(request).await);
     }
 

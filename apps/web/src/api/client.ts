@@ -386,4 +386,21 @@ export function coverArtUrl(
   return `/rest/getCoverArt?id=${encodeURIComponent(coverArt)}&size=${size}${auth}${seedQ}`;
 }
 
+export type Role = "admin" | "user" | "guest";
+
+export interface Whoami {
+  user_id: number;
+  role: Role;
+  username: string | null;
+  display_name: string | null;
+  host_user_id: number | null;
+}
+
+/** Resolve the calling principal (identity + role) for role-gated UI. */
+export async function whoami(): Promise<Whoami> {
+  const res = await apiFetch("/v1/whoami");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as Whoami;
+}
+
 export { AuthError };

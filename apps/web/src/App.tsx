@@ -30,7 +30,8 @@ import { PlayerProvider } from "./player/PlayerContext";
 import { modeFromSlug } from "./pages/listMode";
 import { useRoute } from "./router";
 import { initRum } from "./rum";
-import { DEFAULT_PANEL } from "./settings/nav";
+import { useIsAdmin } from "./auth/useWhoami";
+import { DEFAULT_PANEL, panelVisible } from "./settings/nav";
 import { AboutPanel } from "./settings/panels/AboutPanel";
 import { AccountPanel } from "./settings/panels/AccountPanel";
 import { AppearancePanel } from "./settings/panels/AppearancePanel";
@@ -108,12 +109,7 @@ function Routed({ path }: { path: string }) {
   m = path.match(/^\/settings(?:\/([^/]+))?$/);
   if (m) {
     const id = m[1] && SETTINGS_PANELS[m[1]] ? m[1] : DEFAULT_PANEL;
-    const Panel = SETTINGS_PANELS[id]!;
-    return (
-      <SettingsShell active={id}>
-        <Panel />
-      </SettingsShell>
-    );
+    return <SettingsRoute id={id} />;
   }
 
   // Legacy /diagnostics/* → /settings/* (old bookmarks / external links).
@@ -124,6 +120,23 @@ function Routed({ path }: { path: string }) {
   }
 
   return <Home />;
+}
+
+// Renders a settings panel, downgrading admin-only ("observe") panels to
+// the default for non-admins. Kept as its own component so the role hook
+// runs unconditionally (Routed's body has conditional early returns).
+// Fails closed: while whoami is still resolving, `useIsAdmin()` is false,
+// so a deep-linked observe panel shows the default panel until identity
+// confirms admin — never the reverse.
+function SettingsRoute({ id }: { id: string }) {
+  const isAdmin = useIsAdmin();
+  const effectiveId = panelVisible(id, isAdmin) ? id : DEFAULT_PANEL;
+  const Panel = SETTINGS_PANELS[effectiveId]!;
+  return (
+    <SettingsShell active={effectiveId}>
+      <Panel />
+    </SettingsShell>
+  );
 }
 
 // Maps a settings/diagnostics panel id (also the URL slug) to its component.

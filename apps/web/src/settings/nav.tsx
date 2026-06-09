@@ -90,3 +90,24 @@ export function panelRoute(id: string): string {
 export function findItem(id: string): SettingsItem | undefined {
   return SETTINGS_ITEMS.find((i) => i.id === id);
 }
+
+// Every "observe" panel reads an admin-gated `/v1/diagnostics/*` (or
+// recommender-maintenance) endpoint, so non-admins must not see them —
+// they'd render 403s. The gateway enforces this server-side (PR A); the
+// rail filtering below keeps the UI consistent with that policy.
+
+/** Groups visible to a role, with observe items (and now-empty groups)
+ *  dropped for non-admins. */
+export function visibleGroups(isAdmin: boolean): readonly SettingsGroup[] {
+  if (isAdmin) return SETTINGS_NAV;
+  return SETTINGS_NAV.map((g) => ({
+    ...g,
+    items: g.items.filter((i) => i.kind === "config"),
+  })).filter((g) => g.items.length > 0);
+}
+
+/** Whether a panel id is reachable by a role (admin sees all). */
+export function panelVisible(id: string, isAdmin: boolean): boolean {
+  if (isAdmin) return true;
+  return findItem(id)?.kind === "config";
+}
