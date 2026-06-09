@@ -202,6 +202,12 @@ impl EmbedderClient {
         })
     }
 
+    /// The base URL this client dials. Used by the gateway's failover
+    /// probe loop to log which endpoint just went (un)healthy.
+    pub fn base_url(&self) -> &Url {
+        &self.base
+    }
+
     pub async fn healthz(&self) -> Result<EmbedderHealth, EmbedderError> {
         let url = join(&self.base, "/healthz");
         let resp = self.http.get(url).send().await?;

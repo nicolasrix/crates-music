@@ -146,6 +146,15 @@ async fn main() -> Result<()> {
     };
 
     let embedder = boot_probe(config.embedder.as_ref()).await;
+    // Background failover: re-probe the endpoint list and switch the active
+    // sidecar without a restart. No-op when the interval is 0 or no
+    // `[embedder]` block is configured.
+    if let Some(cfg) = config.embedder.as_ref() {
+        music_gateway::embedder::spawn_probe_loop(
+            embedder.clone(),
+            Duration::from_secs(cfg.probe_interval_seconds),
+        );
+    }
     let recommend = boot_recommender(
         &config.oauth.state_db,
         config.recommend.embedding_dim,

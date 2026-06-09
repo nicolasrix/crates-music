@@ -119,7 +119,22 @@ pub struct OauthClientConfig {
 /// fall back to tag-only similarity.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmbedderConfigSection {
+    /// Primary embedder endpoint, tried first on every probe. Kept as a
+    /// single `url` for back-compat with existing configs.
     pub url: String,
+    /// Additional endpoints tried in order *after* `url` when the primary
+    /// is unreachable — e.g. a CPU fallback sidecar on the gateway host
+    /// that a watchdog brings up when the GPU box goes down. All endpoints
+    /// must serve the **same** `model_version` + `dim` (same checkpoint),
+    /// otherwise their embeddings are not comparable in the shared ANN.
+    #[serde(default)]
+    pub fallback_urls: Vec<String>,
+    /// How often (seconds) the gateway re-probes the endpoints in the
+    /// background and switches the active one to the first healthy. `0`
+    /// disables the loop (boot-time probe only — the legacy behaviour).
+    /// Defaults to 20.
+    #[serde(default = "default_probe_interval_secs")]
+    pub probe_interval_seconds: u64,
     /// Per-request timeout in seconds. Defaults to 30 — embedding a
     /// 120-second audio clip on CPU can take 10+ seconds.
     #[serde(default = "default_embedder_timeout_secs")]
@@ -128,9 +143,35 @@ pub struct EmbedderConfigSection {
     /// every outgoing request to the embedder carries
     /// `Authorization: Bearer <token>`. Must match the embedder's
     /// `EMBEDDER_BEARER_TOKEN`. Omit (or leave null) for same-host
-    /// deployments where the docker bridge is the trust boundary.
+    /// deployments where the docker bridge is the trust boundary. Shared
+    /// across the primary and all `fallback_urls`.
     #[serde(default)]
     pub bearer_token: Option<String>,
+}
+
+impl Default for EmbedderConfigSection {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            fallback_urls: Vec::new(),
+            probe_interval_seconds: default_probe_interval_secs(),
+            timeout_seconds: default_embedder_timeout_secs(),
+            bearer_token: None,
+        }
+    }
+}
+
+impl EmbedderConfigSection {
+    /// The full endpoint list in priority order: primary first, then each
+    /// fallback. Blank entries are dropped so a stray trailing comma or an
+    /// unset env-substituted value can't inject an empty URL.
+    pub fn effective_urls(&self) -> Vec<String> {
+        std::iter::once(self.url.clone())
+            .chain(self.fallback_urls.iter().cloned())
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect()
+    }
 }
 
 // Hand-rolled `Debug` so the embedder bearer token never lands in logs.
@@ -139,6 +180,8 @@ impl std::fmt::Debug for EmbedderConfigSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EmbedderConfigSection")
             .field("url", &self.url)
+            .field("fallback_urls", &self.fallback_urls)
+            .field("probe_interval_seconds", &self.probe_interval_seconds)
             .field("timeout_seconds", &self.timeout_seconds)
             .field(
                 "bearer_token",
@@ -150,6 +193,10 @@ impl std::fmt::Debug for EmbedderConfigSection {
 
 fn default_embedder_timeout_secs() -> u64 {
     30
+}
+
+fn default_probe_interval_secs() -> u64 {
+    20
 }
 
 /// Recommender configuration. The embedding dim has to be fixed at boot
@@ -400,6 +447,7 @@ mod tests {
             url: "http://gpu.lan:9000".to_string(),
             timeout_seconds: 30,
             bearer_token: Some("embedder-secret".to_string()),
+            ..Default::default()
         };
 
         let server_dbg = format!("{server:?}");
@@ -439,6 +487,7 @@ mod tests {
             url: "http://gpu.lan:9000".to_string(),
             timeout_seconds: 30,
             bearer_token: None,
+            ..Default::default()
         };
         // Unset reads as `None`, not `[REDACTED]`, so the absence of a
         // token stays diagnosable.

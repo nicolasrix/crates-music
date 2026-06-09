@@ -36,6 +36,7 @@ async fn boot_probe_loaded_marks_ready() {
         url: server.uri(),
         timeout_seconds: 2,
         bearer_token: None,
+        ..Default::default()
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(h.ready());
@@ -65,6 +66,7 @@ async fn boot_probe_503_keeps_client_but_not_ready() {
         url: server.uri(),
         timeout_seconds: 2,
         bearer_token: None,
+        ..Default::default()
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -81,6 +83,7 @@ async fn boot_probe_unreachable_keeps_client_for_retries() {
         url: "http://127.0.0.1:1".to_string(),
         timeout_seconds: 1,
         bearer_token: None,
+        ..Default::default()
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -99,6 +102,7 @@ async fn boot_probe_invalid_url_falls_back_to_disabled() {
         url: "not a url at all".to_string(),
         timeout_seconds: 1,
         bearer_token: None,
+        ..Default::default()
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -136,6 +140,7 @@ async fn ready_flips_from_not_loaded_to_loaded_after_record() {
         url: server.uri(),
         timeout_seconds: 2,
         bearer_token: None,
+        ..Default::default()
     };
     let h = boot_probe(Some(&cfg)).await;
     assert!(!h.ready());
@@ -149,6 +154,80 @@ async fn ready_flips_from_not_loaded_to_loaded_after_record() {
         device: Some("cpu".to_string()),
     });
     assert!(h.ready(), "ready flips to true once health is recorded");
+}
+
+fn loaded_healthz(version: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "status": "ok",
+        "model_loaded": true,
+        "model_version": version,
+        "dim": 512
+    }))
+}
+
+#[tokio::test]
+async fn failover_picks_fallback_when_primary_unreachable() {
+    // Primary points at a closed port; a healthy fallback is configured.
+    // The probe must skip the dead primary and activate the fallback.
+    let fallback = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(loaded_healthz("stub-v1"))
+        .mount(&fallback)
+        .await;
+
+    let cfg = EmbedderConfigSection {
+        url: "http://127.0.0.1:1".to_string(),
+        fallback_urls: vec![fallback.uri()],
+        timeout_seconds: 1,
+        ..Default::default()
+    };
+    let h = boot_probe(Some(&cfg)).await;
+    assert!(h.ready(), "fallback is loaded → ready");
+    assert_eq!(
+        h.client()
+            .unwrap()
+            .base_url()
+            .as_str()
+            .trim_end_matches('/'),
+        fallback.uri().trim_end_matches('/'),
+        "active client should be the fallback"
+    );
+}
+
+#[tokio::test]
+async fn failover_prefers_primary_when_both_healthy() {
+    // Both endpoints loaded → the primary (first in the list) wins.
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(loaded_healthz("stub-v1"))
+        .mount(&primary)
+        .await;
+    let fallback = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(loaded_healthz("stub-v1"))
+        .mount(&fallback)
+        .await;
+
+    let cfg = EmbedderConfigSection {
+        url: primary.uri(),
+        fallback_urls: vec![fallback.uri()],
+        timeout_seconds: 1,
+        ..Default::default()
+    };
+    let h = boot_probe(Some(&cfg)).await;
+    assert!(h.ready());
+    assert_eq!(
+        h.client()
+            .unwrap()
+            .base_url()
+            .as_str()
+            .trim_end_matches('/'),
+        primary.uri().trim_end_matches('/'),
+        "primary should win when both are healthy"
+    );
 }
 
 #[tokio::test]
@@ -168,6 +247,7 @@ async fn boot_probe_respects_short_timeout() {
         url: server.uri(),
         timeout_seconds: 1,
         bearer_token: None,
+        ..Default::default()
     };
     let start = std::time::Instant::now();
     let h = boot_probe(Some(&cfg)).await;
