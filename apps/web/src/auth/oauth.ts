@@ -17,7 +17,7 @@ import {
 const CLIENT_ID = "web";
 const REDIRECT_URI = `${location.origin}/oauth/callback`;
 
-export async function startLogin() {
+export async function startLogin(options?: { forceLogin?: boolean }) {
   const verifier = await generateVerifier();
   const challenge = await deriveChallenge(verifier);
   const state = crypto.randomUUID();
@@ -32,6 +32,11 @@ export async function startLogin() {
     code_challenge_method: "S256",
     state,
   });
+  // `forceLogin` → prompt=login: the gateway ignores any lingering
+  // gw_session cookie and shows the login screen, so the user can sign in
+  // as a different account instead of being silently re-authed. Without it,
+  // an existing session is reused (one-click resume).
+  if (options?.forceLogin) params.set("prompt", "login");
   // Full-page redirect — the gateway's authorize handler will bounce
   // through /oauth/login if no session, then back to redirect_uri.
   location.assign(`/oauth/authorize?${params.toString()}`);
