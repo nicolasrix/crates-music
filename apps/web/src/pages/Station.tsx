@@ -1,7 +1,7 @@
 // Natural-language "playlist for ___" surface.
 //
 // Wires the gateway's /v1/recommend/station endpoint: user types a
-// prompt, the gateway calls the CLAP text encoder, and the same content
+// prompt, the gateway calls the CLaMP 3 text encoder, and the same content
 // ANN that powers /v1/recommend/next returns the top N tracks.
 //
 // State machine mirrors Album.tsx's station-from-album: a discriminated
@@ -87,7 +87,7 @@ export function Station() {
           </h2>
         </div>
         <p className="text-fg-muted text-sm" style={{ marginBottom: 12 }}>
-          describe the mood, era, vibe — anything the CLAP text encoder
+          describe the mood, era, vibe — anything the CLaMP 3 text encoder
           can map into the same space as the audio: "sunny afternoon",
           "late night drive", "raw 90s indie".
         </p>
@@ -199,7 +199,7 @@ function StatusBanner({
     case "unavailable":
       return (
         <p className="text-danger text-sm" style={{ marginTop: 12 }}>
-          embedder sidecar isn't running — text queries need the CLAP
+          embedder sidecar isn't running — text queries need the CLaMP 3
           text encoder. start the embedder and try again.
         </p>
       );

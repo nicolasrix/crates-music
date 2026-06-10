@@ -30,6 +30,12 @@ const inputStyle = {
   color: "var(--fg)",
   padding: "6px 8px",
   fontSize: "0.9rem",
+  // Inputs report a wide min-content (≈ their `size` attribute), which would
+  // otherwise blow out the grid columns and clip on narrow viewports. Cap
+  // them to their cell and count padding inside the width.
+  maxWidth: "100%",
+  minWidth: 0,
+  boxSizing: "border-box" as const,
 } as const;
 
 export function UsersAdmin() {
@@ -99,7 +105,14 @@ function CreateUserForm({ onCreated }: { onCreated: () => void }) {
         e.preventDefault();
         if (canSubmit) create.mutate();
       }}
-      style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr", alignItems: "end" }}
+      style={{
+        display: "grid",
+        gap: 8,
+        // auto-fit + a min track width collapses the two columns into one on
+        // phone-width panels (where 2×180px can't fit) instead of overflowing.
+        gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+        alignItems: "end",
+      }}
     >
       <label style={{ display: "grid", gap: 4 }}>
         <span className="text-fg-muted text-sm">username</span>
