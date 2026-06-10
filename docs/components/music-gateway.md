@@ -119,6 +119,33 @@ Failure modes:
 - Setup mode (no master password set) → 401 (with the setup URL in
   the gateway logs).
 
+## Per-user taste isolation (PR E)
+
+Gateway-owned taste state partitions by `user_id` (the resolved
+`Principal`). The `music-recommend` stores (`events`, `play_history`,
+`recommend_feedback`, `track_affinity`, `entity_rating`,
+`recommendation`) each carry a `user_id` column (recommend migrations
+`0017–0022`, backfilled to the owner `id=1`), and every store method
+takes a `user_id`.
+
+How handlers resolve it:
+
+- **Writes** (`/v1/events`, `/rest/scrobble`, `/v1/recommend/feedback`,
+  `PUT /v1/library/rating`) attribute to the caller's `principal.user_id`.
+- **Recommendation scoring reads** (dislike-exclusion, like-boost,
+  decayed affinity, provenance) are scoped to `principal.room_id()` —
+  the room's **host** user — so a guest scores against and reads the
+  host's taste profile read-only.
+- **`GET /v1/library/ratings`** reads the caller's own `user_id` (a guest
+  sees their own empty partition, not the host's library).
+
+**Guest taste sandboxing:** a guest is a transient participant in a
+host's room and must never reshape anyone's taste. Their events and
+scrobbles are dropped from training (accepted, persisted nowhere), their
+recommendation thumbs are dropped, and `PUT /v1/library/rating` returns
+**403**. Diagnostics reads (admin-only) stay cross-user — the admin
+observability surface is intentionally not partitioned.
+
 ## OAuth 2.1 server (`oauth/`)
 
 Hand-rolled. Single-tenant. The implementation is in `oauth/`:

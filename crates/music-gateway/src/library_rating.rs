@@ -34,6 +34,7 @@ use axum::{
 use music_recommend::{RatedKind, Rating};
 use serde::{Deserialize, Serialize};
 
+use crate::principal::{AuthPrincipal, Role};
 use crate::state::AppState;
 
 fn now_unix_ms() -> i64 {
@@ -136,8 +137,15 @@ pub struct RatingsResponse {
 /// `PUT /v1/library/rating` — set or clear one entity's rating.
 pub async fn put_rating(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<RatingRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    // Ratings are durable, personal taste (capability `WriteTaste`). A
+    // guest has no library of their own and must never reshape the host's
+    // taste, so writing a rating is forbidden outright (PR E).
+    if principal.role == Role::Guest {
+        return (StatusCode::FORBIDDEN, "guests cannot rate").into_response();
+    }
     let Ok(Json(req)) = payload else {
         return (StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
     };
@@ -150,10 +158,10 @@ pub async fn put_rating(
         Some(dir) => {
             state
                 .ratings()
-                .set(kind, &req.id, dir.into(), now_unix_ms())
+                .set(principal.user_id, kind, &req.id, dir.into(), now_unix_ms())
                 .await
         }
-        None => state.ratings().clear(kind, &req.id).await,
+        None => state.ratings().clear(principal.user_id, kind, &req.id).await,
     };
     if let Err(err) = result {
         tracing::error!(error = %err, "library rating: write failed");
@@ -176,8 +184,11 @@ pub async fn put_rating(
 /// newest first. Ids only; the client hydrates titles/art (the gateway's
 /// `TrackMetadata` lacks cover art, so hydration happens client-side via
 /// the Subsonic `getSong` / `getAlbum` / `getArtist` paths).
-pub async fn list_ratings(State(state): State<AppState>) -> impl IntoResponse {
-    match state.ratings().all().await {
+pub async fn list_ratings(
+    State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
+) -> impl IntoResponse {
+    match state.ratings().all(principal.user_id).await {
         Ok(rows) => Json(RatingsResponse {
             ratings: rows
                 .into_iter()

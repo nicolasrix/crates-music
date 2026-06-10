@@ -26,6 +26,7 @@ use axum::{
 use music_core::TrackId;
 use serde::{Deserialize, Serialize};
 
+use crate::principal::{AuthPrincipal, Role};
 use crate::state::AppState;
 
 fn now_unix_ms() -> i64 {
@@ -79,6 +80,7 @@ const MAX_SESSION_ID_LEN: usize = 128;
 
 pub async fn submit(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<FeedbackRequest>, JsonRejection>,
 ) -> impl IntoResponse {
     let Ok(Json(req)) = payload else {
@@ -91,6 +93,19 @@ pub async fn submit(
         return (StatusCode::BAD_REQUEST, "session_id length out of range").into_response();
     }
 
+    // Guest taste sandboxing (PR E): a thumb vote folds into the host's
+    // affinity counter, so guest votes are dropped (no write) to keep them
+    // from reshaping anyone's taste. Echo zeroed counts so the player UI
+    // doesn't error.
+    if principal.role == Role::Guest {
+        return Json(FeedbackResponse {
+            track_id: req.track_id,
+            up: 0,
+            down: 0,
+        })
+        .into_response();
+    }
+
     let track = TrackId::from(req.track_id.as_str());
     let now_ms = now_unix_ms();
     let occurred_ms = req.occurred_ms.unwrap_or(now_ms);
@@ -99,7 +114,14 @@ pub async fn submit(
         Some(dir) => {
             state
                 .feedback()
-                .record(&track, &req.session_id, dir.to_i8(), occurred_ms, now_ms)
+                .record(
+                    principal.user_id,
+                    &track,
+                    &req.session_id,
+                    dir.to_i8(),
+                    occurred_ms,
+                    now_ms,
+                )
                 .await
         }
         None => state.feedback().clear(&track, &req.session_id).await,
@@ -126,14 +148,20 @@ pub async fn submit(
         };
         if let Err(err) = state
             .track_affinity()
-            .apply_event(&track, event, occurred_ms, state.affinity_half_life_ms())
+            .apply_event(
+                principal.user_id,
+                &track,
+                event,
+                occurred_ms,
+                state.affinity_half_life_ms(),
+            )
             .await
         {
             tracing::warn!(error = %err, "feedback: affinity update failed; continuing");
         }
     }
 
-    let counts = match state.feedback().for_track(&track).await {
+    let counts = match state.feedback().for_track(principal.user_id, &track).await {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(error = %err, "feedback: aggregate read failed");

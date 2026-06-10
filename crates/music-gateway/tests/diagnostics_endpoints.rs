@@ -516,7 +516,7 @@ async fn recently_played_returns_scrobbles_newest_first() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-a", 1_000),
             scrobble("t-b", 3_000),
             scrobble("t-c", 2_000),
@@ -542,7 +542,7 @@ async fn recently_played_excludes_non_scrobble_events() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-a", 1_000),
             EventInput {
                 event_type: EventType::Skip,
@@ -575,7 +575,7 @@ async fn recently_played_respects_limit_param() {
     for i in 0..10_i64 {
         batch.push(scrobble(&format!("t-{i}"), 1_000 + i));
     }
-    state.event_store().append_batch(&batch).await.unwrap();
+    state.event_store().append_batch(1, &batch).await.unwrap();
 
     let (_, json) = fetch_json(
         build_router(state),
@@ -591,7 +591,7 @@ async fn recently_played_filters_by_since_ms() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-old", 1_000),
             scrobble("t-mid", 2_500),
             scrobble("t-new", 5_000),
@@ -623,7 +623,7 @@ async fn recently_played_clamps_oversize_limit() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[scrobble("t-1", 1_000)])
+        .append_batch(1, &[scrobble("t-1", 1_000)])
         .await
         .unwrap();
     let (status, json) = fetch_json(
@@ -649,7 +649,7 @@ async fn recently_played_joins_track_metadata_when_present() {
     // render the raw track_id without crashing.
     state
         .event_store()
-        .append_batch(&[scrobble("t-known", 1_000), scrobble("t-orphan", 2_000)])
+        .append_batch(1, &[scrobble("t-known", 1_000), scrobble("t-orphan", 2_000)])
         .await
         .unwrap();
 
@@ -1638,7 +1638,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Stamp two events under s1 by going through the scrobble interceptor.
     state
         .event_store()
-        .append_batch(&[music_recommend::EventInput {
+        .append_batch(1, &[music_recommend::EventInput {
             event_type: music_recommend::EventType::Scrobble,
             track_id: music_core::TrackId::from("t-1"),
             occurred_at: 100,
@@ -1649,7 +1649,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
         .unwrap();
     state
         .event_store()
-        .append_batch(&[music_recommend::EventInput {
+        .append_batch(1, &[music_recommend::EventInput {
             event_type: music_recommend::EventType::Skip,
             track_id: music_core::TrackId::from("t-1"),
             occurred_at: 200,
@@ -1800,7 +1800,7 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
     ] {
         state
             .event_store()
-            .append_batch(&[music_recommend::EventInput {
+            .append_batch(1, &[music_recommend::EventInput {
                 event_type: ev_type,
                 track_id: music_core::TrackId::from(track),
                 occurred_at,

@@ -606,6 +606,15 @@ was a good fit (session-scoped, decays); this rates the *entity itself*
 - **like** boosts relevance, weighted `track > album > artist` (additive;
   see the `like_bonus*` knobs in [CONFIGURATION.md](./CONFIGURATION.md)).
 
+**Per-user partition (PR E).** Ratings are stored per `user_id` (the
+calling principal). One household member's verdicts are invisible to
+another, and they only shape *that user's* recommendations. The
+recommend reads that consume ratings (dislike-exclusion, like-boost) are
+scoped to the **room's host user**, so a guest gets the host's
+personalised recs read-only. A **guest cannot write a rating** — `PUT
+/v1/library/rating` returns **403** for a guest principal (they have no
+library of their own and must never reshape the host's taste).
+
 #### `PUT /v1/library/rating`
 
 Set or clear one entity's verdict. The nullable `rating` field encodes all
@@ -692,6 +701,15 @@ Response (202):
 ```json
 {"accepted": 3}
 ```
+
+**Per-user partition + guest sandboxing (PR E).** Events are attributed
+to the calling `user_id` and only feed *that user's* taste/affinity. A
+**guest's events are dropped from training**: the request is accepted
+(so the player's fire-and-forget batcher never errors) but nothing is
+persisted and no affinity is folded — the response is `{"accepted": 0}`.
+The same drop applies to a guest's `/rest/scrobble` (play_history /
+event log / affinity writes are skipped) and to a guest's thumb vote on
+`POST /v1/recommend/feedback` (no write; zeroed counts echoed).
 
 ### Admin
 

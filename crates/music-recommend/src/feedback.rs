@@ -58,6 +58,7 @@ impl FeedbackStore {
     /// stored value without creating a duplicate row.
     pub async fn record(
         &self,
+        user_id: i64,
         track_id: &TrackId,
         session_id: &str,
         vote: i8,
@@ -67,13 +68,14 @@ impl FeedbackStore {
         debug_assert!(vote == 1 || vote == -1, "vote must be ±1, got {vote}");
         sqlx::query(
             "INSERT INTO recommend_feedback
-                 (track_id, session_id, vote, occurred_ms, received_ms)
-             VALUES (?, ?, ?, ?, ?)
+                 (user_id, track_id, session_id, vote, occurred_ms, received_ms)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(track_id, session_id) DO UPDATE SET
                  vote = excluded.vote,
                  occurred_ms = excluded.occurred_ms,
                  received_ms = excluded.received_ms",
         )
+        .bind(user_id)
         .bind(track_id.as_str())
         .bind(session_id)
         .bind(i64::from(vote))
@@ -101,13 +103,14 @@ impl FeedbackStore {
     /// Aggregate up/down counts for a single track across *all*
     /// sessions. Used by the POST response so the client can render
     /// the new totals after voting.
-    pub async fn for_track(&self, track_id: &TrackId) -> Result<FeedbackCounts> {
+    pub async fn for_track(&self, user_id: i64, track_id: &TrackId) -> Result<FeedbackCounts> {
         let row = sqlx::query(
             "SELECT
                COALESCE(SUM(CASE WHEN vote = 1 THEN 1 ELSE 0 END), 0) AS up,
                COALESCE(SUM(CASE WHEN vote = -1 THEN 1 ELSE 0 END), 0) AS down
-             FROM recommend_feedback WHERE track_id = ?",
+             FROM recommend_feedback WHERE user_id = ? AND track_id = ?",
         )
+        .bind(user_id)
         .bind(track_id.as_str())
         .fetch_one(&self.pool)
         .await?;
@@ -210,7 +213,7 @@ mod tests {
     async fn for_track_returns_zero_when_empty() {
         let s = store().await;
         assert_eq!(
-            s.for_track(&tid("unseen")).await.unwrap(),
+            s.for_track(1, &tid("unseen")).await.unwrap(),
             FeedbackCounts { up: 0, down: 0 }
         );
     }
@@ -218,11 +221,11 @@ mod tests {
     #[tokio::test]
     async fn record_then_for_track_counts_upvote() {
         let s = store().await;
-        s.record(&tid("t1"), "sess-A", 1, 1_000, 1_001)
+        s.record(1, &tid("t1"), "sess-A", 1, 1_000, 1_001)
             .await
             .unwrap();
         assert_eq!(
-            s.for_track(&tid("t1")).await.unwrap(),
+            s.for_track(1, &tid("t1")).await.unwrap(),
             FeedbackCounts { up: 1, down: 0 }
         );
     }
@@ -233,14 +236,14 @@ mod tests {
         // overwrite the previous row — otherwise the user "earns" two
         // votes by changing their mind.
         let s = store().await;
-        s.record(&tid("t1"), "sess-A", 1, 1_000, 1_001)
+        s.record(1, &tid("t1"), "sess-A", 1, 1_000, 1_001)
             .await
             .unwrap();
-        s.record(&tid("t1"), "sess-A", -1, 2_000, 2_001)
+        s.record(1, &tid("t1"), "sess-A", -1, 2_000, 2_001)
             .await
             .unwrap();
         assert_eq!(
-            s.for_track(&tid("t1")).await.unwrap(),
+            s.for_track(1, &tid("t1")).await.unwrap(),
             FeedbackCounts { up: 0, down: 1 }
         );
     }
@@ -248,17 +251,17 @@ mod tests {
     #[tokio::test]
     async fn different_sessions_accumulate() {
         let s = store().await;
-        s.record(&tid("t1"), "sess-A", 1, 1_000, 1_001)
+        s.record(1, &tid("t1"), "sess-A", 1, 1_000, 1_001)
             .await
             .unwrap();
-        s.record(&tid("t1"), "sess-B", 1, 1_100, 1_101)
+        s.record(1, &tid("t1"), "sess-B", 1, 1_100, 1_101)
             .await
             .unwrap();
-        s.record(&tid("t1"), "sess-C", -1, 1_200, 1_201)
+        s.record(1, &tid("t1"), "sess-C", -1, 1_200, 1_201)
             .await
             .unwrap();
         assert_eq!(
-            s.for_track(&tid("t1")).await.unwrap(),
+            s.for_track(1, &tid("t1")).await.unwrap(),
             FeedbackCounts { up: 2, down: 1 }
         );
     }
@@ -266,12 +269,12 @@ mod tests {
     #[tokio::test]
     async fn clear_removes_an_existing_vote() {
         let s = store().await;
-        s.record(&tid("t1"), "sess-A", 1, 1_000, 1_001)
+        s.record(1, &tid("t1"), "sess-A", 1, 1_000, 1_001)
             .await
             .unwrap();
         s.clear(&tid("t1"), "sess-A").await.unwrap();
         assert_eq!(
-            s.for_track(&tid("t1")).await.unwrap(),
+            s.for_track(1, &tid("t1")).await.unwrap(),
             FeedbackCounts { up: 0, down: 0 }
         );
     }
@@ -285,10 +288,10 @@ mod tests {
     #[tokio::test]
     async fn aggregate_groups_per_track_and_sorts_by_recency() {
         let s = store().await;
-        s.record(&tid("t1"), "a", 1, 100, 100).await.unwrap();
-        s.record(&tid("t1"), "b", 1, 200, 200).await.unwrap();
-        s.record(&tid("t2"), "a", -1, 500, 500).await.unwrap();
-        s.record(&tid("t3"), "a", 1, 300, 300).await.unwrap();
+        s.record(1, &tid("t1"), "a", 1, 100, 100).await.unwrap();
+        s.record(1, &tid("t1"), "b", 1, 200, 200).await.unwrap();
+        s.record(1, &tid("t2"), "a", -1, 500, 500).await.unwrap();
+        s.record(1, &tid("t3"), "a", 1, 300, 300).await.unwrap();
 
         let got = s.aggregate(None, 100).await.unwrap();
         // newest-voted first → t2 (500), t3 (300), t1 (200)
@@ -303,8 +306,8 @@ mod tests {
     #[tokio::test]
     async fn aggregate_applies_since_ms_filter() {
         let s = store().await;
-        s.record(&tid("t1"), "a", 1, 100, 100).await.unwrap();
-        s.record(&tid("t2"), "a", 1, 500, 500).await.unwrap();
+        s.record(1, &tid("t1"), "a", 1, 100, 100).await.unwrap();
+        s.record(1, &tid("t2"), "a", 1, 500, 500).await.unwrap();
 
         let got = s.aggregate(Some(300), 100).await.unwrap();
         assert_eq!(got.len(), 1);
@@ -314,15 +317,15 @@ mod tests {
     #[tokio::test]
     async fn downvoted_in_session_returns_only_minus_one_votes_for_that_session() {
         let s = store().await;
-        s.record(&tid("t-up"), "sess-A", 1, 100, 100).await.unwrap();
-        s.record(&tid("t-down-a"), "sess-A", -1, 200, 200)
+        s.record(1, &tid("t-up"), "sess-A", 1, 100, 100).await.unwrap();
+        s.record(1, &tid("t-down-a"), "sess-A", -1, 200, 200)
             .await
             .unwrap();
-        s.record(&tid("t-also-down"), "sess-A", -1, 300, 300)
+        s.record(1, &tid("t-also-down"), "sess-A", -1, 300, 300)
             .await
             .unwrap();
         // Different session — same track downvoted there must not show up.
-        s.record(&tid("t-other"), "sess-B", -1, 400, 400)
+        s.record(1, &tid("t-other"), "sess-B", -1, 400, 400)
             .await
             .unwrap();
 
@@ -334,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn downvoted_in_session_returns_empty_for_unknown_session() {
         let s = store().await;
-        s.record(&tid("t1"), "sess-A", -1, 100, 100).await.unwrap();
+        s.record(1, &tid("t1"), "sess-A", -1, 100, 100).await.unwrap();
         assert!(
             s.downvoted_in_session("sess-nope")
                 .await
@@ -347,7 +350,7 @@ mod tests {
     async fn aggregate_respects_limit() {
         let s = store().await;
         for i in 0..5 {
-            s.record(&tid(&format!("t{i}")), "s", 1, i, i)
+            s.record(1, &tid(&format!("t{i}")), "s", 1, i, i)
                 .await
                 .unwrap();
         }
