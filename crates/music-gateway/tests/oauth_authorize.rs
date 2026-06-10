@@ -25,7 +25,7 @@ async fn store_with_session_and_client() -> (OauthStore, String) {
     let oauth = OauthStore::open_in_memory().await.unwrap();
     let phc = password::hash("right-password-here").unwrap();
     oauth.set_master_password_hash(&phc).await.unwrap();
-    let issued = oauth.create_session(Duration::from_hours(1)).await.unwrap();
+    let issued = oauth.create_session(1, Duration::from_hours(1)).await.unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -48,6 +48,11 @@ fn cookie_header(token: &str) -> String {
 #[tokio::test]
 async fn create_auth_code_returns_plaintext_and_stores_hash() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -58,6 +63,7 @@ async fn create_auth_code_returns_plaintext_and_stores_hash() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "challenge".to_string(),
@@ -72,6 +78,11 @@ async fn create_auth_code_returns_plaintext_and_stores_hash() {
 #[tokio::test]
 async fn consume_auth_code_returns_row_then_refuses_replay() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -82,6 +93,7 @@ async fn consume_auth_code_returns_row_then_refuses_replay() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "abc123".to_string(),
@@ -116,6 +128,11 @@ async fn consume_unknown_auth_code_returns_none() {
 #[tokio::test]
 async fn consume_expired_auth_code_returns_none() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -126,6 +143,7 @@ async fn consume_expired_auth_code_returns_none() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "c".to_string(),

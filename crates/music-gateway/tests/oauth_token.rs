@@ -39,6 +39,7 @@ async fn store_with_client() -> OauthStore {
 async fn issued_code(oauth: &OauthStore) -> String {
     oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://localhost:5173/cb".to_string(),
             code_challenge: PKCE_CHALLENGE.to_string(),
@@ -217,6 +218,7 @@ async fn refresh_grant_returns_new_pair_and_revokes_old() {
     let oauth = store_with_client().await;
     let issued = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
         })
@@ -270,6 +272,7 @@ async fn refresh_rejects_revoked_token() {
     let oauth = store_with_client().await;
     let issued = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
         })
@@ -296,6 +299,7 @@ async fn mint_refresh_token_round_trips() {
     let oauth = store_with_client().await;
     let issued = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: Some(Duration::from_hours(1)),
         })
@@ -324,6 +328,7 @@ async fn consume_refresh_token_is_single_use_under_concurrency() {
     let oauth = store_with_client().await;
     let issued = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
         })
@@ -354,6 +359,7 @@ async fn consume_refresh_token_wrong_client_does_not_burn_token() {
     let oauth = store_with_client().await;
     let issued = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
         })

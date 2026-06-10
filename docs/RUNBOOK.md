@@ -88,6 +88,38 @@ Full context: [DEPLOYMENT.md → Running with CLaMP 3](./DEPLOYMENT.md#running-w
 Cron snippet (daily, keep 14) and the full walkthrough:
 [DEPLOYMENT.md → Backups](./DEPLOYMENT.md#backups).
 
+## Account recovery (no email)
+
+There is no email or recovery-code path — by design. Two cases:
+
+- **A household member forgot their password.** An admin resets it from
+  the web Account → Users panel, or directly:
+  `POST /v1/admin/users/<id>/password` with `{"password":"<≥12 chars>"}`.
+  The hash is rewritten in place; the account keeps its id and data.
+
+- **The owner forgot the *master* password.** Run the host-only
+  subcommand on the gateway host — host access is the root of trust:
+
+  ```bash
+  # bare metal
+  echo -n 'new-master-password' | \
+    music-gateway --config /path/to/gateway.toml reset-master-password
+
+  # the NAS host / docker (the gateway image is the same binary)
+  echo -n 'new-master-password' | \
+    sudo docker exec -i crates-gateway \
+      music-gateway --config /config/gateway.toml reset-master-password
+  ```
+
+  Pipe the password (as above) so it stays out of shell history; omit the
+  pipe and it's read interactively from stdin. The command validates the
+  length (≥ 12), rewrites the Argon2 hash on `users.id=1` **in place**
+  (never delete/recreate — that would cascade-drop the owner's data), and
+  exits without starting the server. It refuses to run on a gateway that
+  was never bootstrapped (complete `/oauth/setup` first). Existing
+  sessions keep working; only the password used at `/oauth/login`
+  changes.
+
 ## Common issues
 
 | Symptom | Cause | Fix |

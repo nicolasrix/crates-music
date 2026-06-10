@@ -14,6 +14,11 @@ mod common;
 
 async fn store_with_client() -> OauthStore {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Tokens now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -34,6 +39,7 @@ async fn revoke_endpoint_revokes_refresh_token_and_cascades_to_access() {
     let oauth = store_with_client().await;
     let refresh = oauth
         .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
         })

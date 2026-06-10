@@ -24,6 +24,10 @@ pub struct IssuedSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub token_hash: String,
+    /// The logged-in user this browser session belongs to. Threaded into
+    /// the auth-code / device-approval it authorizes so the minted tokens
+    /// carry the real identity (PR B).
+    pub user_id: i64,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
 }

@@ -86,6 +86,15 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/cache/invalidate_covers",
             post(admin::invalidate_covers),
         )
+        .route(
+            "/v1/admin/users",
+            get(crate::users::list_users).post(crate::users::create_user),
+        )
+        .route("/v1/admin/users/:id", axum::routing::delete(crate::users::delete_user))
+        .route(
+            "/v1/admin/users/:id/password",
+            post(crate::users::reset_password),
+        )
         .route("/v1/diagnostics/traces", get(diagnostics_handlers::traces))
         .route(
             "/v1/diagnostics/histogram",

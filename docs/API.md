@@ -25,6 +25,21 @@ A request is authenticated if its `Authorization: Bearer <token>` (or
 query-param path is required by `<audio>` and `<img>` URLs that can't
 set headers — see RFC 6750 §2.3.
 
+**Identity & roles.** `require_bearer` resolves every authenticated
+request to a `Principal { user_id, role, host_user_id? }` and injects it
+downstream. `role` is one of `admin | user | guest`. A NULL-`user_id`
+token (the legacy static bearer, or pre-multi-user rows) resolves to the
+owner (id=1, admin). The protected surface is split into two tiers:
+
+- **Any authenticated principal** — browse, play, recommend reads, room
+  control, ratings/events, `whoami`.
+- **Admin-only** (`require_admin`, 403 otherwise) — `/v1/admin/*`,
+  `/v1/diagnostics/*`, and recommender maintenance (`refit_whitening`,
+  `enqueue`).
+
+Real accounts (admin/user) are provisioned by an admin (see
+[`/v1/admin/users`](#post-v1adminusers)); guests come later (PR D).
+
 ## Public endpoints
 
 These don't require auth.
@@ -61,8 +76,17 @@ Form body (HTML form, not JSON):
 ### `GET /oauth/login` / `POST /oauth/login`
 
 Browser login form. The GET serves the HTML; the POST processes
-credentials and creates a session. Used by the OAuth Authorization
-Code flow when the user isn't already logged in.
+credentials and creates a session bound to the resolved `user_id`. Used
+by the OAuth Authorization Code flow when the user isn't already logged
+in.
+
+Form fields: `username` (optional — absent/empty logs in the owner, so
+the original master-password-only login is unchanged) and `password`.
+A real account supplies its `username`. Unknown username, wrong
+password, and not-yet-bootstrapped all return an identical 401 (no
+user-existence or bootstrap-state oracle). The logged-in `user_id`
+threads through the session → auth code → token chain, so the issued
+access token resolves to that account.
 
 ### `GET /oauth/authorize`
 
@@ -131,9 +155,21 @@ Below this line, every endpoint requires auth.
 
 ### `GET /v1/whoami`
 
-Diagnostic. Returns the gateway version. (Doesn't actually surface
-*which* token authenticated, by design — single-user means there's
-nothing useful to disambiguate.)
+Resolves the calling principal — clients call this post-login to drive
+role-gated UI.
+
+```json
+{
+  "user_id": 2,
+  "role": "user",
+  "username": "alice",
+  "display_name": "Alice",
+  "host_user_id": null
+}
+```
+
+`username`/`display_name` are `null` for accounts that have none (e.g.
+guests). `host_user_id` is set only for guests (PR D).
 
 ### Sync
 
@@ -597,6 +633,53 @@ Response (202):
 ```
 
 ### Admin
+
+All `/v1/admin/*` endpoints are **admin-only** — a User or Guest token
+authenticates but is 403'd by `require_admin`.
+
+#### `GET /v1/admin/users`
+
+List the real accounts (admin/user). Guests are excluded. No credential
+material is returned.
+
+```json
+{
+  "users": [
+    {"id": 1, "username": "owner", "display_name": "Owner", "role": "admin", "created_at": 0},
+    {"id": 2, "username": "alice", "display_name": "Alice", "role": "user", "created_at": 1718000000000}
+  ]
+}
+```
+
+#### `POST /v1/admin/users`
+
+Create a real account. JSON body:
+
+| Field | Required | Description |
+|---|---|---|
+| `username` | yes | Unique. |
+| `password` | yes | ≥ 12 chars. Argon2id-hashed before storage. |
+| `role` | yes | `admin` or `user` (`guest` is rejected — guests come from the guest-code flow). |
+| `display_name` | no | Defaults to none. |
+
+Returns `201 {"id": <new id>}`. A duplicate username is `409
+{"error":"username_taken", ...}`; validation failures are `400`.
+
+#### `DELETE /v1/admin/users/:id`
+
+Remove an account and cascade-delete its tokens/sessions. `204` on
+success, `404` if unknown. The owner (id=1) is undeletable (`400`).
+
+#### `POST /v1/admin/users/:id/password`
+
+Admin-driven password reset (account recovery without email). JSON body
+`{"password": "<≥12 chars>"}`. Rewrites the Argon2 hash in place — the
+account keeps its id and all dependent data. `204` on success, `404` if
+unknown.
+
+> The **owner's** master password is reset out-of-band on the gateway
+> host: `music-gateway --config … reset-master-password` (host access is
+> the root of trust). See the runbook.
 
 #### `POST /v1/admin/cache/invalidate`
 

@@ -16,6 +16,7 @@ pub use session::{IssuedSession, Session};
 pub use setup::SetupToken;
 pub use storage::{
     AccessToken, AuthCode, DeviceCodeRow, DevicePollState, Error, IssuedAccessToken,
-    IssuedAuthCode, IssuedDeviceCode, IssuedRefreshToken, NewAuthCode, NewClient, NewDeviceCode,
-    NewRefreshToken, NewUser, OauthClient, OauthStore, RefreshToken, Result,
+    IssuedAuthCode, IssuedDeviceCode, IssuedRefreshToken, LoginUser, NewAuthCode, NewClient,
+    NewDeviceCode, NewRefreshToken, NewUser, OauthClient, OauthStore, RefreshToken, Result,
+    UserSummary,
 };

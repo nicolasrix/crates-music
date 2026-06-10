@@ -25,6 +25,7 @@ pub mod recommend_feedback;
 pub mod scrobble;
 pub mod state;
 pub mod sync;
+pub mod users;
 pub mod whitening_text;
 
 pub use app::build_router;

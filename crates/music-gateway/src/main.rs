@@ -57,6 +57,25 @@ struct Args {
     /// Path to the gateway config TOML.
     #[arg(short, long, env = "MUSIC_GATEWAY_CONFIG")]
     config: PathBuf,
+    /// Optional maintenance subcommand. With none, the gateway serves.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Reset the owner (id=1) master password, then exit. Host-only
+    /// account recovery (plan D8): there is no email/recovery-code path,
+    /// so the gateway host — where this runs — is the root of trust.
+    /// Rewrites the Argon2 hash in place; the owner row and all its data
+    /// are preserved.
+    ResetMasterPassword {
+        /// New password. Omit to read it from stdin (pipe it so it stays
+        /// out of shell history): `echo -n 'new-pw' | music-gateway
+        /// --config … reset-master-password`.
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -69,6 +88,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)
         .with_context(|| format!("loading config from {}", args.config.display()))?;
+
+    // Maintenance subcommands run against the config + state DB, then exit
+    // — they never bind the listener or boot the recommender.
+    if let Some(command) = args.command {
+        return run_subcommand(command, &config).await;
+    }
 
     // Diagnostics traces DB lives next to the OAuth state DB but in
     // its own SQLite file — different lifecycle (ring-buffered,
@@ -433,4 +458,74 @@ fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Dispatch a maintenance subcommand. These open only the OAuth state DB
+/// and exit — no listener, no recommender, no TLS.
+async fn run_subcommand(command: Command, config: &Config) -> Result<()> {
+    match command {
+        Command::ResetMasterPassword { password } => {
+            reset_master_password(config, password).await
+        }
+    }
+}
+
+/// Host-only owner password recovery (plan D8). Opens the state DB,
+/// validates a new password (read from `--password` or stdin), and
+/// rewrites the Argon2 hash on `users.id=1` **in place** — never
+/// delete/recreate, which would cascade-drop the owner's data.
+async fn reset_master_password(config: &Config, password: Option<String>) -> Result<()> {
+    use music_gateway::oauth::handlers::MIN_PASSWORD_LEN;
+    use music_gateway::oauth::password;
+    use music_gateway::principal::OWNER_USER_ID;
+
+    let oauth = OauthStore::open(&config.oauth.state_db)
+        .await
+        .with_context(|| {
+            format!(
+                "opening oauth state DB at {}",
+                config.oauth.state_db.display()
+            )
+        })?;
+
+    // Nothing to reset on an unconfigured gateway — bootstrap via
+    // /oauth/setup first. (Reset rewrites an existing hash; it is not a
+    // backdoor around the one-shot setup.)
+    if oauth.master_password_hash().await?.is_none() {
+        anyhow::bail!(
+            "gateway is not bootstrapped — complete /oauth/setup first; there is no master password to reset"
+        );
+    }
+
+    let password = match password {
+        Some(p) => p,
+        None => read_password_from_stdin()?,
+    };
+    if password.len() < MIN_PASSWORD_LEN {
+        anyhow::bail!("password must be at least {MIN_PASSWORD_LEN} characters");
+    }
+
+    let phc = password::hash(&password).map_err(|e| anyhow::anyhow!("hashing password: {e}"))?;
+    let updated = oauth.set_user_password(OWNER_USER_ID, &phc).await?;
+    anyhow::ensure!(
+        updated,
+        "owner account (id=1) not found — the gateway state DB may be corrupt"
+    );
+    println!("master password reset for the owner account (id=1).");
+    Ok(())
+}
+
+/// Read a password from stdin (for piping). Strips the trailing newline a
+/// shell/`echo` appends; otherwise takes the input verbatim.
+fn read_password_from_stdin() -> Result<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading password from stdin")?;
+    let pw = buf.trim_end_matches(['\n', '\r']).to_string();
+    if pw.is_empty() {
+        anyhow::bail!("no password provided on stdin");
+    }
+    Ok(pw)
 }
