@@ -16,6 +16,7 @@ use crate::admin;
 use crate::auth::require_bearer;
 use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
+use crate::guest_codes;
 use crate::library_rating;
 use crate::oauth::handlers as oauth_handlers;
 use crate::proxy::proxy;
@@ -66,7 +67,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/oauth/device",
             get(oauth_handlers::device_verify_get).post(oauth_handlers::device_verify_post),
-        );
+        )
+        // Guest-code redemption (PR D). Public, like the other grants — the
+        // code is the credential.
+        .route("/oauth/guest", post(oauth_handlers::guest_grant));
 
     // Admin-only tier: maintenance + introspection. Guarded by
     // `require_admin`, which reads the `Principal` injected upstream by
@@ -175,7 +179,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/library/rating", put(library_rating::put_rating))
         .route("/v1/library/ratings", get(library_rating::list_ratings))
-        .route("/v1/events", post(events::submit));
+        .route("/v1/events", post(events::submit))
+        // Host-side guest-code management (PR D). Any authenticated real
+        // account manages its *own* codes; the handlers 403 a guest.
+        .route(
+            "/v1/guest_codes",
+            get(guest_codes::list).post(guest_codes::create),
+        )
+        .route("/v1/guest_codes/:id", axum::routing::delete(guest_codes::revoke));
 
     let v1 = v1_general
         .merge(v1_admin)

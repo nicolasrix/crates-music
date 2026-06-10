@@ -53,6 +53,8 @@ tokens).
 |---|---|---|---|---|
 | `state_db` | path | no | `gateway-state.sqlite` | SQLite file holding users, clients, codes, tokens, sessions. |
 | `clients` | array of tables | no | `[]` | Pre-declared OAuth clients, registered at startup. |
+| `guest_session_ttl_seconds` | u64 | no | `43200` (12 h) | Lifetime of a redeemed guest session (PR D). Sets both the guest account's `expires_at` and the guest access token's TTL — guests get one access token, no refresh, hard-capped by this. |
+| `guest_sweep_interval_seconds` | u64 | no | `3600` (1 h) | How often the background reaper deletes expired guest accounts (cascading their tokens). `0` disables the loop — lapsed guests are still rejected at auth time regardless. |
 
 ### `[[oauth.clients]]`
 

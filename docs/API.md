@@ -149,6 +149,35 @@ token_type_hint=refresh_token  # optional
 
 Always returns 200, even if the token wasn't found (per RFC).
 
+### `POST /oauth/guest`
+
+Redeem a guest code (PR D) for an ephemeral guest session that joins the
+code's **host room**. Public — the code is the credential (no PKCE, no
+password). Body is form-encoded:
+
+```
+code=XXXX-XXXX
+client_id=web
+display_name=Alice      # optional, shown in the host's room
+```
+
+On success (`200`):
+```json
+{
+  "access_token": "…",
+  "token_type": "Bearer",
+  "expires_in": 43200,
+  "role": "guest",
+  "host_user_id": 1
+}
+```
+
+There is **no `refresh_token`** — a guest gets one access token bounded by
+the guest account's expiry (`[oauth] guest_session_ttl_seconds`, default
+12 h). When it lapses, redeem the code again. A revoked/expired/exhausted
+or unknown code returns `400 invalid_grant` (opaque message — doesn't
+reveal which).
+
 ## Protected endpoints
 
 Below this line, every endpoint requires auth.
@@ -170,6 +199,38 @@ role-gated UI.
 
 `username`/`display_name` are `null` for accounts that have none (e.g.
 guests). `host_user_id` is set only for guests (PR D).
+
+### Guest codes (PR D)
+
+Host-side management of room-join codes. Any real account (admin or user)
+manages **its own** codes; guests are `403`. See `POST /oauth/guest` above
+for redemption.
+
+#### `POST /v1/guest_codes`
+
+Mint a code owned by the caller. Body (JSON, all optional):
+```json
+{ "label": "party Saturday", "expires_in_seconds": 86400, "max_uses": 5 }
+```
+`expires_in_seconds` absent/`0` = never expires; `max_uses` absent =
+unlimited. Returns `201` with the **plaintext code, shown once**:
+```json
+{ "id": 7, "code": "XXXX-XXXX", "expires_at_unix_ms": 1234, "max_uses": 5 }
+```
+
+#### `GET /v1/guest_codes`
+
+The caller's codes, newest first (no plaintext — only its hash is stored):
+```json
+[{ "id": 7, "label": "party", "created_at_unix_ms": 1, "expires_at_unix_ms": 2,
+   "max_uses": 5, "uses": 1, "revoked_at_unix_ms": null }]
+```
+
+#### `DELETE /v1/guest_codes/:id`
+
+Revoke one of the caller's codes. `204` (idempotent); `404` if no such
+code is owned by the caller. Already-issued guest tokens stay valid until
+they expire — revoking only stops *new* redemptions.
 
 ### Sync
 

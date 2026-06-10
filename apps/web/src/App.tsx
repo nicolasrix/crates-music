@@ -36,6 +36,7 @@ import { AboutPanel } from "./settings/panels/AboutPanel";
 import { AccountPanel } from "./settings/panels/AccountPanel";
 import { AppearancePanel } from "./settings/panels/AppearancePanel";
 import { AutoplayPanel } from "./settings/panels/AutoplayPanel";
+import { GuestsPanel } from "./settings/panels/GuestsPanel";
 import { PlaybackPanel } from "./settings/panels/PlaybackPanel";
 import { StoragePanel } from "./settings/panels/StoragePanel";
 import { SettingsShell } from "./settings/SettingsShell";
@@ -144,6 +145,7 @@ function SettingsRoute({ id }: { id: string }) {
 // settings/nav, keyed by the same ids.
 const SETTINGS_PANELS: Record<string, ComponentType> = {
   account: AccountPanel,
+  guests: GuestsPanel,
   playback: PlaybackPanel,
   appearance: AppearancePanel,
   autoplay: AutoplayPanel,

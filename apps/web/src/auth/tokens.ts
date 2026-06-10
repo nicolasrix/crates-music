@@ -11,7 +11,10 @@ const STATE_KEY = "gw_oauth_state";
 
 export interface TokenPair {
   accessToken: string;
-  refreshToken: string;
+  // `null` for guest sessions: the guest grant (PR D) issues a single
+  // long-lived access token bounded by the guest account's expiry, with no
+  // refresh token. When it lapses the visitor re-redeems the code.
+  refreshToken: string | null;
   expiresAt: number; // unix-ms
 }
 
@@ -19,13 +22,17 @@ export function readTokens(): TokenPair | null {
   const access = localStorage.getItem(ACCESS_KEY);
   const refresh = localStorage.getItem(REFRESH_KEY);
   const expiresAt = localStorage.getItem(ACCESS_EXPIRES_KEY);
-  if (!access || !refresh || !expiresAt) return null;
+  if (!access || !expiresAt) return null;
   return { accessToken: access, refreshToken: refresh, expiresAt: Number(expiresAt) };
 }
 
 export function writeTokens(p: TokenPair) {
   localStorage.setItem(ACCESS_KEY, p.accessToken);
-  localStorage.setItem(REFRESH_KEY, p.refreshToken);
+  if (p.refreshToken) {
+    localStorage.setItem(REFRESH_KEY, p.refreshToken);
+  } else {
+    localStorage.removeItem(REFRESH_KEY);
+  }
   localStorage.setItem(ACCESS_EXPIRES_KEY, String(p.expiresAt));
 }
 

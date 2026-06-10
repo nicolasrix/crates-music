@@ -237,6 +237,13 @@ async fn main() -> Result<()> {
         recommend.model_version,
         trace_store.clone(),
     );
+    // Background reaper for expired guest accounts (PR D). Detached for the
+    // process lifetime; a 0 interval disables it.
+    let _guest_sweep = music_gateway::guest_codes::spawn_guest_sweep(
+        state.oauth().clone(),
+        Duration::from_secs(state.config().oauth.guest_sweep_interval_seconds),
+    );
+
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");
