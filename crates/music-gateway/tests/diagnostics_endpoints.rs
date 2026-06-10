@@ -1625,7 +1625,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Three sessions, increasing started_ms. s1 and s2 closed; s3 active.
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
@@ -1661,7 +1661,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Open s2 (auto-closes s1), then s3 (auto-closes s2).
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-2".to_string()),
                 track_id: music_core::TrackId::from("t-2".to_string()),
@@ -1673,7 +1673,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
         .unwrap();
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-3".to_string()),
                 track_id: music_core::TrackId::from("t-3".to_string()),
@@ -1711,7 +1711,7 @@ async fn recommend_sessions_respects_limit_query() {
     for i in 0..5 {
         state
             .sync()
-            .apply(&music_sync::SyncOp::StartSession {
+            .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
                 items: vec![music_core::QueueItem {
                     item_id: music_core::QueueItemId::from(format!("qi-{i}")),
                     track_id: music_core::TrackId::from(format!("t-{i}")),
@@ -1782,7 +1782,7 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
 
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-a".to_string()),
                 track_id: music_core::TrackId::from("t-a".to_string()),
@@ -1855,7 +1855,7 @@ async fn recommend_sessions_omits_events_by_default() {
     let state = common::build_state(common::test_config()).await;
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
@@ -1881,7 +1881,7 @@ async fn recommend_sessions_include_events_handles_session_with_no_events() {
     let state = common::build_state(common::test_config()).await;
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),

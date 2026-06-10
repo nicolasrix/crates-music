@@ -92,7 +92,7 @@ async fn ws_receives_applied_frame_when_op_posted_via_rest() {
         item_id: music_core::QueueItemId::from("qi-1"),
         track_id: music_core::TrackId::from("t-1"),
     };
-    let version = app_state.sync().apply(&op).await.unwrap();
+    let version = app_state.sync().apply(music_gateway::principal::OWNER_USER_ID, &op).await.unwrap();
     assert_eq!(version, 1);
 
     let frame = next_text_message(&mut ws).await;
@@ -191,7 +191,7 @@ async fn ws_receives_start_session_applied_frame_with_anchor_in_op() {
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-1"),
     };
-    app_state.sync().apply(&op).await.unwrap();
+    app_state.sync().apply(music_gateway::principal::OWNER_USER_ID, &op).await.unwrap();
 
     let frame = next_text_message(&mut ws).await;
     assert_eq!(frame["type"], "applied");
@@ -219,7 +219,7 @@ async fn ws_first_frame_snapshot_includes_anchor_when_session_active() {
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-pre"),
     };
-    app_state.sync().apply(&op).await.unwrap();
+    app_state.sync().apply(music_gateway::principal::OWNER_USER_ID, &op).await.unwrap();
 
     let (mut ws, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
     let frame = next_text_message(&mut ws).await;
