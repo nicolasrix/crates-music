@@ -5,7 +5,9 @@ import { joinAsGuest, refreshTokens, startLogin, logout as doLogout } from "./oa
 interface AuthState {
   tokens: TokenPair | null;
   loading: boolean;
-  login: () => void;
+  /** Begin the PKCE sign-in. `switchUser` forces the gateway login screen
+   *  (prompt=login) so a lingering session isn't silently reused. */
+  login: (options?: { switchUser?: boolean }) => void;
   /** Redeem a guest code and enter the host's room (PR D). */
   joinGuest: (code: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -45,8 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthState = {
     tokens,
     loading,
-    login: () => {
-      void startLogin();
+    login: (options?: { switchUser?: boolean }) => {
+      void startLogin({ forceLogin: options?.switchUser ?? false });
     },
     joinGuest: async (code: string, displayName?: string) => {
       await joinAsGuest(code, displayName);

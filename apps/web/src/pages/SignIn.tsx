@@ -44,7 +44,7 @@ export function SignIn() {
           self-hosted player for your Navidrome.
         </p>
         <button
-          onClick={login}
+          onClick={() => login()}
           disabled={loading || busy}
           style={{
             padding: "10px 18px",
@@ -60,6 +60,26 @@ export function SignIn() {
         >
           {loading ? "checking session…" : "sign in"}
         </button>
+
+        {/* A still-valid gateway session is reused by "sign in" above; this
+            forces the login screen so a different household member can sign
+            in (prompt=login). */}
+        <div style={{ marginTop: "var(--space-3)" }}>
+          <button
+            onClick={() => login({ switchUser: true })}
+            disabled={loading || busy}
+            className="text-fg-muted text-sm"
+            style={{
+              background: "none",
+              border: 0,
+              cursor: loading || busy ? "default" : "pointer",
+              textDecoration: "underline",
+              opacity: loading || busy ? 0.5 : 1,
+            }}
+          >
+            sign in as a different user
+          </button>
+        </div>
 
         <div style={{ marginTop: "var(--space-6)" }}>
           {!showGuest ? (

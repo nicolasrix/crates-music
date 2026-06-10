@@ -305,6 +305,12 @@ pub struct AuthorizeQuery {
     /// still accept the param to be a polite OAuth citizen.
     #[serde(default)]
     pub scope: Option<String>,
+    /// OpenID-Connect-style `prompt`. We honour `prompt=login`: it forces
+    /// the login screen even when a valid `gw_session` exists, so a user
+    /// can switch accounts instead of being silently re-authed as whoever
+    /// the lingering session belongs to. Any other value is ignored.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -358,6 +364,16 @@ pub async fn authorize(
     let session = match session_token.as_deref() {
         Some(t) => state.oauth().find_session(t).await.map_err(internal)?,
         None => None,
+    };
+    // `prompt=login` forces re-authentication: drop the existing session so
+    // the user lands on the login page and can pick a different account. The
+    // `next` URL we build below deliberately omits `prompt`, so once a fresh
+    // session is minted the bounce-back authorize reuses it (no redirect
+    // loop) and issues the code for the newly chosen user.
+    let session = if q.prompt.as_deref() == Some("login") {
+        None
+    } else {
+        session
     };
     let Some(session) = session else {
         let mut next = String::from("/oauth/authorize?");

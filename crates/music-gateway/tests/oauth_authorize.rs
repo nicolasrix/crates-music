@@ -230,6 +230,40 @@ async fn authorize_with_session_redirects_to_client_with_code_and_state() {
 }
 
 #[tokio::test]
+async fn authorize_with_prompt_login_forces_login_despite_session() {
+    // A valid session would normally short-circuit to the client with a
+    // code. `prompt=login` must override that and send the user to the
+    // login screen so they can switch accounts.
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}&prompt=login"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(
+        location.starts_with("/oauth/login?next="),
+        "prompt=login with a session must still go to login: {location}"
+    );
+    // The embedded next= URL must NOT carry prompt forward — otherwise the
+    // post-login bounce-back would re-force login and loop forever.
+    let next = extract_query_param(location, "next").unwrap();
+    assert!(
+        !next.contains("prompt"),
+        "next= must drop prompt to avoid a redirect loop: {next}"
+    );
+}
+
+#[tokio::test]
 async fn authorize_rejects_unknown_client_id() {
     let (oauth, token) = store_with_session_and_client().await;
     let state =
