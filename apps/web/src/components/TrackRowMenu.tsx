@@ -25,7 +25,7 @@ import {
   addTrackToPlaylist,
   createPlaylist,
   listPlaylists,
-} from "../api/client";
+} from "../api/playlists";
 import { useAudioCache } from "../cache/AudioCacheContext";
 import { formatBytes } from "../cache/format";
 import { navigate } from "../router";

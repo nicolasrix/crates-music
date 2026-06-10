@@ -250,6 +250,34 @@ See per-component docs:
 - Events handler in `events.rs` is small: validate input, batch, call
   `EventStore::append_batch`.
 
+## Gateway-owned playlists (`playlists/`)
+
+Decision D6 of the user-system plan moved playlists off Navidrome's
+`/rest/*` onto `/v1/playlists/*` so membership can be **private per-user**.
+One Navidrome account backs the whole gateway, so per-user privacy can only
+live on our side; the *catalog* (the tracks) stays shared on Navidrome.
+
+- `store.rs` — `PlaylistStore`, a pure id-plumbing layer over two tables in
+  the **OAuth pool** (`gateway-state.sqlite`, migration `0007_playlists.sql`):
+  `playlists` (owner, name, `visibility`, timestamps) and `playlist_tracks`
+  (ordered `(playlist_id, position) → track_id`). It shares the OAuth pool
+  (built from `OauthStore::pool()` in `AppState::new`) so `owner_user_id`'s
+  foreign key and `ON DELETE CASCADE` work without a cross-file reference. It
+  stores Navidrome **track ids only** and never touches catalog metadata.
+- `handlers.rs` — the `/v1/playlists/*` CRUD. Authorization is two-layer:
+  reads are any-authenticated (own + others' `shared`; a private playlist the
+  caller doesn't own is **404**, not 403, so existence isn't leaked), and the
+  mutating verbs self-gate on the `WritePlaylist` capability (a **guest** gets
+  **403**) and then on ownership (non-owner → 404). `GET /v1/playlists/:id`
+  returns the row plus ordered `track_ids`; clients hydrate those against
+  `/rest/getSong`.
+
+The endpoint surface is in [API.md](../API.md#playlists). Existing Navidrome
+playlists are copied into the owner (`user_id=1`) once by
+`scripts/import_navidrome_playlists.py` — idempotent by playlist name; it
+reads through the verbatim `/rest/*` proxy and writes through the new
+endpoints, so it needs only a gateway bearer.
+
 ## Diagnostics
 
 `diagnostics/` contains four pieces:

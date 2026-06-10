@@ -13,8 +13,6 @@ import {
   AlbumWithTracks,
   Artist,
   ArtistWithAlbums,
-  PlaylistSummary,
-  PlaylistWithTracks,
   Track,
 } from "./types";
 
@@ -151,63 +149,10 @@ export async function getArtist(id: string): Promise<ArtistWithAlbums> {
   return { artist, albums: album ?? [] };
 }
 
-export async function listPlaylists(): Promise<PlaylistSummary[]> {
-  type Resp = { playlist?: PlaylistSummary[] };
-  const result = await getSubsonic<Resp>("/rest/getPlaylists", "playlists");
-  return result.playlist ?? [];
-}
-
-export async function getPlaylist(id: string): Promise<PlaylistWithTracks> {
-  const path = `/rest/getPlaylist?id=${encodeURIComponent(id)}`;
-  const raw = await getSubsonic<PlaylistSummary & { entry?: Track[] }>(path, "playlist");
-  const { entry, ...playlist } = raw;
-  return { playlist, tracks: entry ?? [] };
-}
-
-// Create an empty playlist. Subsonic accepts createPlaylist with `name`
-// alone and returns the new playlist envelope. Some servers (Navidrome
-// included) wrap it under "playlist" exactly like getPlaylist; others
-// drop the wrapper. The fetched response carries enough metadata for us
-// to navigate to /playlists/:id.
-export async function createPlaylist(name: string): Promise<PlaylistSummary> {
-  const path = `/rest/createPlaylist?name=${encodeURIComponent(name)}`;
-  return getSubsonic<PlaylistSummary>(path, "playlist");
-}
-
-// Add a single song to an existing playlist via Subsonic's updatePlaylist.
-// Returns nothing — the caller invalidates the relevant queries to pick
-// up the new track count.
-export async function addTrackToPlaylist(
-  playlistId: string,
-  trackId: string
-): Promise<void> {
-  const path =
-    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
-    `&songIdToAdd=${encodeURIComponent(trackId)}`;
-  // updatePlaylist returns an empty `subsonic-response` body on success;
-  // we only care that getSubsonic doesn't throw on a non-ok envelope.
-  await getSubsonic<unknown>(path, "");
-}
-
-// Rename an existing playlist. Subsonic's updatePlaylist accepts a `name`
-// param to overwrite the playlist's title — same endpoint as track edits.
-export async function renamePlaylist(
-  playlistId: string,
-  name: string
-): Promise<void> {
-  const path =
-    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
-    `&name=${encodeURIComponent(name)}`;
-  await getSubsonic<unknown>(path, "");
-}
-
-// Delete a playlist. Subsonic deletes immediately on success; no
-// soft-delete or undo. Caller is responsible for the confirmation step
-// and for invalidating the playlists list afterwards.
-export async function deletePlaylist(playlistId: string): Promise<void> {
-  const path = `/rest/deletePlaylist?id=${encodeURIComponent(playlistId)}`;
-  await getSubsonic<unknown>(path, "");
-}
+// Playlists moved off `/rest/*` to the gateway-owned `/v1/playlists/*`
+// store (user-system PR F). Their client wrappers — listPlaylists,
+// getPlaylist, createPlaylist, addTrackToPlaylist, renamePlaylist,
+// deletePlaylist, setPlaylistTracks — live in `./playlists`.
 
 // "Recent tracks" — derived from the newest-albums endpoint, NOT from
 // search3 directly. search3's empty-query result has no guaranteed order

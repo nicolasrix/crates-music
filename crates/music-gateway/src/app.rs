@@ -19,6 +19,7 @@ use crate::events;
 use crate::guest_codes;
 use crate::library_rating;
 use crate::oauth::handlers as oauth_handlers;
+use crate::playlists::handlers as playlist_handlers;
 use crate::proxy::proxy;
 use crate::readyz;
 use crate::recommend;
@@ -186,7 +187,25 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/guest_codes",
             get(guest_codes::list).post(guest_codes::create),
         )
-        .route("/v1/guest_codes/:id", axum::routing::delete(guest_codes::revoke));
+        .route("/v1/guest_codes/:id", axum::routing::delete(guest_codes::revoke))
+        // Gateway-owned playlists (PR F). Reads are any-authenticated
+        // (own + shared); the mutating verbs self-gate on the
+        // `WritePlaylist` capability, so a guest token authenticates but
+        // gets 403 here rather than a route-level 404.
+        .route(
+            "/v1/playlists",
+            get(playlist_handlers::list).post(playlist_handlers::create),
+        )
+        .route(
+            "/v1/playlists/:id",
+            get(playlist_handlers::get)
+                .patch(playlist_handlers::patch)
+                .delete(playlist_handlers::delete),
+        )
+        .route(
+            "/v1/playlists/:id/tracks",
+            put(playlist_handlers::put_tracks),
+        );
 
     let v1 = v1_general
         .merge(v1_admin)
