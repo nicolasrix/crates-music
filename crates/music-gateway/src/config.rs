@@ -104,6 +104,27 @@ pub struct OauthConfig {
     /// requiring a separate admin endpoint for the simple cases.
     #[serde(default, rename = "clients")]
     pub clients: Vec<OauthClientConfig>,
+    /// How long a redeemed guest session lasts (seconds). Both the guest
+    /// account row's `expires_at` and the guest access token's TTL are set
+    /// to this — a guest gets one long-lived access token (no refresh) that
+    /// is hard-capped by the account expiry. Default 12 hours: long enough
+    /// for a party, short enough to self-clean. (PR D.)
+    #[serde(default = "default_guest_session_ttl_secs")]
+    pub guest_session_ttl_seconds: u64,
+    /// How often (seconds) the background sweep reaps expired guest
+    /// accounts (cascading their tokens). `0` disables the loop — lapsed
+    /// guests are still rejected at auth time by `resolve_principal`, so
+    /// disabling only forgoes the row cleanup. Default 1 hour.
+    #[serde(default = "default_guest_sweep_interval_secs")]
+    pub guest_sweep_interval_seconds: u64,
+}
+
+fn default_guest_session_ttl_secs() -> u64 {
+    12 * 60 * 60
+}
+
+fn default_guest_sweep_interval_secs() -> u64 {
+    60 * 60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,6 +377,8 @@ impl Default for OauthConfig {
         Self {
             state_db: PathBuf::from("gateway-state.sqlite"),
             clients: Vec::new(),
+            guest_session_ttl_seconds: default_guest_session_ttl_secs(),
+            guest_sweep_interval_seconds: default_guest_sweep_interval_secs(),
         }
     }
 }

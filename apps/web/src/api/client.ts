@@ -20,17 +20,24 @@ import {
 
 class AuthError extends Error {}
 
-async function apiFetch(path: string): Promise<Response> {
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const tokens = readTokens();
   if (!tokens) throw new AuthError("not signed in");
 
   const doFetch = (token: string) =>
     fetch(path, {
-      headers: { Authorization: `Bearer ${token}` },
+      ...init,
+      headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
     });
 
   let res = await doFetch(tokens.accessToken);
   if (res.status === 401) {
+    // Guest sessions (PR D) carry no refresh token — a 401 is terminal,
+    // the visitor must re-redeem the code. Don't attempt a refresh.
+    if (!tokens.refreshToken) {
+      clearTokens();
+      throw new AuthError("guest session expired");
+    }
     try {
       await refreshTokens(tokens.refreshToken);
     } catch {
@@ -401,6 +408,58 @@ export async function whoami(): Promise<Whoami> {
   const res = await apiFetch("/v1/whoami");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as Whoami;
+}
+
+// ---- Guest codes (PR D) — host-side management ------------------------
+
+export interface GuestCode {
+  id: number;
+  label: string | null;
+  created_at_unix_ms: number;
+  expires_at_unix_ms: number | null;
+  max_uses: number | null;
+  uses: number;
+  revoked_at_unix_ms: number | null;
+}
+
+export interface CreatedGuestCode {
+  id: number;
+  /** Plaintext — shown once at creation, never recoverable afterwards. */
+  code: string;
+  expires_at_unix_ms: number | null;
+  max_uses: number | null;
+}
+
+/** List the caller's guest codes (newest first). Forbidden for guests. */
+export async function listGuestCodes(): Promise<GuestCode[]> {
+  const res = await apiFetch("/v1/guest_codes");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as GuestCode[];
+}
+
+/** Mint a new guest code owned by the caller. Returns the plaintext once. */
+export async function createGuestCode(opts: {
+  label?: string | undefined;
+  expiresInSeconds?: number | undefined;
+  maxUses?: number | undefined;
+}): Promise<CreatedGuestCode> {
+  const body: Record<string, unknown> = {};
+  if (opts.label) body.label = opts.label;
+  if (opts.expiresInSeconds) body.expires_in_seconds = opts.expiresInSeconds;
+  if (opts.maxUses) body.max_uses = opts.maxUses;
+  const res = await apiFetch("/v1/guest_codes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as CreatedGuestCode;
+}
+
+/** Revoke one of the caller's guest codes. Idempotent. */
+export async function revokeGuestCode(id: number): Promise<void> {
+  const res = await apiFetch(`/v1/guest_codes/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
 }
 
 export { AuthError };

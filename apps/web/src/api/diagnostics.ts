@@ -19,6 +19,10 @@ async function apiFetch(path: string): Promise<Response> {
 
   let res = await doFetch(tokens.accessToken);
   if (res.status === 401) {
+    if (!tokens.refreshToken) {
+      clearTokens();
+      throw new AuthError("guest session expired");
+    }
     try {
       await refreshTokens(tokens.refreshToken);
     } catch {

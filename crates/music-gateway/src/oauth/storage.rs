@@ -155,6 +155,54 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Input for `create_guest_code`. `created_at` is stamped by the store;
+/// the code itself is minted by the store (never client-supplied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewGuestCode {
+    pub host_user_id: i64,
+    pub label: Option<String>,
+    /// Absolute expiry (unix-ms). `None` = until revoked.
+    pub expires_at_unix_ms: Option<i64>,
+    /// Cap on redemptions. `None` = unlimited.
+    pub max_uses: Option<i64>,
+}
+
+/// Plaintext-bearing return value from `create_guest_code`. The plaintext
+/// is shown to the host once; the row holds only its hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedGuestCode {
+    pub id: i64,
+    pub code: String,
+    pub expires_at_unix_ms: Option<i64>,
+    pub max_uses: Option<i64>,
+}
+
+/// A guest-code row for the host's management UI. No plaintext (it's
+/// unrecoverable once minted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestCodeRow {
+    pub id: i64,
+    pub host_user_id: i64,
+    pub label: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: Option<i64>,
+    pub max_uses: Option<i64>,
+    pub uses: i64,
+    pub revoked_at_unix_ms: Option<i64>,
+}
+
+/// Result of `redeem_guest_code`. Splits the failure space so the caller
+/// can return an actionable error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedeemOutcome {
+    /// Valid redemption; the guest attaches to this host's room.
+    Ok { host_user_id: i64 },
+    /// Code exists but is revoked, expired, or out of uses.
+    Spent,
+    /// No such code.
+    Unknown,
+}
+
 /// Input for `insert_user`. `created_at` is stamped by the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewUser {
@@ -1031,6 +1079,165 @@ impl OauthStore {
             }),
             None => Ok(DevicePollState::Expired),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Guest codes (PR D) — a host User mints a shareable code; redeeming
+    // it creates an ephemeral guest attached to the host's room.
+    // -----------------------------------------------------------------
+
+    /// Mint a guest code owned by `host_user_id`. The plaintext is returned
+    /// once (to show the host); only its sha256 is stored. `label` is a
+    /// free-text reminder ("Party Saturday"); `expires_at`/`max_uses` bound
+    /// the code (either may be `None` for unbounded-on-that-axis).
+    pub async fn create_guest_code(&self, input: NewGuestCode) -> Result<IssuedGuestCode> {
+        let code = session::mint_user_code();
+        let code_hash = session::hash_token(&code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "INSERT INTO guest_codes \
+                (code_hash, host_user_id, label, created_at, expires_at, max_uses) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&code_hash)
+        .bind(input.host_user_id)
+        .bind(&input.label)
+        .bind(now)
+        .bind(input.expires_at_unix_ms)
+        .bind(input.max_uses)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(IssuedGuestCode {
+            id: row.get::<i64, _>("id"),
+            code,
+            expires_at_unix_ms: input.expires_at_unix_ms,
+            max_uses: input.max_uses,
+        })
+    }
+
+    /// Atomically redeem a guest code: validate it (not revoked, not
+    /// expired, under `max_uses`) and bump `uses` in a single guarded
+    /// `UPDATE ... RETURNING`. Returns the owning `host_user_id` on
+    /// success, or a typed reason on failure.
+    ///
+    /// The single-row update is the concurrency gate (same pattern as
+    /// `consume_refresh_token`): two simultaneous redemptions of the last
+    /// remaining use can't both win, because the `uses < max_uses` guard
+    /// is evaluated inside the atomic write — the loser matches no row.
+    /// We distinguish "invalid" from "exhausted" with a follow-up read so
+    /// the host UI / joining guest gets an actionable message.
+    pub async fn redeem_guest_code(&self, code: &str) -> Result<RedeemOutcome> {
+        let code_hash = session::hash_token(code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "UPDATE guest_codes SET uses = uses + 1 \
+             WHERE code_hash = ? \
+               AND revoked_at IS NULL \
+               AND (expires_at IS NULL OR expires_at > ?) \
+               AND (max_uses IS NULL OR uses < max_uses) \
+             RETURNING host_user_id",
+        )
+        .bind(&code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok(RedeemOutcome::Ok {
+                host_user_id: row.get::<i64, _>("host_user_id"),
+            });
+        }
+        // The guarded UPDATE matched nothing — figure out why for a useful
+        // error. A row that exists but failed the guard is revoked/expired/
+        // exhausted; no row at all is an unknown code.
+        let existing = sqlx::query(
+            "SELECT revoked_at, expires_at, max_uses, uses \
+             FROM guest_codes WHERE code_hash = ?",
+        )
+        .bind(&code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match existing {
+            None => RedeemOutcome::Unknown,
+            Some(r) => {
+                let revoked = r.get::<Option<i64>, _>("revoked_at").is_some();
+                let expired = r
+                    .get::<Option<i64>, _>("expires_at")
+                    .is_some_and(|e| e <= now);
+                let exhausted = match r.get::<Option<i64>, _>("max_uses") {
+                    Some(max) => r.get::<i64, _>("uses") >= max,
+                    None => false,
+                };
+                if revoked || expired || exhausted {
+                    RedeemOutcome::Spent
+                } else {
+                    // Shouldn't happen (guard and re-read disagree) — treat
+                    // as unknown rather than silently succeed.
+                    RedeemOutcome::Unknown
+                }
+            }
+        })
+    }
+
+    /// List a host's guest codes, newest first. Never includes the
+    /// plaintext (it's unrecoverable — only the hash is stored).
+    pub async fn list_guest_codes(&self, host_user_id: i64) -> Result<Vec<GuestCodeRow>> {
+        let rows = sqlx::query(
+            "SELECT id, host_user_id, label, created_at, expires_at, \
+                    max_uses, uses, revoked_at \
+             FROM guest_codes WHERE host_user_id = ? ORDER BY id DESC",
+        )
+        .bind(host_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| GuestCodeRow {
+                id: r.get("id"),
+                host_user_id: r.get("host_user_id"),
+                label: r.get("label"),
+                created_at_unix_ms: r.get("created_at"),
+                expires_at_unix_ms: r.get("expires_at"),
+                max_uses: r.get("max_uses"),
+                uses: r.get("uses"),
+                revoked_at_unix_ms: r.get("revoked_at"),
+            })
+            .collect())
+    }
+
+    /// Revoke a guest code, scoped to its host so one user can't kill
+    /// another's code. Idempotent; returns `true` if a not-yet-revoked row
+    /// owned by `host_user_id` was revoked. Already-issued guest tokens
+    /// stay valid until they (or the guest row) expire — revoking only
+    /// stops *new* redemptions.
+    pub async fn revoke_guest_code(&self, host_user_id: i64, id: i64) -> Result<bool> {
+        let now = unix_ms_now();
+        let res = sqlx::query(
+            "UPDATE guest_codes SET revoked_at = ? \
+             WHERE id = ? AND host_user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(id)
+        .bind(host_user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Reap guest accounts whose `expires_at` has passed. `ON DELETE
+    /// CASCADE` on the token tables drops their access/refresh tokens with
+    /// them. Returns the number of guests deleted. Safe to call on a
+    /// schedule; `resolve_principal` already rejects a lapsed guest, so
+    /// this is housekeeping, not a security boundary.
+    pub async fn delete_expired_guests(&self, now_unix_ms: i64) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM users \
+             WHERE role = 'guest' AND expires_at IS NOT NULL AND expires_at <= ?",
+        )
+        .bind(now_unix_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Diagnostic: list every table in the DB. Used by tests to verify the

@@ -15,6 +15,7 @@ import {
   Gauge,
   HardDrive,
   Info,
+  KeyRound,
   ListMusic,
   Palette,
   ScatterChart,
@@ -47,6 +48,7 @@ export const SETTINGS_NAV: readonly SettingsGroup[] = [
     title: "general",
     items: [
       { id: "account", label: "account", kind: "config", icon: <User {...ICON} /> },
+      { id: "guests", label: "guests", kind: "config", icon: <KeyRound {...ICON} /> },
       { id: "playback", label: "playback", kind: "config", icon: <Volume2 {...ICON} /> },
       { id: "appearance", label: "appearance", kind: "config", icon: <Palette {...ICON} /> },
     ],

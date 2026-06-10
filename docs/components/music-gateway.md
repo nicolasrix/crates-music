@@ -142,6 +142,30 @@ Tables:
 | `refresh_tokens` | long-lived, per-device, individually revocable |
 | `access_tokens` | short-lived (1 h), looked up by sha256 |
 | `sessions` | login sessions (cookie-based, separate from access tokens) |
+| `guest_codes` | shareable room-join codes (PR D); `sha256(code)`, host-owned, optional expiry/max-uses |
+
+### Guest rooms (PR D)
+
+A host (any real account) mints a **guest code**; a visitor redeems it for
+an ephemeral guest principal that joins the host's sync room — a shared
+jukebox (D5). The surface:
+
+- `POST /oauth/guest` (public, in `oauth/handlers.rs`) — redeem a code.
+  No PKCE, no password: the code is the credential. Mints a **single
+  access token, no refresh** (guests are transient and hard-capped by the
+  guest account row's `expires_at`, which `resolve_principal` also
+  enforces). The minted `users` row is `role='guest'` with
+  `host_user_id = code.host`, so `Principal::room_id()` routes the guest
+  into the host's room with zero handler changes.
+- `GET/POST /v1/guest_codes` + `DELETE /v1/guest_codes/:id`
+  (`guest_codes.rs`, any-authenticated tier) — host-side management. Codes
+  are always owned by the caller (`host_user_id = principal.user_id`), so
+  a User manages their own and nobody touches another host's; the handlers
+  403 a `Role::Guest`.
+- Background reaper (`spawn_guest_sweep`) deletes expired guest rows on an
+  interval, cascading their tokens via the schema's `ON DELETE CASCADE`.
+  Config: `[oauth] guest_session_ttl_seconds` (default 12 h),
+  `guest_sweep_interval_seconds` (default 1 h, `0` disables).
 
 Refresh tokens **rotate** on every refresh: the old one is invalidated
 and a new one is issued in the same response. This bounds replay

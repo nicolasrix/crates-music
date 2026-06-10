@@ -38,8 +38,9 @@ bus. Every sync read/write is scoped to `principal.room_id()`:
 - A **User** owns exactly one room (`room_id == their user_id`), so all
   of that user's devices share a queue — the cross-device point.
 - A **Guest** owns no room; they attach to their **host's**
-  (`room_id == host_user_id`), making the host's queue a shared jukebox
-  (PR D).
+  (`room_id == host_user_id`, stamped on the guest principal at code
+  redemption — PR D), making the host's queue a shared jukebox. A guest
+  drives the same queue as the host and every other guest in that room.
 - The static-bearer / legacy-token caller resolves to the owner
   (`room_id == 1`), so the pre-rooms single-queue behaviour is exactly
   the owner's room — no migration, no client change.

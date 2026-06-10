@@ -21,7 +21,10 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::oauth::password;
-use crate::oauth::storage::{DeviceCodeRow, DevicePollState, NewAuthCode, NewDeviceCode, NewRefreshToken};
+use crate::oauth::storage::{
+    DeviceCodeRow, DevicePollState, NewAuthCode, NewDeviceCode, NewRefreshToken, NewUser,
+    RedeemOutcome,
+};
 use crate::state::AppState;
 
 /// Cookie name. Short, gateway-scoped, matches the convention of OAuth
@@ -704,6 +707,130 @@ async fn mint_pair(
         token_type: "Bearer",
         expires_in: ACCESS_TOKEN_TTL.as_secs(),
     })
+}
+
+/// Cap on a guest-supplied display name. Long enough for "Aunt
+/// Margaret's iPad", short enough to bound the row + every UI that renders
+/// it.
+const MAX_GUEST_DISPLAY_NAME: usize = 64;
+
+#[derive(Debug, Deserialize)]
+pub struct GuestForm {
+    /// The shareable code (the host's `XXXX-XXXX`).
+    pub code: String,
+    /// The OAuth client redeeming on the guest's behalf (e.g. `web`).
+    pub client_id: String,
+    /// Optional friendly name shown in the host's room / "who's here".
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GuestTokenResponse {
+    pub access_token: String,
+    pub token_type: &'static str,
+    pub expires_in: u64,
+    /// Always `"guest"`; lets the client skip a `whoami` round-trip to
+    /// know it should render the restricted UI.
+    pub role: &'static str,
+    /// The room the guest joined (the host's user id).
+    pub host_user_id: i64,
+}
+
+/// POST /oauth/guest — redeem a guest code for an ephemeral guest token
+/// (PR D). No PKCE, no password: the code *is* the credential. The minted
+/// principal is a fresh `role='guest'` user attached to the code's host,
+/// so `room_id()` routes it into the host's shared queue.
+///
+/// Unlike every other grant, a guest gets a **single access token, no
+/// refresh** — guests are transient and bounded by the account row's
+/// `expires_at` (also enforced in `resolve_principal`). Withholding the
+/// refresh token both matches that ephemerality and sidesteps any path
+/// where a NULL-`user_id` refresh could rotate into a higher-privilege
+/// token. When it lapses, the visitor redeems the code again.
+pub async fn guest_grant(
+    State(state): State<AppState>,
+    Form(form): Form<GuestForm>,
+) -> Result<Json<GuestTokenResponse>, (StatusCode, Json<OauthError>)> {
+    // The redeeming client must be registered (mirrors the other grants).
+    state
+        .oauth()
+        .find_client(&form.client_id)
+        .await
+        .map_err(|e| oauth_internal(&e))?
+        .ok_or_else(|| {
+            oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client",
+                "unknown client_id",
+            )
+        })?;
+
+    let host_user_id = match state
+        .oauth()
+        .redeem_guest_code(&form.code)
+        .await
+        .map_err(|e| oauth_internal(&e))?
+    {
+        RedeemOutcome::Ok { host_user_id } => host_user_id,
+        // Same opaque message for revoked/expired/exhausted — don't help an
+        // attacker probe which codes once existed.
+        RedeemOutcome::Spent => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "this guest code is no longer valid",
+            ));
+        }
+        RedeemOutcome::Unknown => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "unknown guest code",
+            ));
+        }
+    };
+
+    let ttl = Duration::from_secs(state.config().oauth.guest_session_ttl_seconds);
+    let now = now_unix_ms();
+    let expires_at = now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX));
+
+    let display_name = sanitize_guest_name(form.display_name.as_deref());
+    let guest_id = state
+        .oauth()
+        .insert_user(NewUser {
+            username: None,
+            display_name: Some(display_name),
+            role: "guest".to_string(),
+            password_hash: None,
+            host_user_id: Some(host_user_id),
+            expires_at_unix_ms: Some(expires_at),
+        })
+        .await
+        .map_err(|e| oauth_internal(&e))?;
+
+    let access = state
+        .oauth()
+        .mint_access_token_for_user(&form.client_id, None, ttl, Some(guest_id))
+        .await
+        .map_err(|e| oauth_internal(&e))?;
+
+    Ok(Json(GuestTokenResponse {
+        access_token: access.token,
+        token_type: "Bearer",
+        expires_in: ttl.as_secs(),
+        role: "guest",
+        host_user_id,
+    }))
+}
+
+/// Trim, collapse to a sane length, and fall back to "Guest" for an
+/// empty/whitespace name.
+fn sanitize_guest_name(provided: Option<&str>) -> String {
+    let trimmed = provided.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return "Guest".to_string();
+    }
+    trimmed.chars().take(MAX_GUEST_DISPLAY_NAME).collect()
 }
 
 /// PKCE S256: `base64url(sha256(verifier))` with no padding.

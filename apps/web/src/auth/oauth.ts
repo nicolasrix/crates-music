@@ -75,6 +75,51 @@ export async function completeLogin(code: string, returnedState: string | null):
   });
 }
 
+// Redeem a guest code (PR D). No PKCE, no redirect — the code is the
+// credential. The gateway returns a single access token (no refresh) bound
+// to an ephemeral guest principal that shares the host's room. Returns the
+// host's user id (the room the guest joined).
+export async function joinAsGuest(
+  code: string,
+  displayName?: string,
+): Promise<{ hostUserId: number }> {
+  const body = new URLSearchParams({
+    code: code.trim(),
+    client_id: CLIENT_ID,
+  });
+  if (displayName && displayName.trim()) {
+    body.set("display_name", displayName.trim());
+  }
+  const res = await fetch("/oauth/guest", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    // Surface the gateway's reason ("this guest code is no longer valid",
+    // "unknown guest code") so the join form can show it.
+    let message = `HTTP ${res.status}`;
+    try {
+      const err = (await res.json()) as { error_description?: string };
+      if (err.error_description) message = err.error_description;
+    } catch {
+      // non-JSON body; keep the status message
+    }
+    throw new Error(message);
+  }
+  const json = (await res.json()) as {
+    access_token: string;
+    expires_in: number;
+    host_user_id: number;
+  };
+  writeTokens({
+    accessToken: json.access_token,
+    refreshToken: null,
+    expiresAt: Date.now() + json.expires_in * 1000,
+  });
+  return { hostUserId: json.host_user_id };
+}
+
 export async function refreshTokens(refreshToken: string): Promise<void> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",

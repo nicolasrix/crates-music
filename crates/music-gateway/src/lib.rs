@@ -13,6 +13,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod embedder;
 pub mod events;
+pub mod guest_codes;
 pub mod ingest;
 pub mod library_rating;
 pub mod oauth;
