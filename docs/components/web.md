@@ -1,11 +1,14 @@
 # web
 
 **Path:** `apps/web/`
-**Type:** Vite + React 19 single-page app
-**Test count:** 72 (Vitest)
+**Type:** Vite + React 19 single-page app, installable as a PWA
+**Test count:** 207 (Vitest, 19 files)
 
-The browser client. Talks to the gateway over HTTPS for both REST
-calls (`/rest/*`, `/v1/*`) and the sync WebSocket (`/v1/sync`).
+The browser client — and, installed to a phone's home screen as a
+PWA, *the* mobile client (native mobile was retired; see
+[PLATFORM-PARITY.md](../PLATFORM-PARITY.md)). Talks to the gateway
+over HTTPS for both REST calls (`/rest/*`, `/v1/*`) and the sync
+WebSocket (`/v1/sync`).
 
 ## Stack
 
@@ -13,10 +16,17 @@ calls (`/rest/*`, `/v1/*`) and the sync WebSocket (`/v1/sync`).
 - **TypeScript 6** — strict mode.
 - **Vite 8** — build tool. Dev server on port 5173 with HMR.
 - **TanStack Query 5** — request caching + retries + invalidation.
-- **Tailwind 3** — styling.
+- **Tailwind 3** — styling; **lucide-react** for icons.
 - **Plain `<audio>` element** — playback. MSE (Media Source Extensions)
   for gapless playback is deferred until basic boundary handoff
   proves audibly gappy in real use.
+- **vite-plugin-pwa** (`registerType: autoUpdate`) — service worker
+  precaches the app shell; `/v1`, `/rest`, `/oauth` are NetworkOnly
+  and audio never touches the SW.
+- **idb** — IndexedDB offline audio cache (`src/cache/`), a TS
+  reimplementation of the `music-cache` contract.
+- **three / @react-three/fiber** — the 3-D latent-space view only,
+  code-split into a lazy chunk so it never weighs down the main bundle.
 
 No state management library beyond TanStack Query + React context.
 No routing library — `router.tsx` is ~30 lines of `useState` +
@@ -37,12 +47,15 @@ apps/web/
     ├── main.tsx              # entry: ReactDOM.createRoot
     ├── App.tsx               # provider tree
     ├── router.tsx            # History API routing
-    ├── api/                  # gateway client (REST + diagnostics)
-    ├── auth/                 # OAuth flow + AuthContext
+    ├── api/                  # gateway client (REST, playlists, users, diagnostics)
+    ├── auth/                 # OAuth flow + AuthContext + whoami/role hooks
+    ├── cache/                # IndexedDB offline audio cache + AudioCacheContext
     ├── components/           # shared UI primitives
     ├── pages/                # route components — see below
     ├── player/               # PlayerProvider + bottom-bar UI (thumbs feedback)
+    ├── pwa/                  # beforeinstallprompt capture + install button
     ├── rum/                  # web-vitals + markEvent + flush loop
+    ├── settings/             # settings shell: nav model, rail, panels
     ├── styles/               # Tailwind + design-bundle CSS
     ├── sync/                 # WebSocket client + SyncContext
     └── utils/                # shared helpers
@@ -62,27 +75,59 @@ Pages today (`apps/web/src/pages/`):
   `unavailable`/`error`); results are deliberately not cached via
   TanStack Query (a stale "sunny afternoon" from yesterday would
   hide newly-ingested tracks).
+- `LikedSongs` (`/liked`) — liked tracks/albums/artists, with
+  bulk-cache-into-the-auto-budget buttons.
+- `Downloads` (`/downloads`) — offline cache stats, pinned list,
+  "free up space" (evict).
 - `LatentSpace` / `LatentSpace3D` + `latentSpace.ts`/`.test.ts` —
   2D and 3D UMAP plot views (read
   `/v1/diagnostics/recommend/latent_space`). 2-D / 3-D toggle is
   decoupled from the colour mode.
-- `diagnostics/` — the diagnostics page has been split into
-  topical subpages: `DiagnosticsHome` (landing), `Recommender`
+- `diagnostics/` — topical diagnostics subpages: `Recommender`
   (per-feature dashboards), `LatentSpace` (above), `Ingest` (queue
   + ingest worker state), `Tracing` (M0 span ring), `Rum` (browser
   RUM events), `Listening` (recommend-session reconstruction with
-  per-session events panel).
-- `SignIn`, `Callback` — OAuth PKCE flow.
+  per-session events panel). These no longer have their own
+  top-level page — they render inside the settings shell (below);
+  old `/diagnostics/*` URLs redirect to `/settings/*`.
+- `SignIn`, `Callback` — OAuth PKCE flow. Sign-in passes
+  `prompt=login` and offers a "sign in as a different user" link so
+  a lingering gateway `gw_session` cookie can't silently re-auth
+  the previous account.
+
+## Settings shell (`settings/`)
+
+`/settings/<panel>` renders every settings *and* diagnostics surface
+inside one shell (`SettingsShell` + `SettingsRail`). `nav.tsx` is the
+single source of truth: a grouped list of panels, each `kind:
+"config"` (a knob) or `kind: "observe"` (a diagnostic), interleaved
+by concern so e.g. the recommender dashboards sit next to the
+autoplay knobs. The rail, the mobile `<select>`, and App.tsx's route
+table all derive from it — adding a panel is a one-line change.
+
+Config panels: `Account`, `Guests` (guest-code management),
+`Playback` (streaming/download quality + the per-device audio-output
+toggle), `Appearance` (theme), `Autoplay` (tethered-drift params),
+`Storage` (cache budgets), `About`, and the admin-only `UsersAdmin`.
+Observe (diagnostics) panels are admin-only and fail closed: while
+`whoami` is still resolving, a deep-linked observe panel shows the
+default panel, never the reverse.
 
 ## Provider tree
 
 ```tsx
-<QueryClientProvider client={queryClient}>
-  <AuthProvider>          {/* AuthContext.tsx — OAuth tokens, refresh */}
-    <SyncProvider>        {/* WebSocket sub, optimistic state */}
-      <PlayerProvider>    {/* current track, audio element */}
-        <App />
-      </PlayerProvider>
+<QueryClientProvider client={queryClient}>   {/* main.tsx */}
+  <AuthProvider>            {/* AuthContext.tsx — OAuth tokens, refresh */}
+    <SyncProvider>          {/* WebSocket sub, optimistic state */}
+      <AudioCacheProvider>  {/* IndexedDB cache, trackId → blob: URL map */}
+        <PlayerProvider>    {/* current track, audio element */}
+          <AutoplayProvider>{/* tethered-drift autoplay refill */}
+            <ArtworkProvider>{/* extracted cover palette */}
+              ...
+            </ArtworkProvider>
+          </AutoplayProvider>
+        </PlayerProvider>
+      </AudioCacheProvider>
     </SyncProvider>
   </AuthProvider>
 </QueryClientProvider>
@@ -159,14 +204,35 @@ through `NODE_EXTRA_CA_CERTS` setup.
   which fires too early).
 
 When you click play on a track:
-1. Compute the stream URL: `/rest/stream?id=<track>&access_token=<...>`.
-   (The token goes via query param because `<audio src>` can't set
-   headers — see [API.md](../API.md#auth-model).)
-2. Set `audioEl.src` to that URL. The browser starts buffering.
+1. Resolve the src: if the track is in the offline cache,
+   `AudioCacheContext`'s warmed `trackId → blob:` URL map answers
+   **synchronously** (gesture-critical — `audio.play()` must happen in
+   the click handler); otherwise compute the stream URL
+   `/rest/stream?id=<track>&access_token=<...>`. (The token goes via
+   query param because `<audio src>` can't set headers — see
+   [API.md](../API.md#auth-model).)
+2. Set `audioEl.src`. The browser starts buffering (or seeks locally
+   against the stored blob).
 3. `audioEl.play()`.
 
 Position updates fire on `timeupdate` (~4 Hz). Likes / skips /
-scrobbles are batched into `/v1/events` every 5s.
+scrobbles are batched into `/v1/events` every 5s. Media Session
+action handlers (play/pause/next/prev/seek) + `setPositionState`
+drive lock-screen / notification controls on phones.
+
+### Per-device audio output (`player/outputDevice.ts`)
+
+Two devices signed into the same account share one room and both obey
+`is_playing`, so they already play in lockstep. A per-device
+**"Play audio on this device"** toggle (PlayerBar button + Playback
+settings panel, persisted in `localStorage`, default on) lets either
+device opt out of producing sound while still driving the shared
+queue — a silenced phone becomes a remote control; both on = synced
+multi-room playback. Implemented purely client-side as a gate in
+front of `audio.play()`; crucially the divergence-sync listeners
+(which submit `set_playing` on local `<audio>` pause/play) are guarded
+by the same flag, so a silenced remote never broadcasts its mute and
+pauses the actual speaker. No gateway or sync-protocol changes.
 
 ## Library ratings (like/dislike)
 
@@ -230,29 +296,59 @@ versions:
 - Lower version? Server is behind us — should never happen, but log
   if it does.
 
+After a PWA relaunch-from-snapshot, queue items arrive as bare ids; a
+`getSong` backfill effect re-hydrates `trackMeta` so the player bar,
+Media Session, and row menus aren't blank.
+
+## Offline cache + PWA (`cache/`, `pwa/`)
+
+`cache/audioCache.ts` is an IndexedDB reimplementation of the
+`crates/music-cache` contract: content-addressed by `(trackId,
+bitrate, codec)`, two-budget LRU (a regular auto-cached budget plus a
+separate never-evicted pinned budget), `put/get/touch/pin/unpin/
+listPinned/stats/evict`. Audio is stored as whole-file blobs and
+served to `<audio>` via `URL.createObjectURL` — chosen over a
+Service-Worker + Cache-API approach because the gateway stream
+endpoint has no HTTP Range support, so the browser must seek locally
+against a stored file.
+
+Played tracks are auto-cached (regular budget); "save for offline"
+pins (pinned budget) — mirroring CLI semantics. `downloadQuality`
+(original | opus128 | mp3128, in `cacheSettings.ts`) transcodes-to-fit
+via the `/rest/*` proxy's `format`/`maxBitRate` params. Budget sliders
+live in the Storage settings panel; lowering a cap evicts immediately.
+
+The service worker (vite-plugin-pwa, `autoUpdate`) precaches the app
+shell only — API routes are NetworkOnly and audio bypasses the SW
+entirely. `pwa/installPrompt.ts` captures `beforeinstallprompt` at
+module load (Chromium fires it once, early) and surfaces an "Install
+as app" button in Settings; iOS gets a Share → Add to Home Screen
+hint instead.
+
 ## Build
 
 ```bash
 npm run build
 # Outputs to apps/web/dist/
-# Bundle size: ~80 KB JS gzipped (web-vitals + diagnostics surface + station)
+# Main bundle: ~144 KB JS gzipped; the 3-D latent-space view is
+# code-split into a lazy ~246 KB chunk (three.js) loaded on demand.
 ```
 
-The production target is to be served by the gateway from the same
-origin. That's not yet wired — the gateway only handles JSON APIs
-today. To deploy, either:
-
-1. Have the gateway serve `dist/` as static files (simple to add).
-2. Serve the SPA from a separate origin (then the OAuth redirect
-   URIs need updating, and CORS gets involved).
+In production the gateway serves `dist/` itself: set
+`server.static_dir` in `gateway.toml` and the gateway hosts the SPA
+(with an SPA fallback for client-routed paths) from the same origin —
+which is what the OAuth redirect URIs and the PWA manifest/SW assume.
+The docker gateway image bakes the built SPA in.
 
 ## Tests
 
-72 Vitest tests across 6 files at last count — pure-logic helpers
+207 Vitest tests across 19 files at last count — pure-logic helpers
 (search ranking, latent-space binning, sync reducer, recommend
-filter shape). React-component tests and Playwright end-to-end
-suites are not yet in. The build still runs `tsc -b` which catches
-refactor breakage.
+filter shape, scrobble/skip producers, autoplay seeds + settings,
+auto-skip predicates, output-device preference, install prompt,
+settings nav) plus the IndexedDB audio-cache suite (fake-indexeddb).
+React-component tests and Playwright end-to-end suites are not yet
+in. The build still runs `tsc -b` which catches refactor breakage.
 
 ```bash
 cd apps/web && npx vitest run
@@ -260,9 +356,9 @@ cd apps/web && npx vitest run
 
 ## Known gaps
 
-- **No service worker.** Offline mode, background prefetch, and
-  push notifications are all blocked on a service worker. Planned
-  with the L2-cache-on-the-client work.
+- **Real-device PWA verification.** Install-to-home-screen,
+  airplane-mode offline launch + playback, and screen-off background
+  audio can't be tested headless and are still open.
 - **No keyboard shortcuts.** No spacebar-to-play, no arrow-key
   seek. Listenable to-do.
 - **No accessibility audit.** Tailwind's default focus rings are
