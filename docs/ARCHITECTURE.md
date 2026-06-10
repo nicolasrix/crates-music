@@ -112,36 +112,70 @@ implementation details.
 
 ## Auth
 
-Single-user means OAuth does the job of *device pairing + token
-rotation*, not user identification.
+OAuth does device pairing + token rotation **and** carries identity. The
+gateway has a three-role model — **admin / user / guest** — layered on
+the hand-rolled OAuth without switching to JWTs (opaque tokens keep
+instant revocation and the device-grant CLI flow).
 
 | Client | Flow | Status |
 |---|---|---|
-| Web / PWA (mobile) | Authorization Code + PKCE | Implemented |
+| Web / PWA (mobile) | Authorization Code + PKCE (`username` + password login) | Implemented |
 | CLI | Device Authorization Grant (RFC 8628) | Implemented (`music auth login`) |
+| Guest (PWA) | Shared-code grant — `POST /oauth/guest`, no password/PKCE | Authored (PR D) |
 
-**Bootstrap:** the gateway prints a one-time setup URL on first run.
-The user visits it, sets a master password (Argon2id), and from then
-on the OAuth endpoints are usable.
+**Bootstrap:** the gateway prints a one-time setup URL on first run. The
+owner visits it and sets a master password (Argon2id), becoming
+`users.id=1, role='admin'`. Admins then provision real Users
+(`POST /v1/admin/users`); guests join by redeeming a shared code.
 
-**Storage:** six tables in `gateway-state.sqlite` —
-- `users` — Argon2id master password
+**Principal & roles.** After the `sha256 → access_tokens` lookup,
+`require_bearer` reads the token's `user_id`, loads the role, and injects
+an `axum::Extension<Principal>` where
+`Principal { user_id, role, host_user_id }`. The legacy static bearer and
+any NULL-`user_id` row resolve to the owner (`id=1`, admin) — the
+identity layer is additive and backward-compatible. Handlers that care
+about identity take the `AuthPrincipal` extractor; "any authenticated"
+handlers ignore it.
+
+**Authorization tiers** (small `from_fn_with_state` layers / in-handler
+capability checks):
+
+1. **Any authenticated** — browse, play, recommend reads, room control, ratings/events, `whoami`.
+2. **Write-capable (admin + user, not guest)** — playlist CRUD, persisted ratings/taste. Guests get 403; guest taste signal is dropped from training.
+3. **Admin-only** — `/v1/admin/*`, `/v1/diagnostics/*`, recommender maintenance (`refit_whitening`, `enqueue`).
+
+**Rooms** are the sync partition: a User owns one room
+(`room_id == user_id`); a Guest attaches to its host's
+(`room_id == host_user_id`). See
+[components/music-sync.md](./components/music-sync.md#rooms-per-user-partition).
+
+**Account recovery (no email):** an admin resets a user's password
+(`POST /v1/admin/users/:id/password`); the owner's *master* password is
+reset out-of-band on the gateway host (`music-gateway …
+reset-master-password`). Both rewrite the Argon2 hash on `users.id=1` in
+place — never delete/recreate the row.
+
+**Storage** (`gateway-state.sqlite`):
+- `users` — identity + role: `id`, `username`/`display_name` (NULL for guests), `role` (`admin|user|guest`), `password_hash` (Argon2id; NULL for guests), `host_user_id` + `expires_at` (guests only). The owner is `id=1`.
 - `oauth_clients` — registered client_ids + redirect URIs
 - `auth_codes` — short-lived (60s) authorization codes
 - `refresh_tokens` — long-lived, per-device, individually revocable
 - `access_tokens` — short-lived (1h), looked up by `sha256(token)`
 - `device_codes` — RFC 8628 device-grant pairing codes (the CLI's auth path)
+- `guest_codes` — shared guest-join codes (host-owned; sha256-hashed; expiry + max-uses) *(PR D)*
+- `playlists` / `playlist_tracks` — gateway-owned, per-user playlists *(PR F)*
 
-Plus a `sessions` table for the browser login flow (not the same as
+The token tables carry a `user_id` so issuance is per-account. Plus a
+`sessions` table for the browser login flow (not the same as
 access_tokens — sessions are how the *login form* remembers you between
 the password POST and the consent screen).
 
-`require_bearer` in [crates/music-gateway/src/auth.rs](../crates/music-gateway/src/auth.rs)
-accepts either an OAuth-issued access token (sha256 lookup) or the
-legacy static bearer from `gateway.toml`. Token can come via
-`Authorization: Bearer <token>` or `?access_token=<token>` (RFC 6750
-§2.3 — required for `<audio>` and `<img>` URLs that can't set
-headers).
+Token can come via `Authorization: Bearer <token>` or
+`?access_token=<token>` (RFC 6750 §2.3 — required for `<audio>` and
+`<img>` URLs that can't set headers). `require_bearer` lives in
+[crates/music-gateway/src/auth.rs](../crates/music-gateway/src/auth.rs);
+the principal/role/capability machinery is in
+[crates/music-gateway/src/principal.rs](../crates/music-gateway/src/principal.rs).
 
 ## TLS
 
@@ -168,7 +202,8 @@ The gateway exposes three categories of endpoints:
 
 1. **OAuth** (`/oauth/*`) — auth flow. See [API.md#auth](./API.md).
 2. **Augmentations** (`/v1/*`) — anything beyond Subsonic: sync,
-   recommender, event log.
+   recommender, event log, ratings, gateway-owned playlists,
+   `whoami`, and the admin/diagnostics surface (admin-only).
 3. **Pass-through** (`/rest/*`) — proxied verbatim to Navidrome with
    the upstream credentials and the L2/L4 cache layered in front.
 

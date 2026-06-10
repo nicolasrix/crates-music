@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project goal
 
-Build a music player for a self-hosted [Navidrome](https://www.navidrome.org/) backend, served to three clients: **CLI**, **web UI**, and **mobile**. Single-user, local-network-first. Mobile is the **installable PWA** (the web client, added to the home screen), not a native app — see "Mobile is the PWA" below.
+Build a music player for a self-hosted [Navidrome](https://www.navidrome.org/) backend, served to three clients: **CLI**, **web UI**, and **mobile**. Local-network-first, with a lightweight three-role model (admin / user / guest) layered on the gateway's hand-rolled OAuth — see "Multi-user & roles" in Status. Mobile is the **installable PWA** (the web client, added to the home screen), not a native app — see "Mobile is the PWA" below.
 
 Navidrome speaks the **Subsonic API** (with OpenSubsonic extensions). Treat the [Subsonic](http://www.subsonic.org/pages/api.jsp) / [OpenSubsonic](https://opensubsonic.netlify.app/) spec as the source of truth for endpoint shapes and error codes. We do not fork Navidrome; it remains the catalog source of truth.
 
@@ -85,7 +85,7 @@ Backend-only. Two indices, blended at query time — they capture different thin
 - **Content embeddings** (CLaMP 3, [sanderwood/clamp3](https://github.com/sanderwood/clamp3), 768-dim — LAION CLAP, 512-dim, was the original and is now the legacy/fallback backend) — computed once per track at ingest. Captures "these tracks sound similar." Bonus: text-aligned, so natural-language queries ("rainy sunday afternoon") work via the same index.
 - **Behavioural embeddings** (track2vec on listening sessions) — retrained nightly. Captures "this user plays these together," which can diverge from acoustic similarity.
 
-Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (single user, ~10⁴ tracks) an in-process index is sufficient — no separate vector DB.
+Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (a household sharing one ~10⁴-track catalog) an in-process index is sufficient — no separate vector DB.
 
 Inference runtime: the Python embedder sidecar (PyTorch, ROCm). The
 **GPU lives on the GPU host** (RDNA4 GPU, 16 GB VRAM), which hosts
@@ -110,14 +110,22 @@ Ingest runs in a background queue at low priority. Recommender works in **degrad
 
 ## Auth (OAuth 2.1, self-hosted in gateway)
 
-Single-user means OAuth does the job of *device pairing + token rotation*, not user identification.
+OAuth does device pairing + token rotation **and** carries identity:
+every authenticated request resolves to a `Principal { user_id, role,
+host_user_id }` injected by `require_bearer`. Roles are **admin / user /
+guest** (see "Multi-user & roles" in Status). The legacy static bearer
+and any NULL-`user_id` token resolve to the owner (`id=1`, admin), so the
+identity layer is backward-compatible.
 
-- **Bootstrap:** gateway prints a one-time setup URL on first run; user sets a master password.
-- **Web / PWA (mobile):** Authorization Code + PKCE. Mobile is the installed PWA, so it uses the same browser-based flow — no separate native/Custom-Tabs path.
+- **Bootstrap:** gateway prints a one-time setup URL on first run; the owner sets a master password (becomes `id=1`, role `admin`).
+- **Web / PWA (mobile):** Authorization Code + PKCE, with a `username` field at login. Mobile is the installed PWA, so it uses the same browser-based flow — no separate native/Custom-Tabs path.
 - **CLI:** [Device Authorization Grant (RFC 8628)](https://datatracker.ietf.org/doc/html/rfc8628). CLI prints a code; user confirms in browser.
+- **Guests:** redeem a shared code via `POST /oauth/guest` (no password, no PKCE) → an ephemeral, expiring guest principal attached to its host's room.
 - Per-device refresh tokens; revocable individually from a "Devices" page.
+- **Authorization tiers:** any-authenticated (browse/play/recommend reads/room control) · write-capable admin+user (playlists, persisted ratings/taste) · admin-only (`/v1/admin/*`, `/v1/diagnostics/*`, recommender maintenance). Guests are 403'd on write/admin tiers and their taste signal is dropped from training.
+- **Account recovery (no email):** an admin resets a user's password (`POST /v1/admin/users/:id/password`); the *owner's* master password is reset out-of-band on the gateway host (`music-gateway … reset-master-password`). Both rewrite the Argon2 hash on `users.id=1` in place — never delete/recreate the row.
 
-Library: [`oxide-auth`](https://github.com/HeroicKatora/oxide-auth) or hand-rolled (surface is small for a single user).
+Library: hand-rolled (the surface is small; piggybacking identity on the existing opaque-token store preserves instant revocation + the device-grant flow — see "Multi-user & roles").
 
 ## TLS
 
@@ -188,8 +196,10 @@ section is the high-level "what's done, what isn't" view.
 
 **P3 done.** OAuth 2.1 server complete (P3.1):
 
-- Hand-rolled, single-tenant. Six tables in `gateway-state.sqlite` —
-  `users` (Argon2id master password), `oauth_clients`, `auth_codes`,
+- Hand-rolled. Six tables in `gateway-state.sqlite` —
+  `users` (Argon2id; originally the single master-password row, now the
+  multi-user `id/username/role/host_user_id/expires_at` table — see
+  "Multi-user & roles"), `oauth_clients`, `auth_codes`,
   `refresh_tokens`, `access_tokens`, `device_codes` (RFC 8628). Plus a
   `sessions` table for the browser login flow.
 - Endpoints: `POST /oauth/setup` (one-shot bootstrap), `GET/POST
@@ -417,6 +427,60 @@ docker watchdog (`docker-compose.embedder-failover.yml` +
 `docker/embedder/watchdog.sh`) can start/stop a local CPU fallback on
 demand. See `docs/DEPLOYMENT.md` "Embedder failover".
 
+**Multi-user & roles — IN FLIGHT (authored, rolling out across PRs
+A–F).** Retires the original single-user assumption: a three-role model
+(**admin / user / guest**) with full per-user isolation of gateway-owned
+state, all piggybacked on the existing hand-rolled OAuth (opaque tokens,
+no JWT — preserves instant revocation + the device-grant CLI flow). The
+**ownership boundary**: the gateway still talks to one Navidrome account,
+so the *catalog* (albums/artists/tracks, scrobble counts) stays shared,
+while gateway-owned state (queue/playback, taste, ratings, affinity,
+recommendations, event log, **playlists**, tokens/sessions) partitions by
+user. Locked decisions + full design live in `docs/plans/user-system.md`
+(intentionally **uncommitted**). PR sequence (critical path A→C→D):
+
+- **A — Identity foundation (MERGED to `dev`, PR #25).** Gateway
+  migrations `0004_users_roles` + `0005_token_user_id`; `Principal { user_id,
+  role, host_user_id }` + `AuthPrincipal` extractor; `require_bearer`
+  injects identity; real `GET /v1/whoami`; capability map
+  (`Role::can`); **admin-gating** layer on `/v1/admin/*`,
+  `/v1/diagnostics/*`, `refit_whitening`, `enqueue`; web hides admin
+  panels for non-admins. Still one shared room.
+- **B — Accounts + multi-user login (open, PR #26).** Admin user CRUD
+  (`/v1/admin/users` + password reset), `username` field on
+  `/oauth/login`, web Users UI + AccountPanel role display.
+- **C — Sync rooms (open, PR #27).** `SyncStore` → `HashMap<room_id,
+  RoomSync>` + per-room broadcast bus; handlers/WS resolve
+  `principal.room_id()`. Users get private cross-device queues; a WS
+  subscriber only sees its own room.
+- **D — Guest rooms (open, PR #28, stacked on C).** Gateway migration
+  `0006_guest_codes`; `POST /oauth/guest` code redemption → ephemeral
+  guest principal with `host_user_id` + expiry; guest GC sweep
+  (`guest_session_ttl_seconds` / `guest_sweep_interval_seconds` config);
+  web "Join as guest" + host guest-code UI. Guests attach to the host's
+  room (shared jukebox).
+- **E — Per-user taste isolation (open, PR #29).** Recommend migrations
+  `0017+` add a `user_id` column to the per-user signal tables
+  (`events`, `play_history`, `recommend_feedback`, `track_rating`,
+  `entity_rating`, `track_affinity`, `recommendation_log`); handlers
+  filter by the room's host user; guest signal dropped from training.
+  Content ANN/embeddings are unchanged (shared, content-addressed).
+- **F — Gateway-owned playlists (open, PR #30).** Gateway migration
+  `0007_playlists`; playlist CRUD moves off Navidrome's `/rest/*` onto
+  `/v1/playlists/*` (private-per-user; `shared` opt-in; existence-hiding
+  404 for non-owners; guests can't write). A playlist stores only
+  Navidrome track ids — clients hydrate via `/rest/getSong`. One-time
+  `scripts/import_navidrome_playlists.py` migrates existing Navidrome
+  playlists into the owner.
+
+Migration-numbering caveat: gateway `0006` (D) and `0007` (F) are
+authored on parallel branches; if F deploys to a live box before D, D's
+later `0006` is out-of-order on that already-migrated DB — sequence D
+before/with F. Per-PR doc updates ride **inside each PR**
+(`docs/API.md`, `docs/components/*`, `docs/CONFIGURATION.md`,
+`docs/RUNBOOK.md`); the cross-cutting framing in `CLAUDE.md`,
+`docs/README.md`, and `docs/ARCHITECTURE.md` was swept 2026-06-10.
+
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
 plus a web `/diagnostics` page that renders them and a browser RUM
@@ -492,7 +556,7 @@ cache + pinning + gapless CLI playback.
 The original plan had a native Android client (Compose Multiplatform +
 Media3, Rust core via UniFFI) as phase P4. That was **retired** — the
 mobile client is the **web app installed as a PWA**. Reasoning: a
-single-user LAN player gets ~100% of what a native app would give it
+self-hosted LAN player gets ~100% of what a native app would give it
 (home-screen install, offline playback, background audio, lock-screen
 controls) from the PWA, at zero additional codebase. The web client is
 therefore *the* cross-platform client; "mobile parity" means making the

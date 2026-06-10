@@ -3,7 +3,9 @@
 A music-player gateway for self-hosted [Navidrome](https://www.navidrome.org/),
 served to a CLI and a web client. The web client doubles as the **mobile**
 client — it's an installable PWA (the native-mobile plan, P4, was retired).
-Single-user, local-network-first.
+Local-network-first, with a lightweight **admin / user / guest** role
+model layered on the gateway's hand-rolled OAuth (per-user isolation of
+queues, taste, ratings, and playlists; shared Navidrome catalog).
 
 This directory is the onboarding entry point. Follow the docs in this order:
 
@@ -44,7 +46,7 @@ The architecture doc covers all of these in context, but they each get
 their own canonical statement:
 
 - **Caching** — L1 (in-memory) → L2 (SQLite, ETag-keyed) → L3 (audio file cache, content-addressed) → L4 (gateway transcoded LRU). See [ARCHITECTURE.md#caching](./ARCHITECTURE.md#caching).
-- **Auth** — OAuth 2.1: Authorization Code + PKCE (web), Device Authorization Grant / RFC 8628 (CLI, via `music auth login`). See [ARCHITECTURE.md#auth](./ARCHITECTURE.md#auth).
+- **Auth & roles** — OAuth 2.1: Authorization Code + PKCE (web), Device Authorization Grant / RFC 8628 (CLI, via `music auth login`), shared-code guest grant (PWA). Every request resolves to a `Principal { user_id, role, host_user_id }`; roles are admin / user / guest with capability-gated tiers. See [ARCHITECTURE.md#auth](./ARCHITECTURE.md#auth).
 - **Recommender** — content embeddings (CLaMP 3, 768-dim; CLAP legacy) + ABTT whitening + ANN (usearch, cosine), with post-retrieval queue filter (MMR, per-artist cap, dedup), per-session downvote exclusion, text-query stations, and 2D/3D UMAP projections for visual debugging. See [components/music-recommend.md](./components/music-recommend.md).
 - **Diagnostics** — span ring (`gateway-state.traces.sqlite`) + browser RUM + per-feature dashboards backing the `/diagnostics` page. See [ARCHITECTURE.md#diagnostics](./ARCHITECTURE.md#diagnostics) and [API.md#diagnostics](./API.md#diagnostics).
 
