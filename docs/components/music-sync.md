@@ -27,6 +27,29 @@ sequenced, and gets fanned out. So:
 No vector clocks. No CRDTs. Just last-writer-wins with a single
 linearizer.
 
+## Rooms (per-user partition)
+
+The state machine in this crate is per-instance and identity-blind.
+The **partitioning** lives in the gateway's `SyncStore`
+(`music-gateway/src/sync/store.rs`): it holds a `HashMap<room_id,
+RoomSync>`, where each room is one `SyncState` plus its own broadcast
+bus. Every sync read/write is scoped to `principal.room_id()`:
+
+- A **User** owns exactly one room (`room_id == their user_id`), so all
+  of that user's devices share a queue — the cross-device point.
+- A **Guest** owns no room; they attach to their **host's**
+  (`room_id == host_user_id`), making the host's queue a shared jukebox
+  (PR D).
+- The static-bearer / legacy-token caller resolves to the owner
+  (`room_id == 1`), so the pre-rooms single-queue behaviour is exactly
+  the owner's room — no migration, no client change.
+
+Rooms are created lazily on first access and a WS subscriber only
+receives its own room's bus, so one User never sees another's ops. At
+household scale the live-room count is the number of real accounts
+(guests reuse their host's), so the map stays tiny; idle-eviction of
+empty rooms is a deferred hardening, not needed yet.
+
 > "This crate is pure logic: types, serde shapes, and the
 > deterministic state machine. Transport lives in `music-gateway`;
 > client-side optimistic UI lives in the apps."
@@ -204,9 +227,9 @@ construct-a-state-and-apply-some-ops. Coverage:
   processes in arrival order; whoever arrives last wins. Fine for
   cursor moves and play/pause, occasionally surprising for
   simultaneous queue edits. We may add per-field causality later.
-- **No persistence**. The gateway holds `SyncState` in memory. On
-  restart, all clients have to refetch. For single-user this is
-  fine — gateway uptime is the user's uptime.
+- **No persistence**. The gateway holds each room's `SyncState` in
+  memory. On restart, every room resets and all clients refetch —
+  gateway uptime is the household's uptime.
 - **No history**. We don't keep a list of past ops, so a client
   joining mid-stream gets a snapshot, not a replay. Acceptable
   trade-off (snapshots are small at this scale).

@@ -557,7 +557,8 @@ async fn sync_active_session_id_reads_from_in_memory_anchor() {
     let state = common::build_state(common::test_config()).await;
     let app = build_router(state.clone());
     let auth = auth_header();
-    assert!(state.sync().active_session_id().await.is_none());
+    let owner = music_gateway::principal::OWNER_USER_ID;
+    assert!(state.sync().active_session_id(owner).await.is_none());
     let start = json!({
         "type": "start_session",
         "items": [{"item_id": "qi-1", "track_id": "t-1"}],
@@ -565,6 +566,6 @@ async fn sync_active_session_id_reads_from_in_memory_anchor() {
         "session_id": "sess-active",
     });
     assert_eq!(post_op(&app, &auth, start).await, StatusCode::OK);
-    let active = state.sync().active_session_id().await.unwrap();
+    let active = state.sync().active_session_id(owner).await.unwrap();
     assert_eq!(active.as_str(), "sess-active");
 }

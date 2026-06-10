@@ -298,7 +298,8 @@ async fn submission_scrobble_during_active_session_stamps_session_id() {
     let sid = music_core::SessionId::from("sess-scrobble-1".to_string());
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        // Owner room — the scrobble request below authenticates as the owner.
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: TrackId::from("track-in-session".to_string()),

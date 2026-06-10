@@ -86,7 +86,7 @@ every handler cheaply. The current fields (see `state.rs`):
 | `cache` | L2 metadata cache. |
 | `oauth` | OAuth 2.1 state pool. |
 | `setup_token` | One-time first-run token (gated by absence of master password). |
-| `sync` | In-memory `SyncStore` — queue + playback + likes. |
+| `sync` | In-memory `SyncStore` — **per-room** queue + playback, keyed by `principal.room_id()` (see [music-sync → Rooms](./music-sync.md#rooms-per-user-partition)). |
 | `embedder` | `EmbedderHandle`. Either an HTTP client to the sidecar or a "disabled" sentinel. |
 | `embedding_store` | `track_embeddings` table + ingest queue. |
 | `metadata_store` | `track_metadata` cache (filter inputs). |

@@ -66,6 +66,7 @@ fn now_ms() -> i64 {
 pub async fn scrobble(
     State(state): State<AppState>,
     Query(q): Query<ScrobbleQuery>,
+    crate::principal::AuthPrincipal(principal): crate::principal::AuthPrincipal,
     request: Request,
 ) -> Response {
     let is_submission = parse_submission(q.submission.as_deref());
@@ -87,8 +88,10 @@ pub async fn scrobble(
 
         // Durable signal for diagnostics + future behavioural index.
         // Stamp with the active recommend-session so per-session
-        // reconstruction queries can find this scrobble.
-        let session_id = state.sync().active_session_id().await;
+        // reconstruction queries can find this scrobble. Read the
+        // session from the caller's room (a guest scrobbles into their
+        // host's room session).
+        let session_id = state.sync().active_session_id(principal.room_id()).await;
         let event = EventInput {
             event_type: EventType::Scrobble,
             track_id: track_id.clone(),
