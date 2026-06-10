@@ -30,6 +30,7 @@ use crate::config::Config;
 use crate::diagnostics::TraceStore;
 use crate::embedder::EmbedderHandle;
 use crate::oauth::{OauthStore, SetupToken};
+use crate::playlists::PlaylistStore;
 use crate::proxy::build_http_client;
 use crate::ratelimit::LoginLimiter;
 use crate::sync::SyncStore;
@@ -56,6 +57,9 @@ struct Inner {
     http: reqwest::Client,
     cache: Cache,
     oauth: OauthStore,
+    /// Gateway-owned playlists (PR F). Shares the OAuth pool — same
+    /// `gateway-state.sqlite` file, migration `0007_playlists.sql`.
+    playlists: PlaylistStore,
     setup_token: SetupToken,
     sync: SyncStore,
     embedder: EmbedderHandle,
@@ -144,12 +148,16 @@ impl AppState {
         let projection = ProjectionStore::new(embedding_store.pool().clone());
         let sessions = SessionStore::new(embedding_store.pool().clone());
         let whitening_store = WhiteningStore::new(embedding_store.pool().clone());
+        // Playlists live in the OAuth pool's DB (gateway-state.sqlite),
+        // built here from the same pool so they share the migrated schema.
+        let playlists = PlaylistStore::new(oauth.pool().clone());
         Self {
             inner: Arc::new(Inner {
                 config,
                 http: build_http_client(),
                 cache,
                 oauth,
+                playlists,
                 setup_token,
                 sync: SyncStore::with_sessions(sessions.clone()),
                 embedder,
@@ -201,6 +209,10 @@ impl AppState {
 
     pub fn oauth(&self) -> &OauthStore {
         &self.inner.oauth
+    }
+
+    pub fn playlists(&self) -> &PlaylistStore {
+        &self.inner.playlists
     }
 
     pub fn setup_token(&self) -> &SetupToken {

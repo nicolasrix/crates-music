@@ -5,13 +5,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { coverArtUrl } from "../api/client";
 import {
   addTrackToPlaylist,
-  coverArtUrl,
   deletePlaylist,
   getPlaylist,
   renamePlaylist,
-} from "../api/client";
+} from "../api/playlists";
 import { suggestForPlaylist } from "../api/recommend";
 import { Cover } from "../components/Cover";
 import { DownloadAllButton } from "../components/DownloadAllButton";

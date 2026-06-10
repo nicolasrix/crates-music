@@ -711,6 +711,73 @@ The same drop applies to a guest's `/rest/scrobble` (play_history /
 event log / affinity writes are skipped) and to a guest's thumb vote on
 `POST /v1/recommend/feedback` (no write; zeroed counts echoed).
 
+### Playlists
+
+Gateway-owned playlists (user-system PR F, decision D6). Playlist CRUD
+lives here, **not** on Navidrome's `/rest/*` — membership is private
+per-user, while the *catalog* (the tracks themselves) stays shared on
+Navidrome. A playlist therefore stores only Navidrome track ids; clients
+hydrate them into full tracks via `/rest/getSong`.
+
+**Authorization.** Reads (`GET`) are any-authenticated: the caller sees
+their own playlists plus any other user's `shared` ones. A private
+playlist the caller doesn't own returns **404** (never 403 — existence is
+not leaked). Writes (`POST`/`PATCH`/`PUT`/`DELETE`) require the
+`WritePlaylist` capability, so a **guest** token authenticates but gets
+**403**. Beyond that, a mutation target must be owned by the caller (a
+non-owner — even of a `shared` playlist — gets 404).
+
+The wire row:
+```json
+{
+  "id": "9f8e…",
+  "name": "Roadtrip",
+  "visibility": "private",
+  "owner_user_id": 1,
+  "owned": true,
+  "song_count": 12,
+  "created_ms": 1712345678901,
+  "updated_ms": 1712345700000
+}
+```
+`owned` is relative to the caller (so the UI shows edit controls only on
+the caller's own playlists).
+
+#### `GET /v1/playlists`
+
+Caller's own playlists plus others' `shared` ones, newest-updated first.
+Response `{ "playlists": [<row>, …] }`.
+
+#### `POST /v1/playlists`
+
+Create an empty playlist owned by the caller. Body `{ "name": "Roadtrip" }`
+(trimmed; empty → 400, >200 chars → 400). Returns **201** with the row.
+
+#### `GET /v1/playlists/:id`
+
+Full detail. Response:
+```json
+{ "playlist": <row>, "track_ids": ["t1", "t2", "t3"] }
+```
+404 if the caller may not read it.
+
+#### `PATCH /v1/playlists/:id`
+
+Update `name` and/or `visibility` (`"private" | "shared"`). Body
+`{ "name"?: "...", "visibility"?: "shared" }`; omitted fields are
+unchanged. Bad visibility → 400. Returns the refreshed row.
+
+#### `PUT /v1/playlists/:id/tracks`
+
+Set membership. Body `{ "track_ids": ["t1", …], "mode"?: "replace" }`.
+`mode` is `"replace"` (default — full set / reorder) or `"append"` (add
+after the current tail, used by the row-menu "add to playlist"). Empty
+track ids → 400; more than 10 000 ids → 400. Returns **204**.
+
+#### `DELETE /v1/playlists/:id`
+
+Delete the playlist (members cascade). Returns **204**.
+
 ### Admin
 
 All `/v1/admin/*` endpoints are **admin-only** — a User or Guest token

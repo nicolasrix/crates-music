@@ -286,6 +286,15 @@ impl OauthStore {
         Ok(Self { pool })
     }
 
+    /// The underlying pool, so sibling gateway-state stores (e.g. the
+    /// playlist store, PR F) can share the same `gateway-state.sqlite`
+    /// connection pool and its migrated schema rather than opening a second
+    /// pool to the same file.
+    #[must_use]
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn register_client(&self, client: NewClient) -> Result<OauthClient> {
         let now = unix_ms_now();
         let uris_json = serde_json::to_string(&client.redirect_uris)

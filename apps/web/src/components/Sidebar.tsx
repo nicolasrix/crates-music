@@ -11,7 +11,7 @@
 import { Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { createPlaylist, listPlaylists } from "../api/client";
+import { createPlaylist, listPlaylists } from "../api/playlists";
 import { Link, navigate, useRoute } from "../router";
 import { BrandMark } from "./BrandMark";
 
