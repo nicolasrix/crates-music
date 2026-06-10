@@ -146,7 +146,7 @@ async fn poll_returns_tokens_after_approval() {
         .unwrap();
     assert!(
         oauth
-            .set_device_decision(&issued.user_code, true)
+            .set_device_decision(&issued.user_code, true, Some(1))
             .await
             .unwrap()
     );
@@ -176,7 +176,7 @@ async fn poll_is_denied_after_deny() {
         .unwrap();
     assert!(
         oauth
-            .set_device_decision(&issued.user_code, false)
+            .set_device_decision(&issued.user_code, false, Some(1))
             .await
             .unwrap()
     );
@@ -212,7 +212,7 @@ async fn device_code_is_single_use() {
         .await
         .unwrap();
     oauth
-        .set_device_decision(&issued.user_code, true)
+        .set_device_decision(&issued.user_code, true, Some(1))
         .await
         .unwrap();
     let app = build_app(oauth).await;
@@ -263,7 +263,7 @@ async fn device_page_approve_with_session_then_poll_succeeds() {
         .await
         .unwrap();
     // Mint a browser session directly and present its cookie.
-    let session = oauth.create_session(Duration::from_hours(1)).await.unwrap();
+    let session = oauth.create_session(1, Duration::from_hours(1)).await.unwrap();
     let cookie = format!("gw_session={}", session.token);
     let app = build_app(oauth.clone()).await;
 
@@ -302,7 +302,7 @@ async fn device_page_renders_confirm_with_session() {
         })
         .await
         .unwrap();
-    let session = oauth.create_session(Duration::from_hours(1)).await.unwrap();
+    let session = oauth.create_session(1, Duration::from_hours(1)).await.unwrap();
     let app = build_app(oauth).await;
 
     let resp = app
@@ -337,7 +337,7 @@ async fn consume_device_code_is_single_use_under_concurrency() {
         .await
         .unwrap();
     oauth
-        .set_device_decision(&issued.user_code, true)
+        .set_device_decision(&issued.user_code, true, Some(1))
         .await
         .unwrap();
 
@@ -365,14 +365,14 @@ async fn set_device_decision_is_idempotent_after_first() {
         .unwrap();
     assert!(
         oauth
-            .set_device_decision(&issued.user_code, true)
+            .set_device_decision(&issued.user_code, true, Some(1))
             .await
             .unwrap(),
         "first decision is recorded"
     );
     assert!(
         !oauth
-            .set_device_decision(&issued.user_code, false)
+            .set_device_decision(&issued.user_code, false, Some(1))
             .await
             .unwrap(),
         "a second decision is refused"
@@ -384,7 +384,7 @@ async fn set_device_decision_unknown_code_is_false() {
     let oauth = store_with_cli_client().await;
     assert!(
         !oauth
-            .set_device_decision("ZZZZ-ZZZZ", true)
+            .set_device_decision("ZZZZ-ZZZZ", true, Some(1))
             .await
             .unwrap()
     );

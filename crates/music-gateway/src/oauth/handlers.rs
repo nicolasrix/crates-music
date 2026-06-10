@@ -138,6 +138,11 @@ pub struct LoginQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
+    /// Optional. Absent/empty logs in the owner (the bootstrap
+    /// master-password flow, unchanged). A real account supplies its
+    /// username. See `OauthStore::find_login_user`.
+    #[serde(default)]
+    pub username: Option<String>,
     pub password: String,
 }
 
@@ -170,20 +175,25 @@ pub async fn login_post(
     }
 
     // Uniform failure: an unauthenticated caller must not be able to
-    // tell "gateway not bootstrapped" from "wrong password" — both
-    // return an identical 401. When no master password is stored we
-    // still burn an Argon2id verify (`verify_absent`) so the two paths
-    // are timing-indistinguishable as well as response-identical. The
-    // one-time setup URL printed at startup is how the operator
-    // bootstraps; the login form never needs to disclose that state.
-    let phc = state
+    // tell "gateway not bootstrapped" from "wrong password" — nor "no
+    // such user" from "wrong password" — all return an identical 401.
+    // Every path burns an Argon2id verify (`verify_absent` when the user
+    // or hash is missing) so the branches are timing-indistinguishable as
+    // well as response-identical. An absent/empty username resolves to
+    // the owner, so the bootstrap master-password login is unchanged.
+    let login_user = state
         .oauth()
-        .master_password_hash()
+        .find_login_user(form.username.as_deref())
         .await
         .map_err(internal)?;
-    let ok = match phc {
-        Some(phc) => password::verify(&form.password, &phc).map_err(internal)?,
-        None => password::verify_absent(&form.password),
+    let (user_id, ok) = match &login_user {
+        Some(u) => match &u.password_hash {
+            Some(phc) => (u.id, password::verify(&form.password, phc).map_err(internal)?),
+            // A credential-less row (e.g. a guest) can't password-login.
+            None => (u.id, password::verify_absent(&form.password)),
+        },
+        // Unknown username — still verify against a dummy hash for timing.
+        None => (0, password::verify_absent(&form.password)),
     };
     if !ok {
         state.login_limiter().record_failure(ip);
@@ -193,7 +203,7 @@ pub async fn login_post(
 
     let issued = state
         .oauth()
-        .create_session(SESSION_TTL)
+        .create_session(user_id, SESSION_TTL)
         .await
         .map_err(internal)?;
 
@@ -259,7 +269,8 @@ input, button {{ padding: 0.5rem; font-size: 1rem; }}
 <h1>music gateway</h1>
 {error_block}
 <form method="post" action="/oauth/login{action_query}">
-<label>master password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
+<label>username<input type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="owner" autofocus></label>
+<label>password<input type="password" name="password" autocomplete="current-password" required></label>
 <button type="submit">sign in</button>
 </form>
 </body>
@@ -337,18 +348,15 @@ pub async fn authorize(
 
     // 3. Session check. If absent or invalid, redirect to login with the
     //    full authorize URL as `next` so the user is bounced back here
-    //    after signing in.
+    //    after signing in. The session also carries the logged-in
+    //    `user_id`, which rides onto the auth code so the eventual token
+    //    pair resolves to the right principal.
     let session_token = extract_session_cookie(&headers);
-    let signed_in = match session_token.as_deref() {
-        Some(t) => state
-            .oauth()
-            .find_session(t)
-            .await
-            .map_err(internal)?
-            .is_some(),
-        None => false,
+    let session = match session_token.as_deref() {
+        Some(t) => state.oauth().find_session(t).await.map_err(internal)?,
+        None => None,
     };
-    if !signed_in {
+    let Some(session) = session else {
         let mut next = String::from("/oauth/authorize?");
         let mut params: Vec<(&str, &str)> = vec![
             ("response_type", q.response_type.as_str()),
@@ -370,7 +378,7 @@ pub async fn authorize(
         }
         let login = format!("/oauth/login?next={}", urlencoding_encode(&next));
         return Ok(redirect(&login));
-    }
+    };
 
     // 4. Mint the code, store it, redirect back to client.
     let issued = state
@@ -379,6 +387,7 @@ pub async fn authorize(
             client_id: q.client_id.clone(),
             redirect_uri: q.redirect_uri.clone(),
             code_challenge: code_challenge.to_string(),
+            user_id: session.user_id,
             ttl: AUTH_CODE_TTL,
         })
         .await
@@ -552,7 +561,7 @@ async fn grant_authorization_code(
         ));
     }
 
-    let pair = mint_pair(state, &client_id).await?;
+    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
     Ok(Json(pair))
 }
 
@@ -583,7 +592,7 @@ async fn grant_refresh_token(
     // client_id, an unknown/expired/revoked token, and a replay all
     // collapse to the same `invalid_grant` (no oracle, and a
     // wrong-client attempt does not burn a valid token).
-    let _consumed = state
+    let consumed = state
         .oauth()
         .consume_refresh_token(&refresh, &client_id)
         .await
@@ -596,7 +605,8 @@ async fn grant_refresh_token(
             )
         })?;
 
-    let pair = mint_pair(state, &client_id).await?;
+    // Rotation preserves identity: the new pair belongs to the same user.
+    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
     Ok(Json(pair))
 }
 
@@ -648,6 +658,7 @@ async fn grant_device_code(
         // come from a caller already holding the secret code (the CLI).
         DevicePollState::Approved {
             client_id: code_client,
+            user_id,
         } => {
             if code_client != client_id {
                 return Err(oauth_error(
@@ -656,7 +667,8 @@ async fn grant_device_code(
                     "client_id does not match the device code",
                 ));
             }
-            let pair = mint_pair(state, &client_id).await?;
+            // The approving browser session's user (owner if unstamped).
+            let pair = mint_pair(state, &client_id, user_id.unwrap_or(1)).await?;
             Ok(Json(pair))
         }
     }
@@ -665,18 +677,25 @@ async fn grant_device_code(
 async fn mint_pair(
     state: &AppState,
     client_id: &str,
+    user_id: i64,
 ) -> Result<TokenResponse, (StatusCode, Json<OauthError>)> {
     let refresh = state
         .oauth()
         .mint_refresh_token(NewRefreshToken {
             client_id: client_id.to_string(),
+            user_id,
             ttl: None, // rotation handles revocation
         })
         .await
         .map_err(|e| oauth_internal(&e))?;
     let access = state
         .oauth()
-        .mint_access_token(client_id, Some(&refresh.token_hash), ACCESS_TOKEN_TTL)
+        .mint_access_token_for_user(
+            client_id,
+            Some(&refresh.token_hash),
+            ACCESS_TOKEN_TTL,
+            Some(user_id),
+        )
         .await
         .map_err(|e| oauth_internal(&e))?;
     Ok(TokenResponse {
@@ -874,9 +893,9 @@ pub async fn device_verify_post(
     headers: HeaderMap,
     Form(form): Form<DeviceVerifyForm>,
 ) -> Result<Response, (StatusCode, String)> {
-    if !is_signed_in(&state, &headers).await? {
+    let Some(approver_user_id) = session_user_id(&state, &headers).await? else {
         return Ok(redirect(&device_login_redirect(Some(&form.user_code))));
-    }
+    };
 
     let approve = match form.action.as_str() {
         "approve" => true,
@@ -891,7 +910,7 @@ pub async fn device_verify_post(
 
     let recorded = state
         .oauth()
-        .set_device_decision(&form.user_code, approve)
+        .set_device_decision(&form.user_code, approve, Some(approver_user_id))
         .await
         .map_err(internal)?;
 
@@ -929,6 +948,24 @@ async fn is_signed_in(
         .await
         .map_err(internal)?
         .is_some())
+}
+
+/// Resolve the current browser session to its `user_id`, or `None` if
+/// there's no valid session. Used by the device-approval POST so the
+/// approving user is stamped onto the device code (and thus its tokens).
+async fn session_user_id(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<i64>, (StatusCode, String)> {
+    let Some(token) = extract_session_cookie(headers) else {
+        return Ok(None);
+    };
+    Ok(state
+        .oauth()
+        .find_session(&token)
+        .await
+        .map_err(internal)?
+        .map(|s| s.user_id))
 }
 
 /// Build the `/oauth/login?next=…` URL that bounces an unauthenticated
