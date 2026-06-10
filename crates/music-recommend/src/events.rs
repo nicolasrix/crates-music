@@ -104,7 +104,7 @@ impl EventStore {
     /// Append a batch of events. Returns the number persisted.
     /// All-or-nothing within a single transaction so partial batches
     /// don't sneak in on a SQLite hiccup.
-    pub async fn append_batch(&self, events: &[EventInput]) -> Result<u64> {
+    pub async fn append_batch(&self, user_id: i64, events: &[EventInput]) -> Result<u64> {
         if events.is_empty() {
             return Ok(0);
         }
@@ -118,9 +118,10 @@ impl EventStore {
                 .map(|v| serde_json::to_string(v).expect("Value serializes"));
             sqlx::query(
                 "INSERT INTO events
-                     (event_type, track_id, occurred_at, received_at, metadata, session_id)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                     (user_id, event_type, track_id, occurred_at, received_at, metadata, session_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
+            .bind(user_id)
             .bind(ev.event_type.as_str())
             .bind(ev.track_id.as_str())
             .bind(ev.occurred_at)
@@ -327,7 +328,7 @@ mod tests {
                 session_id: None,
             },
         ];
-        let n = store.append_batch(&events).await.unwrap();
+        let n = store.append_batch(1, &events).await.unwrap();
         assert_eq!(n, 2);
         assert_eq!(store.count().await.unwrap(), 2);
     }
@@ -336,7 +337,7 @@ mod tests {
     async fn empty_batch_is_noop() {
         let pool = test_pool().await;
         let store = EventStore::new(pool);
-        assert_eq!(store.append_batch(&[]).await.unwrap(), 0);
+        assert_eq!(store.append_batch(1, &[]).await.unwrap(), 0);
         assert_eq!(store.count().await.unwrap(), 0);
     }
 
@@ -347,7 +348,7 @@ mod tests {
 
         for i in 0..5 {
             store
-                .append_batch(&[EventInput {
+                .append_batch(1, &[EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from(format!("t{i}")),
                     occurred_at: 1_000 + i64::from(i),
@@ -372,7 +373,7 @@ mod tests {
 
         let payload = serde_json::json!({"seek_to_ms": 30_500, "from_ms": 0});
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Seek,
                 track_id: TrackId::from("t1"),
                 occurred_at: 5_000,
@@ -392,7 +393,7 @@ mod tests {
         let store = EventStore::new(pool);
 
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Other("hover".to_string()),
                 track_id: TrackId::from("t1"),
                 occurred_at: 5_000,
@@ -424,7 +425,7 @@ mod tests {
                 session_id: None,
             });
         }
-        store.append_batch(&events).await.unwrap();
+        store.append_batch(1, &events).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 50);
     }
 
@@ -434,7 +435,7 @@ mod tests {
         let store = EventStore::new(pool);
 
         store
-            .append_batch(&[
+            .append_batch(1, &[
                 EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from("t1"),
@@ -475,7 +476,7 @@ mod tests {
         // delivery is the realistic case after offline batches.
         for occurred in [3_000_i64, 1_000, 5_000, 2_000, 4_000] {
             store
-                .append_batch(&[EventInput {
+                .append_batch(1, &[EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from(format!("t-{occurred}")),
                     occurred_at: occurred,
@@ -498,7 +499,7 @@ mod tests {
 
         for i in 0..10 {
             store
-                .append_batch(&[EventInput {
+                .append_batch(1, &[EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from(format!("t{i}")),
                     occurred_at: 1_000 + i64::from(i),
@@ -523,7 +524,7 @@ mod tests {
 
         for occurred in [1_000_i64, 2_000, 3_000, 4_000, 5_000] {
             store
-                .append_batch(&[EventInput {
+                .append_batch(1, &[EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from(format!("t-{occurred}")),
                     occurred_at: occurred,
@@ -546,7 +547,7 @@ mod tests {
         let store = EventStore::new(pool);
 
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Skip,
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
@@ -567,7 +568,7 @@ mod tests {
 
         let payload = serde_json::json!({"played_ms": 180_000});
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Scrobble,
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
@@ -586,7 +587,7 @@ mod tests {
         let pool = test_pool().await;
         let store = EventStore::new(pool);
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Scrobble,
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
@@ -604,7 +605,7 @@ mod tests {
         let pool = test_pool().await;
         let store = EventStore::new(pool);
         store
-            .append_batch(&[EventInput {
+            .append_batch(1, &[EventInput {
                 event_type: EventType::Scrobble,
                 track_id: TrackId::from("t1"),
                 occurred_at: 1_000,
@@ -625,7 +626,7 @@ mod tests {
         let s2 = SessionId::from("s2");
         // Interleaved insert order shouldn't affect output order.
         store
-            .append_batch(&[
+            .append_batch(1, &[
                 EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from("a"),
@@ -672,7 +673,7 @@ mod tests {
         let s1 = SessionId::from("s1");
         let s2 = SessionId::from("s2");
         store
-            .append_batch(&[
+            .append_batch(1, &[
                 EventInput {
                     event_type: EventType::Scrobble,
                     track_id: TrackId::from("a"),

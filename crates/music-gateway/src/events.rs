@@ -16,6 +16,7 @@ use music_core::SessionId;
 use music_recommend::{AffinityEvent, EventInput, EventType};
 use serde::{Deserialize, Serialize};
 
+use crate::principal::{AuthPrincipal, Role};
 use crate::state::AppState;
 
 /// Cap on a single batch. Higher than this is almost always a bug
@@ -60,11 +61,20 @@ pub struct EventsResponse {
 
 pub async fn submit(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<EventsRequest>, JsonRejection>,
 ) -> impl IntoResponse {
     let Ok(Json(req)) = payload else {
         return (StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
     };
+    // Guest taste sandboxing: a guest is a transient participant in a
+    // host's room (PR D) and must never reshape anyone's taste, so their
+    // events are dropped from training entirely (capability table, PR E).
+    // We accept the request (so the player's fire-and-forget batcher
+    // doesn't error) but persist nothing and fold no affinity.
+    if principal.role == Role::Guest {
+        return (StatusCode::ACCEPTED, Json(EventsResponse { accepted: 0 })).into_response();
+    }
     if req.events.is_empty() {
         return (StatusCode::BAD_REQUEST, "events array must be non-empty").into_response();
     }
@@ -103,12 +113,16 @@ pub async fn submit(
         })
         .collect();
 
-    match state.event_store().append_batch(&events).await {
+    match state
+        .event_store()
+        .append_batch(principal.user_id, &events)
+        .await
+    {
         Ok(n) => {
             // Durable capture done. Now fold skips into the preference
             // affinity counter (best-effort, post-persist so a failure
             // here never costs us the logged signal).
-            fold_skip_affinity(&state, &events).await;
+            fold_skip_affinity(&state, principal.user_id, &events).await;
             (StatusCode::ACCEPTED, Json(EventsResponse { accepted: n })).into_response()
         }
         Err(err) => {
@@ -135,7 +149,7 @@ fn extract_played_ms(metadata: Option<&serde_json::Value>) -> Option<i64> {
 /// alone — we don't penalise blindly, since an early-vs-late skip means
 /// very different things and we can't tell them apart without both.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // completion ratio in [0,1]
-async fn fold_skip_affinity(state: &AppState, events: &[EventInput]) {
+async fn fold_skip_affinity(state: &AppState, user_id: i64, events: &[EventInput]) {
     let half_life_ms = state.affinity_half_life_ms();
     for ev in events {
         if ev.event_type != EventType::Skip {
@@ -156,6 +170,7 @@ async fn fold_skip_affinity(state: &AppState, events: &[EventInput]) {
         if let Err(err) = state
             .track_affinity()
             .apply_event(
+                user_id,
                 &ev.track_id,
                 AffinityEvent::Skip { completion },
                 ev.occurred_at,

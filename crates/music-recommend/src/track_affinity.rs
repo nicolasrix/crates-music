@@ -77,6 +77,7 @@ impl TrackAffinityStore {
     /// event neither decays nor is decayed).
     pub async fn apply_event(
         &self,
+        user_id: i64,
         track_id: &TrackId,
         event: AffinityEvent,
         event_ms: i64,
@@ -86,10 +87,13 @@ impl TrackAffinityStore {
         let col = counter_column(event);
 
         let mut tx = self.pool.begin().await?;
-        let prev = sqlx::query("SELECT score, updated_ms FROM track_affinity WHERE track_id = ?")
-            .bind(track_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await?;
+        let prev = sqlx::query(
+            "SELECT score, updated_ms FROM track_affinity WHERE user_id = ? AND track_id = ?",
+        )
+        .bind(user_id)
+        .bind(track_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
         let (prev_score, prev_updated_ms) = prev.map_or((0.0, event_ms), |r| {
             (read_score(&r), r.get::<i64, _>("updated_ms"))
         });
@@ -99,14 +103,15 @@ impl TrackAffinityStore {
 
         // `col` is one of four hard-coded identifiers — safe to format in.
         let sql = format!(
-            "INSERT INTO track_affinity (track_id, score, updated_ms, {col})
-                 VALUES (?, ?, ?, 1)
-             ON CONFLICT(track_id) DO UPDATE SET
+            "INSERT INTO track_affinity (user_id, track_id, score, updated_ms, {col})
+                 VALUES (?, ?, ?, ?, 1)
+             ON CONFLICT(user_id, track_id) DO UPDATE SET
                  score = ?,
                  updated_ms = ?,
                  {col} = {col} + 1"
         );
         sqlx::query(&sql)
+            .bind(user_id)
             .bind(track_id.as_str())
             .bind(f64::from(new_score))
             .bind(new_updated_ms)
@@ -125,6 +130,7 @@ impl TrackAffinityStore {
     /// count stays well under SQLite's limit.
     pub async fn affinity_many(
         &self,
+        user_id: i64,
         track_ids: &[TrackId],
         now_ms: i64,
         half_life_ms: i64,
@@ -136,9 +142,10 @@ impl TrackAffinityStore {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT track_id, score, updated_ms FROM track_affinity WHERE track_id IN ({placeholders})"
+            "SELECT track_id, score, updated_ms FROM track_affinity
+             WHERE user_id = ? AND track_id IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(&sql).bind(user_id);
         for id in track_ids {
             q = q.bind(id.as_str());
         }
@@ -157,14 +164,16 @@ impl TrackAffinityStore {
     /// `now_ms`. `None` when the track has never been engaged with.
     pub async fn row(
         &self,
+        user_id: i64,
         track_id: &TrackId,
         now_ms: i64,
         half_life_ms: i64,
     ) -> Result<Option<AffinityRow>> {
         let row = sqlx::query(
             "SELECT score, updated_ms, play_count, skip_count, like_count, dislike_count
-             FROM track_affinity WHERE track_id = ?",
+             FROM track_affinity WHERE user_id = ? AND track_id = ?",
         )
+        .bind(user_id)
         .bind(track_id.as_str())
         .fetch_optional(&self.pool)
         .await?;
@@ -204,60 +213,60 @@ mod tests {
     #[tokio::test]
     async fn unknown_track_is_absent_from_batch() {
         let s = store().await;
-        let got = s.affinity_many(&[tid("never")], 10_000, HL).await.unwrap();
+        let got = s.affinity_many(1, &[tid("never")], 10_000, HL).await.unwrap();
         assert!(got.is_empty());
     }
 
     #[tokio::test]
     async fn empty_batch_returns_empty() {
         let s = store().await;
-        assert!(s.affinity_many(&[], 10_000, HL).await.unwrap().is_empty());
+        assert!(s.affinity_many(1, &[], 10_000, HL).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn like_produces_positive_affinity() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        let got = s.affinity_many(&[tid("t1")], 1_000, HL).await.unwrap();
+        let got = s.affinity_many(1, &[tid("t1")], 1_000, HL).await.unwrap();
         assert!(got[&tid("t1")] > 0.0, "got {:?}", got.get(&tid("t1")));
     }
 
     #[tokio::test]
     async fn early_skip_produces_negative_affinity() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Skip { completion: 0.0 }, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Skip { completion: 0.0 }, 1_000, HL)
             .await
             .unwrap();
-        let got = s.affinity_many(&[tid("t1")], 1_000, HL).await.unwrap();
+        let got = s.affinity_many(1, &[tid("t1")], 1_000, HL).await.unwrap();
         assert!(got[&tid("t1")] < 0.0);
     }
 
     #[tokio::test]
     async fn repeated_likes_accumulate() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        let one = s.affinity_many(&[tid("t1")], 1_000, HL).await.unwrap()[&tid("t1")];
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 1_000, HL)
+        let one = s.affinity_many(1, &[tid("t1")], 1_000, HL).await.unwrap()[&tid("t1")];
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        let two = s.affinity_many(&[tid("t1")], 1_000, HL).await.unwrap()[&tid("t1")];
+        let two = s.affinity_many(1, &[tid("t1")], 1_000, HL).await.unwrap()[&tid("t1")];
         assert!(two > one, "second like should raise affinity: {one} -> {two}");
     }
 
     #[tokio::test]
     async fn dislike_cancels_a_like() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        s.apply_event(&tid("t1"), AffinityEvent::Dislike, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Dislike, 1_000, HL)
             .await
             .unwrap();
-        let got = s.affinity_many(&[tid("t1")], 1_000, HL).await.unwrap();
+        let got = s.affinity_many(1, &[tid("t1")], 1_000, HL).await.unwrap();
         // LIKE_WEIGHT + DISLIKE_WEIGHT == 0 → affinity 0.
         assert!(got[&tid("t1")].abs() < 1e-6, "got {}", got[&tid("t1")]);
     }
@@ -265,12 +274,12 @@ mod tests {
     #[tokio::test]
     async fn affinity_decays_between_event_and_read() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 0, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 0, HL)
             .await
             .unwrap();
-        let fresh = s.affinity_many(&[tid("t1")], 0, HL).await.unwrap()[&tid("t1")];
+        let fresh = s.affinity_many(1, &[tid("t1")], 0, HL).await.unwrap()[&tid("t1")];
         let aged = s
-            .affinity_many(&[tid("t1")], 4 * HL, HL)
+            .affinity_many(1, &[tid("t1")], 4 * HL, HL)
             .await
             .unwrap()[&tid("t1")];
         assert!(aged < fresh && aged > 0.0, "fresh {fresh}, aged {aged}");
@@ -279,14 +288,14 @@ mod tests {
     #[tokio::test]
     async fn tracks_are_isolated() {
         let s = store().await;
-        s.apply_event(&tid("liked"), AffinityEvent::Like, 1_000, HL)
+        s.apply_event(1, &tid("liked"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        s.apply_event(&tid("disliked"), AffinityEvent::Dislike, 1_000, HL)
+        s.apply_event(1, &tid("disliked"), AffinityEvent::Dislike, 1_000, HL)
             .await
             .unwrap();
         let got = s
-            .affinity_many(&[tid("liked"), tid("disliked"), tid("unseen")], 1_000, HL)
+            .affinity_many(1, &[tid("liked"), tid("disliked"), tid("unseen")], 1_000, HL)
             .await
             .unwrap();
         assert!(got[&tid("liked")] > 0.0);
@@ -297,19 +306,19 @@ mod tests {
     #[tokio::test]
     async fn row_reports_lifetime_tallies() {
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 1_000, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 1_000, HL)
             .await
             .unwrap();
-        s.apply_event(&tid("t1"), AffinityEvent::Play { completion: 1.0 }, 1_100, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Play { completion: 1.0 }, 1_100, HL)
             .await
             .unwrap();
-        s.apply_event(&tid("t1"), AffinityEvent::Play { completion: 1.0 }, 1_200, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Play { completion: 1.0 }, 1_200, HL)
             .await
             .unwrap();
-        s.apply_event(&tid("t1"), AffinityEvent::Skip { completion: 0.1 }, 1_300, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Skip { completion: 0.1 }, 1_300, HL)
             .await
             .unwrap();
-        let row = s.row(&tid("t1"), 1_300, HL).await.unwrap().unwrap();
+        let row = s.row(1, &tid("t1"), 1_300, HL).await.unwrap().unwrap();
         assert_eq!(row.like_count, 1);
         assert_eq!(row.play_count, 2);
         assert_eq!(row.skip_count, 1);
@@ -319,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn row_is_none_for_unknown_track() {
         let s = store().await;
-        assert_eq!(s.row(&tid("never"), 1_000, HL).await.unwrap(), None);
+        assert_eq!(s.row(1, &tid("never"), 1_000, HL).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -328,14 +337,14 @@ mod tests {
         // affinity must still rise (the old weight, aged forward, counts)
         // but the row's clock stays at the newer timestamp.
         let s = store().await;
-        s.apply_event(&tid("t1"), AffinityEvent::Like, 2 * HL, HL)
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, 2 * HL, HL)
             .await
             .unwrap();
-        let before = s.affinity_many(&[tid("t1")], 2 * HL, HL).await.unwrap()[&tid("t1")];
-        s.apply_event(&tid("t1"), AffinityEvent::Like, HL, HL)
+        let before = s.affinity_many(1, &[tid("t1")], 2 * HL, HL).await.unwrap()[&tid("t1")];
+        s.apply_event(1, &tid("t1"), AffinityEvent::Like, HL, HL)
             .await
             .unwrap();
-        let after = s.affinity_many(&[tid("t1")], 2 * HL, HL).await.unwrap()[&tid("t1")];
+        let after = s.affinity_many(1, &[tid("t1")], 2 * HL, HL).await.unwrap()[&tid("t1")];
         assert!(after > before, "replayed like should still add signal: {before} -> {after}");
     }
 }

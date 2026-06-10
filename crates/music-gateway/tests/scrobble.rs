@@ -63,7 +63,7 @@ async fn submission_scrobble_writes_play_history_and_forwards_to_navidrome() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-1".to_string()))
+        .last_played(1, &TrackId::from("track-1".to_string()))
         .await
         .unwrap();
     assert!(last.is_some(), "play_history row should exist");
@@ -99,7 +99,7 @@ async fn now_playing_ping_does_not_bump_recency_clock() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-1".to_string()))
+        .last_played(1, &TrackId::from("track-1".to_string()))
         .await
         .unwrap();
     assert_eq!(last, None, "now-playing pings must not write a row");
@@ -135,7 +135,7 @@ async fn submission_default_when_param_omitted() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-default".to_string()))
+        .last_played(1, &TrackId::from("track-default".to_string()))
         .await
         .unwrap();
     assert!(last.is_some());
@@ -167,7 +167,7 @@ async fn second_submission_advances_recency_clock() {
         .unwrap();
     let after_first = state
         .play_history()
-        .last_played(&TrackId::from("t1".to_string()))
+        .last_played(1, &TrackId::from("t1".to_string()))
         .await
         .unwrap()
         .expect("first scrobble wrote a row");
@@ -189,7 +189,7 @@ async fn second_submission_advances_recency_clock() {
         .unwrap();
     let after_second = state
         .play_history()
-        .last_played(&TrackId::from("t1".to_string()))
+        .last_played(1, &TrackId::from("t1".to_string()))
         .await
         .unwrap()
         .expect("second scrobble keeps a row");

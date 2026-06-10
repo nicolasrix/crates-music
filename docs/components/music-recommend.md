@@ -26,14 +26,32 @@ tables.
 | `mmr` | Maximal Marginal Relevance reranker | n/a |
 | `queue_filter` | Queue-aware diversity filter (per-artist cap, dedup, MMR) | n/a |
 | `sessions` | `recommend_sessions` (session_id PK, anchor_track, started/ended_ms) — durable lifecycle mirror of `SyncOp::StartSession`/`StopSession` | `0008_recommend_sessions.sql` |
-| `track_affinity` | `track_affinity` (track_id PK, decayed like/skip/play counter) — feeds the gated `preference_enabled` re-scoring | `0013_track_affinity.sql` |
-| `rating` | `entity_rating` (kind, entity_id) — durable, always-on like/dislike for track/album/artist | `0014` → `0015_entity_rating.sql` |
+| `track_affinity` | `track_affinity` (`(user_id, track_id)` PK, decayed like/skip/play counter) — feeds the gated `preference_enabled` re-scoring | `0013` → `0020_track_affinity_user_id.sql` |
+| `rating` | `entity_rating` (`(user_id, kind, entity_id)` PK) — durable, always-on like/dislike for track/album/artist | `0014` → `0015` → `0021_entity_rating_user_id.sql` |
 | `preference` | Pure compute: `preference_bonus`, affinity-event decay (`half_life_days_to_ms`) | n/a |
 | `leash` | Pure compute: anchor-leash demotion (`LeashParams`, `nearest_anchor_sim`) for travelling stations | n/a |
-| `provenance` | `recommendation` + `recommendation_item` tables — append-only log of what was served, with what scores, in what context (training substrate) | `0016_recommendation_log.sql` |
+| `provenance` | `recommendation` + `recommendation_item` tables — append-only log of what was served, with what scores, in what context (training substrate) | `0016` → `0022_recommendation_user_id.sql` |
 
 This crate is **server-only**. It pulls in `usearch` (ships C++),
 `sqlx`, `reqwest`. Mobile clients won't link this.
+
+### Per-user partition (multi-user, PR E)
+
+The taste/behaviour tables — `events`, `play_history`,
+`recommend_feedback`, `track_affinity`, `entity_rating`, and
+`recommendation` — each carry a `user_id` column (recommend migrations
+`0017–0022`). The `WITHOUT ROWID` tables fold `user_id` into the primary
+key (`play_history`/`track_affinity` → `(user_id, track_id)`,
+`entity_rating` → `(user_id, kind, entity_id)`); the append-only tables
+take it as an indexed column. Every store method takes a leading
+`user_id: i64` and scopes its reads/writes to it. Existing rows backfill
+to the owner (`DEFAULT 1`). The `user_id` is a plain integer mirroring
+`gateway-state.users.id` — **no foreign key**, since this is a separate
+SQLite file. Content tables (`track_embeddings`, `track_metadata`,
+whitening) are intentionally *not* partitioned — embeddings are
+content-addressed and shared. The gateway resolves which `user_id` to
+pass (caller for writes, room host for recommendation reads); see
+[music-gateway.md](./music-gateway.md#per-user-taste-isolation-pr-e).
 
 ## Why this design
 

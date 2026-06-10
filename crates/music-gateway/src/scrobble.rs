@@ -36,6 +36,7 @@ use music_core::TrackId;
 use music_recommend::{EventInput, EventType};
 use serde::Deserialize;
 
+use crate::principal::{AuthPrincipal, Role};
 use crate::proxy::proxy;
 use crate::state::AppState;
 
@@ -66,13 +67,19 @@ fn now_ms() -> i64 {
 pub async fn scrobble(
     State(state): State<AppState>,
     Query(q): Query<ScrobbleQuery>,
-    crate::principal::AuthPrincipal(principal): crate::principal::AuthPrincipal,
+    AuthPrincipal(principal): AuthPrincipal,
     request: Request,
 ) -> Response {
     let is_submission = parse_submission(q.submission.as_deref());
     tracing::Span::current().record("submission", is_submission);
 
-    if is_submission && let Some(id) = q.id.as_deref() {
+    // Guest plays are dropped from training (PR E taste sandboxing): a
+    // guest still plays through the proxy, but their listen never lands
+    // in the host's recency clock / event log / affinity counter.
+    if is_submission
+        && principal.role != Role::Guest
+        && let Some(id) = q.id.as_deref()
+    {
         tracing::Span::current().record("track_id", id);
         let track_id = TrackId::from(id.to_string());
         let occurred_at = q.time.unwrap_or_else(now_ms);
@@ -80,7 +87,7 @@ pub async fn scrobble(
         // Fast-path recency clock for the MMR penalty.
         if let Err(err) = state
             .play_history()
-            .record_submission(&track_id, occurred_at)
+            .record_submission(principal.user_id, &track_id, occurred_at)
             .await
         {
             tracing::warn!(error = %err, "play_history write failed; continuing with forward");
@@ -99,7 +106,11 @@ pub async fn scrobble(
             metadata: None,
             session_id,
         };
-        if let Err(err) = state.event_store().append_batch(&[event]).await {
+        if let Err(err) = state
+            .event_store()
+            .append_batch(principal.user_id, &[event])
+            .await
+        {
             tracing::warn!(error = %err, "event log append failed; continuing with forward");
         }
 
@@ -110,6 +121,7 @@ pub async fn scrobble(
         if let Err(err) = state
             .track_affinity()
             .apply_event(
+                principal.user_id,
                 &track_id,
                 music_recommend::AffinityEvent::Play { completion: 1.0 },
                 occurred_at,

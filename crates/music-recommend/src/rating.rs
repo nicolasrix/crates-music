@@ -133,18 +133,20 @@ impl RatingStore {
     /// because album/artist ids are not `TrackId`; `kind` namespaces it.
     pub async fn set(
         &self,
+        user_id: i64,
         kind: RatedKind,
         entity_id: &str,
         rating: Rating,
         now_ms: i64,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO entity_rating (kind, entity_id, rating, updated_ms)
-                 VALUES (?, ?, ?, ?)
-             ON CONFLICT(kind, entity_id) DO UPDATE SET
+            "INSERT INTO entity_rating (user_id, kind, entity_id, rating, updated_ms)
+                 VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, kind, entity_id) DO UPDATE SET
                  rating = excluded.rating,
                  updated_ms = excluded.updated_ms",
         )
+        .bind(user_id)
         .bind(kind.as_str())
         .bind(entity_id)
         .bind(rating.as_i64())
@@ -155,8 +157,9 @@ impl RatingStore {
     }
 
     /// Clear an entity's rating (back to neutral). No-op if absent.
-    pub async fn clear(&self, kind: RatedKind, entity_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM entity_rating WHERE kind = ? AND entity_id = ?")
+    pub async fn clear(&self, user_id: i64, kind: RatedKind, entity_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM entity_rating WHERE user_id = ? AND kind = ? AND entity_id = ?")
+            .bind(user_id)
             .bind(kind.as_str())
             .bind(entity_id)
             .execute(&self.pool)
@@ -165,24 +168,34 @@ impl RatingStore {
     }
 
     /// The current rating for one entity, or `None` if neutral.
-    pub async fn get(&self, kind: RatedKind, entity_id: &str) -> Result<Option<Rating>> {
-        let row = sqlx::query("SELECT rating FROM entity_rating WHERE kind = ? AND entity_id = ?")
-            .bind(kind.as_str())
-            .bind(entity_id)
-            .fetch_optional(&self.pool)
-            .await?;
+    pub async fn get(
+        &self,
+        user_id: i64,
+        kind: RatedKind,
+        entity_id: &str,
+    ) -> Result<Option<Rating>> {
+        let row = sqlx::query(
+            "SELECT rating FROM entity_rating WHERE user_id = ? AND kind = ? AND entity_id = ?",
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .bind(entity_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.and_then(|r| Rating::from_i64(r.get::<i64, _>("rating"))))
     }
 
     /// All disliked entity ids of a given kind, as a set for O(1)
     /// exclusion membership in the recommend hot path. Single-user scale
     /// keeps this small; read once per recommend request.
-    pub async fn disliked_ids(&self, kind: RatedKind) -> Result<HashSet<String>> {
-        let rows =
-            sqlx::query("SELECT entity_id FROM entity_rating WHERE kind = ? AND rating = -1")
-                .bind(kind.as_str())
-                .fetch_all(&self.pool)
-                .await?;
+    pub async fn disliked_ids(&self, user_id: i64, kind: RatedKind) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            "SELECT entity_id FROM entity_rating WHERE user_id = ? AND kind = ? AND rating = -1",
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|r| r.get::<String, _>("entity_id"))
@@ -191,11 +204,12 @@ impl RatingStore {
 
     /// All liked entity ids of a given kind, newest-rated first — the
     /// "Liked" page ordering (hydration of titles/art is the caller's job).
-    pub async fn liked_ids(&self, kind: RatedKind) -> Result<Vec<String>> {
+    pub async fn liked_ids(&self, user_id: i64, kind: RatedKind) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT entity_id FROM entity_rating
-             WHERE kind = ? AND rating = 1 ORDER BY updated_ms DESC",
+             WHERE user_id = ? AND kind = ? AND rating = 1 ORDER BY updated_ms DESC",
         )
+        .bind(user_id)
         .bind(kind.as_str())
         .fetch_all(&self.pool)
         .await?;
@@ -207,10 +221,12 @@ impl RatingStore {
 
     /// Every rated entity with its kind + verdict — the
     /// `GET /v1/library/ratings` payload. Newest-rated first.
-    pub async fn all(&self) -> Result<Vec<(RatedKind, String, Rating)>> {
+    pub async fn all(&self, user_id: i64) -> Result<Vec<(RatedKind, String, Rating)>> {
         let rows = sqlx::query(
-            "SELECT kind, entity_id, rating FROM entity_rating ORDER BY updated_ms DESC",
+            "SELECT kind, entity_id, rating FROM entity_rating
+             WHERE user_id = ? ORDER BY updated_ms DESC",
         )
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -233,6 +249,7 @@ impl RatingStore {
     /// by the caller (it needs candidate metadata for the album/artist id).
     pub async fn liked_bonus_many(
         &self,
+        user_id: i64,
         track_ids: &[TrackId],
         bonus: f32,
     ) -> Result<HashMap<TrackId, f32>> {
@@ -244,9 +261,9 @@ impl RatingStore {
             .join(",");
         let sql = format!(
             "SELECT entity_id FROM entity_rating
-             WHERE kind = 'track' AND rating = 1 AND entity_id IN ({placeholders})"
+             WHERE user_id = ? AND kind = 'track' AND rating = 1 AND entity_id IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(&sql).bind(user_id);
         for id in track_ids {
             q = q.bind(id.as_str());
         }
@@ -275,11 +292,11 @@ mod tests {
     #[tokio::test]
     async fn set_get_roundtrip() {
         let s = store().await;
-        s.set(RatedKind::Track, "t1", Rating::Like, 1_000)
+        s.set(1, RatedKind::Track, "t1", Rating::Like, 1_000)
             .await
             .unwrap();
         assert_eq!(
-            s.get(RatedKind::Track, "t1").await.unwrap(),
+            s.get(1, RatedKind::Track, "t1").await.unwrap(),
             Some(Rating::Like)
         );
     }
@@ -288,40 +305,40 @@ mod tests {
     async fn kinds_are_independent_namespaces() {
         // Same id string under different kinds is two distinct rows.
         let s = store().await;
-        s.set(RatedKind::Track, "x", Rating::Like, 1_000)
+        s.set(1, RatedKind::Track, "x", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Album, "x", Rating::Dislike, 1_000)
+        s.set(1, RatedKind::Album, "x", Rating::Dislike, 1_000)
             .await
             .unwrap();
         assert_eq!(
-            s.get(RatedKind::Track, "x").await.unwrap(),
+            s.get(1, RatedKind::Track, "x").await.unwrap(),
             Some(Rating::Like)
         );
         assert_eq!(
-            s.get(RatedKind::Album, "x").await.unwrap(),
+            s.get(1, RatedKind::Album, "x").await.unwrap(),
             Some(Rating::Dislike)
         );
-        assert_eq!(s.get(RatedKind::Artist, "x").await.unwrap(), None);
+        assert_eq!(s.get(1, RatedKind::Artist, "x").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn neutral_entity_has_no_rating() {
         let s = store().await;
-        assert_eq!(s.get(RatedKind::Track, "never").await.unwrap(), None);
+        assert_eq!(s.get(1, RatedKind::Track, "never").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn re_rating_overwrites() {
         let s = store().await;
-        s.set(RatedKind::Album, "a1", Rating::Like, 1_000)
+        s.set(1, RatedKind::Album, "a1", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Album, "a1", Rating::Dislike, 2_000)
+        s.set(1, RatedKind::Album, "a1", Rating::Dislike, 2_000)
             .await
             .unwrap();
         assert_eq!(
-            s.get(RatedKind::Album, "a1").await.unwrap(),
+            s.get(1, RatedKind::Album, "a1").await.unwrap(),
             Some(Rating::Dislike)
         );
     }
@@ -329,34 +346,34 @@ mod tests {
     #[tokio::test]
     async fn clear_returns_to_neutral() {
         let s = store().await;
-        s.set(RatedKind::Artist, "ar1", Rating::Like, 1_000)
+        s.set(1, RatedKind::Artist, "ar1", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.clear(RatedKind::Artist, "ar1").await.unwrap();
-        assert_eq!(s.get(RatedKind::Artist, "ar1").await.unwrap(), None);
+        s.clear(1, RatedKind::Artist, "ar1").await.unwrap();
+        assert_eq!(s.get(1, RatedKind::Artist, "ar1").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn clear_absent_is_noop() {
         let s = store().await;
-        s.clear(RatedKind::Track, "never").await.unwrap();
-        assert_eq!(s.get(RatedKind::Track, "never").await.unwrap(), None);
+        s.clear(1, RatedKind::Track, "never").await.unwrap();
+        assert_eq!(s.get(1, RatedKind::Track, "never").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn disliked_ids_only_returns_dislikes_of_kind() {
         let s = store().await;
-        s.set(RatedKind::Album, "liked", Rating::Like, 1_000)
+        s.set(1, RatedKind::Album, "liked", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Album, "hated", Rating::Dislike, 1_000)
+        s.set(1, RatedKind::Album, "hated", Rating::Dislike, 1_000)
             .await
             .unwrap();
         // A disliked artist must NOT bleed into the album set.
-        s.set(RatedKind::Artist, "hated-artist", Rating::Dislike, 1_000)
+        s.set(1, RatedKind::Artist, "hated-artist", Rating::Dislike, 1_000)
             .await
             .unwrap();
-        let disliked = s.disliked_ids(RatedKind::Album).await.unwrap();
+        let disliked = s.disliked_ids(1, RatedKind::Album).await.unwrap();
         assert!(disliked.contains("hated"));
         assert!(!disliked.contains("liked"));
         assert!(!disliked.contains("hated-artist"));
@@ -366,17 +383,17 @@ mod tests {
     #[tokio::test]
     async fn liked_ids_newest_first_per_kind() {
         let s = store().await;
-        s.set(RatedKind::Artist, "old", Rating::Like, 1_000)
+        s.set(1, RatedKind::Artist, "old", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Artist, "new", Rating::Like, 2_000)
+        s.set(1, RatedKind::Artist, "new", Rating::Like, 2_000)
             .await
             .unwrap();
-        s.set(RatedKind::Artist, "hated", Rating::Dislike, 3_000)
+        s.set(1, RatedKind::Artist, "hated", Rating::Dislike, 3_000)
             .await
             .unwrap();
         assert_eq!(
-            s.liked_ids(RatedKind::Artist).await.unwrap(),
+            s.liked_ids(1, RatedKind::Artist).await.unwrap(),
             vec!["new".to_string(), "old".to_string()]
         );
     }
@@ -384,14 +401,14 @@ mod tests {
     #[tokio::test]
     async fn all_reports_every_rating_newest_first() {
         let s = store().await;
-        s.set(RatedKind::Track, "a", Rating::Like, 1_000)
+        s.set(1, RatedKind::Track, "a", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Album, "b", Rating::Dislike, 2_000)
+        s.set(1, RatedKind::Album, "b", Rating::Dislike, 2_000)
             .await
             .unwrap();
         assert_eq!(
-            s.all().await.unwrap(),
+            s.all(1).await.unwrap(),
             vec![
                 (RatedKind::Album, "b".to_string(), Rating::Dislike),
                 (RatedKind::Track, "a".to_string(), Rating::Like)
@@ -402,18 +419,18 @@ mod tests {
     #[tokio::test]
     async fn liked_bonus_only_for_liked_tracks() {
         let s = store().await;
-        s.set(RatedKind::Track, "liked", Rating::Like, 1_000)
+        s.set(1, RatedKind::Track, "liked", Rating::Like, 1_000)
             .await
             .unwrap();
-        s.set(RatedKind::Track, "hated", Rating::Dislike, 1_000)
+        s.set(1, RatedKind::Track, "hated", Rating::Dislike, 1_000)
             .await
             .unwrap();
         // A liked album with the same id must NOT count as a track like.
-        s.set(RatedKind::Album, "liked", Rating::Like, 1_000)
+        s.set(1, RatedKind::Album, "liked", Rating::Like, 1_000)
             .await
             .unwrap();
         let bonus = s
-            .liked_bonus_many(&[tid("liked"), tid("hated"), tid("neutral")], 0.15)
+            .liked_bonus_many(1, &[tid("liked"), tid("hated"), tid("neutral")], 0.15)
             .await
             .unwrap();
         assert_eq!(bonus.get(&tid("liked")), Some(&0.15));
@@ -424,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn liked_bonus_empty_batch() {
         let s = store().await;
-        assert!(s.liked_bonus_many(&[], 0.15).await.unwrap().is_empty());
+        assert!(s.liked_bonus_many(1, &[], 0.15).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -486,14 +503,21 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        // Apply 0021: widens entity_rating's key with user_id (backfills the
+        // carried-over rows to the owner). The store methods query
+        // `WHERE user_id = ?`, so this column must exist for `get` below.
+        sqlx::raw_sql(include_str!("../migrations/0021_entity_rating_user_id.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let store = RatingStore::new(pool.clone());
         assert_eq!(
-            store.get(RatedKind::Track, "liked-song").await.unwrap(),
+            store.get(1, RatedKind::Track, "liked-song").await.unwrap(),
             Some(Rating::Like)
         );
         assert_eq!(
-            store.get(RatedKind::Track, "hated-song").await.unwrap(),
+            store.get(1, RatedKind::Track, "hated-song").await.unwrap(),
             Some(Rating::Dislike)
         );
 

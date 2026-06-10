@@ -192,7 +192,7 @@ impl RecommendationLogStore {
     /// (all-or-nothing, so a partial slate never lands). Returns the new
     /// `recommendation.id`. `served_ms` is stamped here from the gateway
     /// clock.
-    pub async fn record(&self, rec: &RecommendationRecord) -> Result<i64> {
+    pub async fn record(&self, user_id: i64, rec: &RecommendationRecord) -> Result<i64> {
         let served_ms = now_ms();
         let seeds_json = rec
             .seeds
@@ -203,11 +203,12 @@ impl RecommendationLogStore {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             "INSERT INTO recommendation
-                 (kind, session_id, model_version, seeds_json, text_query,
+                 (user_id, kind, session_id, model_version, seeds_json, text_query,
                   params_json, degraded, result_count, served_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
+        .bind(user_id)
         .bind(rec.kind.as_str())
         .bind(rec.session_id.as_deref())
         .bind(&rec.model_version)
@@ -417,7 +418,7 @@ mod tests {
                     .with_features(json!({"seed_hits": 1})),
             ],
         };
-        let id = store.record(&rec).await.unwrap();
+        let id = store.record(1, &rec).await.unwrap();
         assert!(id > 0);
         assert_eq!(store.count().await.unwrap(), 1);
 
@@ -451,7 +452,7 @@ mod tests {
             degraded: false,
             items: vec![RecommendationItemRecord::new("t1", Some(0.5))],
         };
-        store.record(&rec).await.unwrap();
+        store.record(1, &rec).await.unwrap();
         let got = &store.recent(1).await.unwrap()[0];
         assert_eq!(got.seeds, None);
         assert_eq!(got.text_query.as_deref(), Some("rainy sunday afternoon"));
@@ -471,7 +472,7 @@ mod tests {
             degraded: true,
             items: vec![],
         };
-        store.record(&rec).await.unwrap();
+        store.record(1, &rec).await.unwrap();
         let got = &store.recent(1).await.unwrap()[0];
         assert_eq!(got.result_count, 0);
         assert!(got.degraded);
@@ -506,7 +507,7 @@ mod tests {
         let store = RecommendationLogStore::new(pool.clone());
 
         store
-            .record(&RecommendationRecord {
+            .record(1, &RecommendationRecord {
                 kind: RecommendationKind::FromSeeds,
                 session_id: Some("A".into()),
                 model_version: "m".into(),
@@ -558,7 +559,7 @@ mod tests {
         let pool = embed.pool().clone();
         let store = RecommendationLogStore::new(pool.clone());
         store
-            .record(&RecommendationRecord {
+            .record(1, &RecommendationRecord {
                 kind: RecommendationKind::Next,
                 session_id: None,
                 model_version: "m".into(),
@@ -580,7 +581,7 @@ mod tests {
     async fn similar_items_have_no_outcome() {
         let store = store().await;
         store
-            .record(&RecommendationRecord {
+            .record(1, &RecommendationRecord {
                 kind: RecommendationKind::SimilarAlbums,
                 session_id: None,
                 model_version: "m".into(),

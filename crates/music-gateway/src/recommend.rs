@@ -41,6 +41,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
+use crate::principal::AuthPrincipal;
 use crate::state::{AppState, PreferenceParams};
 use crate::whitening_text;
 
@@ -107,11 +108,15 @@ pub struct RecommendItem {
 )]
 pub async fn next(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     Query(q): Query<RecommendNextQuery>,
 ) -> Result<Json<RecommendNextResponse>, (StatusCode, &'static str)> {
     if q.n == 0 {
         return Err((StatusCode::BAD_REQUEST, "n must be >= 1"));
     }
+    // All taste reads are scoped to the room's host user, so a guest gets
+    // the host's personalised recs read-only (PR E).
+    let room = principal.room_id();
     let n = q.n.min(MAX_N);
     tracing::Span::current().record("n", n);
     let seed_id = TrackId::from(q.seed.clone());
@@ -139,9 +144,9 @@ pub async fn next(
     //
     // The seed itself is always excluded; disliked tracks are hard-excluded
     // here too (always-on, independent of preference).
-    let rescore = rescore_ctx(&state).await;
+    let rescore = rescore_ctx(&state, room).await;
     let mut exclude: Vec<TrackId> = vec![seed_id.clone()];
-    exclude.extend(disliked_exclusions(&state).await);
+    exclude.extend(disliked_exclusions(&state, room).await);
     let fetch_n = n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
     let mut results = state
         .ann()
@@ -167,6 +172,7 @@ pub async fn next(
         .collect();
     record_provenance(
         &state,
+        room,
         RecommendationKind::Next,
         None,
         Some(vec![q.seed.clone()]),
@@ -247,8 +253,12 @@ pub struct RecommendStationResponse {
 )]
 pub async fn station(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     Query(q): Query<RecommendStationQuery>,
 ) -> Result<Json<RecommendStationResponse>, (StatusCode, &'static str)> {
+    // Dislike exclusions + provenance are scoped to the room's host user
+    // (PR E); a guest reads the host's profile read-only.
+    let room = principal.room_id();
     let trimmed = q.text.trim();
     if trimmed.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "text must not be empty"));
@@ -282,7 +292,10 @@ pub async fn station(
     // in the same whitened space as the stored audio vectors. Falls back
     // to the audio transform (and to identity) when whitening / text_mean
     // aren't installed. Disliked tracks are hard-excluded (always-on).
-    let exclude: Vec<TrackId> = disliked_exclusions(&state).await.into_iter().collect();
+    let exclude: Vec<TrackId> = disliked_exclusions(&state, room)
+        .await
+        .into_iter()
+        .collect();
     let results = state
         .ann()
         .query_text(&embed.vector, n, &exclude)
@@ -298,6 +311,7 @@ pub async fn station(
         .collect();
     record_provenance(
         &state,
+        room,
         RecommendationKind::Station,
         None,
         None,
@@ -501,6 +515,7 @@ fn now_unix_ms() -> i64 {
 #[allow(clippy::too_many_arguments)]
 async fn record_provenance(
     state: &AppState,
+    user_id: i64,
     kind: RecommendationKind,
     session_id: Option<String>,
     seeds: Option<Vec<String>>,
@@ -522,7 +537,7 @@ async fn record_provenance(
         degraded,
         items,
     };
-    if let Err(e) = state.recommendation_log().record(&record).await {
+    if let Err(e) = state.recommendation_log().record(user_id, &record).await {
         tracing::warn!(error = %e, kind = kind.as_str(), "failed to log recommendation provenance");
     }
 }
@@ -715,9 +730,12 @@ pub struct FromSeedsResponse {
 // lifecycle.
 pub async fn from_seeds(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<FromSeedsRequest>, JsonRejection>,
 ) -> Result<Json<FromSeedsResponse>, (StatusCode, &'static str)> {
     let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
+    // Taste reads scoped to the room's host user (PR E).
+    let room = principal.room_id();
 
     if req.seeds.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "seeds must not be empty"));
@@ -822,7 +840,7 @@ pub async fn from_seeds(
     }
     // Disliked tracks are hard-excluded from all candidate generation
     // (always-on, independent of preference).
-    exclude.extend(disliked_exclusions(&state).await);
+    exclude.extend(disliked_exclusions(&state, room).await);
 
     // Per-seed ANN queries. Each seed lookup is short and CPU-bound,
     // and the ANN takes its own internal RwLock; running these in
@@ -882,7 +900,7 @@ pub async fn from_seeds(
         leash_params,
     );
 
-    let rescore = rescore_ctx(&state).await;
+    let rescore = rescore_ctx(&state, room).await;
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(
@@ -937,6 +955,7 @@ pub async fn from_seeds(
         .collect();
     record_provenance(
         &state,
+        room,
         RecommendationKind::FromSeeds,
         req.session_id.clone(),
         Some(req.seeds.clone()),
@@ -1016,9 +1035,12 @@ pub struct FromAnyResponse {
 // obscures the request lifecycle.
 pub async fn from_any(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<FromAnyRequest>, JsonRejection>,
 ) -> Result<Json<FromAnyResponse>, (StatusCode, &'static str)> {
     let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
+    // Taste reads scoped to the room's host user (PR E).
+    let room = principal.room_id();
 
     if req.candidate_seeds.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "candidate_seeds must not be empty"));
@@ -1069,7 +1091,7 @@ pub async fn from_any(
         }
     }
     // Disliked tracks are hard-excluded (always-on, independent of preference).
-    queue_excludes.extend(disliked_exclusions(&state).await);
+    queue_excludes.extend(disliked_exclusions(&state, room).await);
 
     // Try candidates in order, return first one with an ANN entry. Mirrors
     // the TS `startStationFromAny` semantics exactly: first-wins.
@@ -1098,7 +1120,7 @@ pub async fn from_any(
             .query_excluding(&vector, internal_n, &excludes_for_query)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ann query failed"))?;
 
-        let rescore = rescore_ctx(&state).await;
+        let rescore = rescore_ctx(&state, room).await;
         let (filtered, filter_stats) = match &req.queue_context {
             Some(qc) => {
                 apply_queue_filter_to_ann(
@@ -1148,6 +1170,7 @@ pub async fn from_any(
             .collect();
         record_provenance(
             &state,
+            room,
             RecommendationKind::FromAny,
             req.session_id.clone(),
             Some(req.candidate_seeds.clone()),
@@ -1274,8 +1297,10 @@ struct GroupedResult {
 /// finished indexing this album".
 #[allow(clippy::too_many_lines)] // Validation + per-seed ANN fan-out +
 // metadata grouping + provenance capture; one linear request lifecycle.
+#[allow(clippy::too_many_arguments)] // +user_id for per-user taste scoping (PR E).
 async fn group_similar_by(
     state: &AppState,
+    user_id: i64,
     seed_track_ids: &[String],
     exclude_group_ids: &[String],
     per_seed_n: Option<usize>,
@@ -1318,7 +1343,7 @@ async fn group_similar_by(
         .iter()
         .map(|s| TrackId::from(s.as_str()))
         .collect();
-    seed_excl_vec.extend(disliked_exclusions(state).await);
+    seed_excl_vec.extend(disliked_exclusions(state, user_id).await);
 
     let mut seeds_indexed = 0usize;
     let mut all_hits: Vec<music_recommend::ann::AnnQueryResult> = Vec::new();
@@ -1356,6 +1381,7 @@ async fn group_similar_by(
     if seeds_indexed == 0 {
         record_provenance(
             state,
+            user_id,
             prov_kind,
             None,
             Some(seed_track_ids.to_vec()),
@@ -1428,6 +1454,7 @@ async fn group_similar_by(
         .collect();
     record_provenance(
         state,
+        user_id,
         prov_kind,
         None,
         Some(seed_track_ids.to_vec()),
@@ -1451,6 +1478,7 @@ async fn group_similar_by(
 )]
 pub async fn similar_albums(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<SimilarAlbumsRequest>, JsonRejection>,
 ) -> Result<Json<SimilarAlbumsResponse>, (StatusCode, &'static str)> {
     let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
@@ -1458,6 +1486,7 @@ pub async fn similar_albums(
 
     let (grouped, all_unindexed) = group_similar_by(
         &state,
+        principal.room_id(),
         &req.seed_track_ids,
         &req.exclude_album_ids,
         req.per_seed_n,
@@ -1495,6 +1524,7 @@ pub async fn similar_albums(
 )]
 pub async fn similar_artists(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     payload: Result<Json<SimilarArtistsRequest>, JsonRejection>,
 ) -> Result<Json<SimilarArtistsResponse>, (StatusCode, &'static str)> {
     let Json(req) = payload.map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON body"))?;
@@ -1502,6 +1532,7 @@ pub async fn similar_artists(
 
     let (grouped, all_unindexed) = group_similar_by(
         &state,
+        principal.room_id(),
         &req.seed_track_ids,
         &req.exclude_artist_ids,
         req.per_seed_n,
@@ -1881,16 +1912,21 @@ const MMR_POOL_BUFFER_FACTOR: usize = 2;
 /// throughout means "preference off / cold start → no bonus".
 struct PreferenceLookup<'a> {
     store: &'a music_recommend::TrackAffinityStore,
+    /// User whose affinity counter to read — the room's host user, so a
+    /// guest scores against the host's taste (PR E).
+    user_id: i64,
     params: PreferenceParams,
     now_ms: i64,
 }
 
 /// Resolve the preference lookup for this request, or `None` when the
 /// feature is disabled. Stamps a single `now_ms` so every candidate in
-/// the call decays to the same instant.
-fn preference_lookup(state: &AppState) -> Option<PreferenceLookup<'_>> {
+/// the call decays to the same instant. `user_id` is the room's host
+/// user (`Principal::room_id`).
+fn preference_lookup(state: &AppState, user_id: i64) -> Option<PreferenceLookup<'_>> {
     state.preference_params().map(|params| PreferenceLookup {
         store: state.track_affinity(),
+        user_id,
         params,
         now_ms: now_unix_ms(),
     })
@@ -1904,6 +1940,10 @@ fn preference_lookup(state: &AppState) -> Option<PreferenceLookup<'_>> {
 struct Rescore<'a> {
     pref: Option<PreferenceLookup<'a>>,
     ratings: &'a music_recommend::RatingStore,
+    /// Room's host user — the taste profile every read in this rescore is
+    /// scoped to (PR E). For a real account this is the caller; for a
+    /// guest it's their host.
+    user_id: i64,
     metadata: &'a MetadataStore,
     like_bonus: f32,
     /// Liked album/artist ids, fetched once per request. A candidate whose
@@ -1921,13 +1961,14 @@ struct Rescore<'a> {
 /// only the decayed-affinity preference half is config-gated. The liked
 /// album/artist sets are read once here; a lookup failure degrades to an
 /// empty set (no album/artist boost this round) rather than failing.
-async fn rescore_ctx(state: &AppState) -> Rescore<'_> {
+async fn rescore_ctx(state: &AppState, user_id: i64) -> Rescore<'_> {
     let ratings = state.ratings();
-    let liked_albums = liked_set(ratings, RatedKind::Album).await;
-    let liked_artists = liked_set(ratings, RatedKind::Artist).await;
+    let liked_albums = liked_set(ratings, user_id, RatedKind::Album).await;
+    let liked_artists = liked_set(ratings, user_id, RatedKind::Artist).await;
     Rescore {
-        pref: preference_lookup(state),
+        pref: preference_lookup(state, user_id),
         ratings,
+        user_id,
         metadata: state.metadata_store(),
         like_bonus: state.like_bonus(),
         liked_albums,
@@ -1939,9 +1980,13 @@ async fn rescore_ctx(state: &AppState) -> Rescore<'_> {
 
 /// Liked entity ids of a kind as a membership set, degrading to empty on
 /// error (the album/artist boost is an enhancement, not a correctness
-/// requirement).
-async fn liked_set(ratings: &music_recommend::RatingStore, kind: RatedKind) -> HashSet<String> {
-    match ratings.liked_ids(kind).await {
+/// requirement). Scoped to the room's host `user_id` (PR E).
+async fn liked_set(
+    ratings: &music_recommend::RatingStore,
+    user_id: i64,
+    kind: RatedKind,
+) -> HashSet<String> {
+    match ratings.liked_ids(user_id, kind).await {
         Ok(ids) => ids.into_iter().collect(),
         Err(err) => {
             tracing::warn!(error = %err, kind = kind.as_str(), "liked-parent lookup failed; recommending without its boost");
@@ -1963,12 +2008,12 @@ async fn liked_set(ratings: &music_recommend::RatingStore, kind: RatedKind) -> H
 /// degrades to "exclude nothing from that source" rather than failing the
 /// request: the durable ratings are still stored and the exclusion just
 /// doesn't fully apply this round.
-async fn disliked_exclusions(state: &AppState) -> HashSet<TrackId> {
+async fn disliked_exclusions(state: &AppState, user_id: i64) -> HashSet<TrackId> {
     let ratings = state.ratings();
     let mut excluded: HashSet<TrackId> = HashSet::new();
 
     // Disliked tracks, directly.
-    match ratings.disliked_ids(RatedKind::Track).await {
+    match ratings.disliked_ids(user_id, RatedKind::Track).await {
         Ok(ids) => excluded.extend(ids.into_iter().map(TrackId::from)),
         Err(err) => {
             tracing::warn!(error = %err, "disliked-track lookup failed; recommending without track dislike exclusion");
@@ -1978,21 +2023,23 @@ async fn disliked_exclusions(state: &AppState) -> HashSet<TrackId> {
     // Disliked albums / artists → expand to their member tracks via the
     // metadata cache (indexed on album_id / artist_id).
     let metadata = state.metadata_store();
-    expand_disliked_parents(ratings, RatedKind::Album, metadata, &mut excluded).await;
-    expand_disliked_parents(ratings, RatedKind::Artist, metadata, &mut excluded).await;
+    expand_disliked_parents(ratings, user_id, RatedKind::Album, metadata, &mut excluded).await;
+    expand_disliked_parents(ratings, user_id, RatedKind::Artist, metadata, &mut excluded).await;
 
     excluded
 }
 
 /// Fold the tracks of every disliked album-or-artist (per `kind`) into
-/// `excluded`. Each step degrades to a warn-and-skip on error.
+/// `excluded`. Each step degrades to a warn-and-skip on error. Scoped to
+/// the room's host `user_id` (PR E).
 async fn expand_disliked_parents(
     ratings: &music_recommend::RatingStore,
+    user_id: i64,
     kind: RatedKind,
     metadata: &MetadataStore,
     excluded: &mut HashSet<TrackId>,
 ) {
-    let parent_ids = match ratings.disliked_ids(kind).await {
+    let parent_ids = match ratings.disliked_ids(user_id, kind).await {
         Ok(ids) if !ids.is_empty() => ids.into_iter().collect::<Vec<_>>(),
         Ok(_) => return,
         Err(err) => {
@@ -2036,7 +2083,7 @@ async fn affinity_bonuses(
     // Always-on durable-like boost.
     match rescore
         .ratings
-        .liked_bonus_many(candidate_ids, rescore.like_bonus)
+        .liked_bonus_many(rescore.user_id, candidate_ids, rescore.like_bonus)
         .await
     {
         Ok(map) => {
@@ -2080,7 +2127,7 @@ async fn affinity_bonuses(
     if let Some(p) = &rescore.pref {
         match p
             .store
-            .affinity_many(candidate_ids, p.now_ms, p.params.half_life_ms)
+            .affinity_many(p.user_id, candidate_ids, p.now_ms, p.params.half_life_ms)
             .await
         {
             Ok(map) => {
