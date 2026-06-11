@@ -2,7 +2,7 @@
 
 **Path:** `crates/music-core/`
 **Type:** library, no I/O
-**Test count:** 19
+**Test count:** 24
 
 Pure domain types. Other crates depend on these and convert their
 wire formats (Subsonic JSON, gateway responses, sync ops) into them.
@@ -14,8 +14,8 @@ and `thiserror`.
 | Module | Exports |
 |---|---|
 | `ids` | Newtype IDs: `TrackId`, `AlbumId`, `ArtistId`, `QueueItemId`. All wrap `String`. |
-| `track` | `Track` — `id`, `title`, `artist`, `album`, `duration`, … |
-| `album` | `Album` — `id`, `name`, `artist`, `year`, `track_count`, … |
+| `track` | `Track` — `id`, `title`, `artist`, `album`, `duration`, plus optional upstream metadata: `year`, `genre`, `play_count`, `played_at` (all `Option`, `skip_serializing_if` — older servers omit them). |
+| `album` | `Album` — `id`, `name`, `artist`, `year`, `track_count`, plus optional `play_count` / `played_at` mirroring `Track`'s caveats. |
 | `artist` | `Artist` — `id`, `name`, `album_count`. |
 | `queue` | `Queue`, `QueueItem`. The queue carries `current_index` so seeking is a single op. |
 | `playback` | `PlaybackState` — `track_id`, `position_ms`, `playing`. |
@@ -91,5 +91,7 @@ scripts, anywhere.
 - Serde round-trips for every public type.
 - Equality semantics (especially around `Queue::current_index`).
 - ID newtype `From<&str>` / `as_str` / `into_inner` conversions.
+- The optional metadata fields (`year`, `genre`, `play_count`,
+  `played_at`) deserializing as `None` when upstream omits them.
 
-19 tests, all unit-level, all run in milliseconds.
+24 tests, all unit-level, all run in milliseconds.

@@ -27,6 +27,7 @@ import { evaluateScrobble, type ScrobbleState } from "./scrobble";
 import { evaluateSkip } from "./skip";
 import { isDislikedEntity, nextPlayableIndex } from "./autoSkip";
 import { useRatingsMaps } from "./useRatings";
+import { loadOutputEnabled, saveOutputEnabled } from "./outputDevice";
 
 interface PlayerCtx {
   /** The currently-playing item's metadata, if known. */
@@ -48,6 +49,13 @@ interface PlayerCtx {
    *  autoplay policy can refuse the deferred play(). Submitting the
    *  sync ops afterwards just confirms what we've already started. */
   primePlayback: (track: Track) => void;
+  /** Whether THIS device emits audio. When false the device is a silent
+   *  "remote control": it still sends play/pause/skip ops and reflects shared
+   *  state, but its <audio> element never plays — so two devices on the same
+   *  account can be one speaker + one remote instead of both playing. Local
+   *  to the device, persisted in localStorage. */
+  outputEnabled: boolean;
+  setOutputEnabled: (enabled: boolean) => void;
 }
 
 const Ctx = createContext<PlayerCtx | null>(null);
@@ -66,6 +74,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return a;
   });
   const audioRef = useRef<HTMLAudioElement>(audio);
+
+  // Per-device audio-output gate. When false this device is a silent remote:
+  // it drives shared state but its <audio> never plays. Read through a ref by
+  // the playback effects/listeners below (which have stable deps and run
+  // outside React's render) so flipping it doesn't force them to re-bind; the
+  // dedicated apply-effect on `outputEnabled` handles the live transition.
+  const [outputEnabled, setOutputEnabledState] = useState<boolean>(loadOutputEnabled);
+  const outputEnabledRef = useRef(outputEnabled);
+  useEffect(() => {
+    outputEnabledRef.current = outputEnabled;
+  }, [outputEnabled]);
+  const setOutputEnabled = useCallback((enabled: boolean) => {
+    setOutputEnabledState(enabled);
+    saveOutputEnabled(enabled);
+  }, []);
 
   // Active recommend-session id, read through a ref so the skip emitter
   // (stable `[]` deps, called synchronously at gesture sites) can stamp the
@@ -194,6 +217,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.pause();
       return;
     }
+    // Silent remote: don't pull this track's audio onto this device at all.
+    // The apply-effect on `outputEnabled` loads + plays if output is turned
+    // back on.
+    if (!outputEnabledRef.current) {
+      audio.pause();
+      return;
+    }
     // This effect fires from *applied sync state*, not a live click, so no
     // autoplay gesture is at stake — we can await the cache and prefer a
     // local blob (the offline-playback path). primePlayback handles the
@@ -318,13 +348,48 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     ]).catch(() => {});
   }, []);
 
-  // Reflect the play/pause flag.
+  // Reflect the play/pause flag. A silent remote (outputEnabled false) stays
+  // paused regardless of shared intent — it never makes sound.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (is_playing) void audio.play().catch(() => {});
+    if (outputEnabledRef.current && is_playing) void audio.play().catch(() => {});
     else audio.pause();
   }, [is_playing]);
+
+  // Live transition when the user flips the per-device output toggle. Turning
+  // it OFF silences this device at once (without broadcasting a pause — see the
+  // onPause guard). Turning it back ON loads the current track and resumes if
+  // the room is playing. Position isn't continuously synced across devices, so
+  // re-enabling starts the current track from the top on this device — the
+  // common flow is to set the toggle before playback, where this never bites.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (!outputEnabled) {
+      audio.pause();
+      return;
+    }
+    if (!is_playing || !currentTrackId) return;
+    let cancelled = false;
+    void (async () => {
+      const cachedUrl = await ensureUrl(currentTrackId);
+      if (cancelled) return;
+      const a = audioRef.current;
+      if (!a) return;
+      // Load the audio if the element isn't already pointed at a real source
+      // (a silent remote never set src; `src=""` resolves to the page URL).
+      if (!a.src || a.src === window.location.href) {
+        a.src = cachedUrl ?? streamUrl(currentTrackId);
+        startTsRef.current = performance.now();
+        notePlayed(currentTrackId);
+      }
+      void a.play().catch(() => {});
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [outputEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // External play/pause sync. Headphone media keys, OS media controls,
   // and the browser's tab-mute affordance all flip the <audio> element
@@ -345,9 +410,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const audio = audioRef.current;
     if (!audio) return;
     const onPlay = () => {
+      // A silent remote's element is decoupled from shared intent; don't let
+      // its (suppressed) transitions write back into the room.
+      if (!outputEnabledRef.current) return;
       if (!isPlayingRef.current) submit({ type: "set_playing", is_playing: true });
     };
     const onPause = () => {
+      // When this device is a silent remote, the pauses we trigger to keep it
+      // quiet must not broadcast — that would pause the actual speaker too.
+      if (!outputEnabledRef.current) return;
       // Ignore pauses that fire as a side-effect of `ended` — the auto-
       // advance handler will flip is_playing if we hit the queue tail, and
       // we don't want to race it here.
@@ -514,6 +585,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       hasNext: i !== null && i + 1 < queue.items.length,
       hasPrev: i !== null && i > 0,
       audio,
+      outputEnabled,
+      setOutputEnabled,
       togglePlay: () => submit({ type: "set_playing", is_playing: !is_playing }),
       next: () => {
         if (i !== null && i + 1 < queue.items.length) {
@@ -541,6 +614,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         // skip *before* clobbering src below (which resets currentTime).
         // Restarting the same track is not a skip.
         if (currentTrackId && currentTrackId !== track.id) maybeEmitSkip(currentTrackId);
+        // Silent remote: the click still drives the room (the caller submits
+        // the sync ops), but this device makes no sound — so skip the local
+        // load/play entirely. The direction/skip bookkeeping above still runs.
+        if (!outputEnabledRef.current) return;
         // Set src and play() *now*, while still inside the click handler's
         // synchronous user-gesture window. The track-change effect would
         // otherwise duplicate this work later (when set_now_playing's
@@ -577,6 +654,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     now_playing_index,
     submit,
     audio,
+    outputEnabled,
+    setOutputEnabled,
     currentTrackId,
     maybeEmitSkip,
     resolveSrc,

@@ -4,6 +4,7 @@
 // fill tints to match the page the user is on.
 
 import {
+  Cast,
   ListMusic,
   Pause,
   Play,
@@ -11,6 +12,7 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Speaker,
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
@@ -28,8 +30,18 @@ import { useRecommendationFeedback } from "./useRecommendationFeedback";
 import { VolumeControl } from "./VolumeControl";
 
 export function PlayerBar() {
-  const { nowPlaying, isPlaying, togglePlay, next, prev, hasNext, hasPrev, queueLength } =
-    usePlayer();
+  const {
+    nowPlaying,
+    isPlaying,
+    togglePlay,
+    next,
+    prev,
+    hasNext,
+    hasPrev,
+    queueLength,
+    outputEnabled,
+    setOutputEnabled,
+  } = usePlayer();
   const { palette } = useArtwork();
   const { path } = useRoute();
   const { autoplay, setAutoplay } = useAutoplay();
@@ -143,6 +155,23 @@ export function PlayerBar() {
       <div className="right-cluster">
         <EntityRating kind="track" id={nowPlaying.id} />
         <RecommendationFeedback trackId={nowPlaying.id} />
+        <button
+          className={`icon-btn ${outputEnabled ? "is-on" : ""}`}
+          onClick={() => setOutputEnabled(!outputEnabled)}
+          aria-label={outputEnabled ? "audio plays on this device" : "remote control only (silent)"}
+          aria-pressed={outputEnabled}
+          title={
+            outputEnabled
+              ? "Audio output: this device. Tap to make this a silent remote — playback continues on your other device."
+              : "Remote control only — this device is silent. Tap to play audio here too."
+          }
+        >
+          {outputEnabled ? (
+            <Speaker size={18} strokeWidth={1.5} />
+          ) : (
+            <Cast size={18} strokeWidth={1.5} />
+          )}
+        </button>
         <VolumeControl />
         <Link
           to="/queue"
