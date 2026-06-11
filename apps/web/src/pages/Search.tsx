@@ -33,7 +33,7 @@ const REST_LIMIT = 5;
 export function Search() {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle } = usePlayback();
+  const { playSingle, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query],
@@ -128,8 +128,19 @@ export function Search() {
             items={ranked.albums}
             restLimit={REST_LIMIT}
             seeAllHref={`/search/albums${qParam}`}
-            renderHero={(a) => <AlbumHeroCard key={a.id} album={a} />}
-            renderRest={(rest) => <AlbumTable albums={rest} />}
+            renderHero={(a) => (
+              <AlbumHeroCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
+            )}
+            renderRest={(rest) => (
+              <AlbumTable
+                albums={rest}
+                onPlayAlbum={(a) => void playAlbum(a.id)}
+              />
+            )}
           />
         );
         // Two-column wrap only when both buckets have content. Otherwise

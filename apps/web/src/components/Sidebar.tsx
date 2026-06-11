@@ -13,6 +13,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { createPlaylist, listPlaylists } from "../api/playlists";
 import { Link, navigate, useRoute } from "../router";
+import { useToast } from "../toast/ToastContext";
 import { BrandMark } from "./BrandMark";
 
 interface SubItem {
@@ -134,6 +135,7 @@ export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
   }
 
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [creating, setCreating] = useState(false);
   // Shared cache key with TrackRowMenu's playlist picker — both surfaces
   // refetch via the same `["playlists"]` invalidation after a create or
@@ -163,7 +165,9 @@ export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
         navigate(`/playlists/${created.id}`);
       }
     } catch (e) {
-      window.alert(`couldn't create playlist: ${(e as Error).message}`);
+      toast(`couldn't create playlist: ${(e as Error).message}`, {
+        variant: "error",
+      });
     } finally {
       setCreating(false);
     }

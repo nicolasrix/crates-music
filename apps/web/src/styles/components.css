@@ -53,6 +53,24 @@ body {
 }
 .shell > .player { grid-area: player; }
 
+/* Page-level artwork wash on detail pages. Two stops, two hues: the
+   primary tint at the top, drifting toward the cover's secondary hue
+   (when it has one ≥50° away) before fading out. Fixed pixel height —
+   not viewport-relative — so once content scrolls past it, everything
+   sits on plain --surface-0 and sticky chrome (topbar, thead) blends
+   against a stable background. */
+.shell > main.has-art {
+  background:
+    linear-gradient(
+        to bottom,
+        color-mix(in oklab, var(--art-glow) 38%, var(--art-bg)) 0%,
+        color-mix(in oklab, var(--art-bg2) 55%, transparent) 55%,
+        transparent 100%
+      )
+      top / 100% 640px no-repeat,
+    var(--surface-0);
+}
+
 /* Topbar inside main — sticky 56px. */
 .topbar {
   position: sticky;
@@ -192,12 +210,79 @@ body {
 /* Detail-page hero. */
 .hero {
   padding: var(--space-7) var(--space-7) var(--space-6);
+  /* Bold artwork band. The primary glow fills the space to the right of
+     the cover (radial centered top-right, well past the cover's column);
+     the secondary hue answers from the bottom-left so two-hue covers get
+     a diagonal conversation, single-hue covers a single field. Radials —
+     not a linear band — so the color melts into the page wash below with
+     no hard bottom edge. Text on top is pinned --art-fg/--art-mute, so
+     the glow tier can run at full chroma without a legibility cost.
+     `background-color` stays transparent so the page-level main.has-art
+     gradient shows through underneath. */
   background:
-    radial-gradient(120% 80% at 0% 0%, color-mix(in oklab, var(--art-bg) 60%, transparent) 0%, transparent 70%),
-    var(--surface-0);
+    radial-gradient(130% 160% at 82% 0%,
+      color-mix(in oklab, var(--art-glow) 88%, transparent) 0%,
+      color-mix(in oklab, var(--art-glow) 50%, transparent) 48%,
+      transparent 78%),
+    radial-gradient(90% 120% at 8% 100%,
+      color-mix(in oklab, var(--art-glow2, var(--art-glow)) 45%, transparent) 0%,
+      transparent 70%);
   display: flex;
   gap: var(--space-6);
   align-items: flex-end;
+  position: relative;
+  z-index: 1;
+}
+/* Blurred-artwork backdrop (HeroBackdrop.tsx) — sits between the hero's
+   glow-radial background and its content. Three sub-layers:
+     img      — the cover, blown up + blurred + oversaturated
+     ::before — film grain (SVG turbulence), kills gradient banding
+     ::after  — scrim pinned to --art-bg so the fixed-L text roles keep
+                their contrast no matter how bright the cover is
+   The whole layer dissolves downward via mask-image, so the hero hands
+   off to the page wash with no seam and no color math at the boundary.
+   The blur filter MUST stay on the img inside this clipped container —
+   a filter on .hero itself would become the containing block for any
+   position:fixed descendant (see TrackRowMenu's portal comment). */
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.85) 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.85) 55%, transparent 100%);
+}
+.hero-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Scale hides the blur's transparent edge bleed inside the clip. */
+  transform: scale(1.5);
+  filter: blur(64px) saturate(1.5);
+  opacity: var(--art-backdrop-opacity, 0.55);
+}
+.hero-backdrop::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+  mix-blend-mode: overlay;
+  opacity: 0.45;
+}
+.hero-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* Slightly heavier on the left, where the title/meta column lives. */
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--art-bg) 50%, transparent) 0%,
+    color-mix(in oklab, var(--art-bg) 28%, transparent) 55%,
+    color-mix(in oklab, var(--art-bg) 38%, transparent) 100%
+  );
+}
+/* Hero content paints above the backdrop. */
+.hero > :not(.hero-backdrop) {
   position: relative;
   z-index: 1;
 }
@@ -467,18 +552,52 @@ a.tile-title:hover {
   background-color: var(--surface-2);
 }
 
-/* Tinted wash on detail pages — vertical fade from --art-bg to transparent. */
-.tinted-wash {
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 320px;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in oklab, var(--art-bg) 60%, transparent) 0%,
-    transparent 100%
-  );
-  z-index: 0;
+/* Artwork influence on interactive elements — scoped to has-art pages so
+   chrome-only pages keep the neutral hover language. All values run
+   through color-mix against the existing neutrals: the tint shifts the
+   temperature of a state, it never replaces the state's lightness. */
+main.has-art .tracks tbody tr:hover {
+  /* Hover rows borrow the glow tier (diluted — they carry body text). */
+  background: color-mix(in oklab, var(--art-glow) 22%, color-mix(in oklab, var(--surface-2) 60%, transparent));
+}
+main.has-art .tracks thead th {
+  /* Match the washed page behind the sticky header — a plain surface-0
+     strip would band against the tint while the table is still inside
+     the wash's 640px. */
+  background: color-mix(in oklab, var(--art-bg) 18%, color-mix(in oklab, var(--surface-0) 92%, transparent));
+  border-bottom-color: color-mix(in oklab, var(--art-accent, var(--accent)) 30%, var(--border-subtle));
+}
+/* Track numbers pick up the album accent — they're an index, not body
+   text, so they can afford color where titles can't. */
+main.has-art .tracks .col-num .num-text {
+  color: color-mix(in oklab, var(--art-accent, var(--accent)) 60%, var(--fg-muted));
+}
+main.has-art .icon-btn:hover {
+  color: var(--art-fg);
+  background: color-mix(in oklab, var(--art-glow) 30%, var(--surface-2));
+}
+main.has-art .section-more:hover {
+  color: var(--art-accent, var(--accent));
+}
+/* Hero cards (similar artists / search heroes) on tinted pages become
+   color surfaces: primary glow sweeping to the secondary hue. Their text
+   is --fg on a glow-diluted surface-2, so dilution percentages are the
+   guardrail here. Inset ring instead of a border so layout doesn't shift. */
+main.has-art .search-hero {
+  background: linear-gradient(115deg,
+    color-mix(in oklab, var(--art-glow) 32%, var(--surface-2)) 0%,
+    color-mix(in oklab, var(--art-glow2, var(--art-glow)) 14%, var(--surface-2)) 100%);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--art-glow) 35%, transparent);
+}
+main.has-art .search-hero:hover {
+  background: linear-gradient(115deg,
+    color-mix(in oklab, var(--art-glow) 48%, var(--surface-2)) 0%,
+    color-mix(in oklab, var(--art-glow2, var(--art-glow)) 26%, var(--surface-2)) 100%);
+}
+/* Album tiles on tinted pages (artist discography) glow on hover —
+   layered on top of the normal pop shadow, not replacing it. */
+main.has-art .tile:hover .tile-cover {
+  box-shadow: var(--shadow-pop), 0 10px 32px color-mix(in oklab, var(--art-glow) 60%, transparent);
 }
 
 /* Hero filled play disc on detail pages. Reads --art-accent so it tints. */
@@ -487,7 +606,7 @@ a.tile-title:hover {
   height: 56px;
   border-radius: var(--radius-2);
   background: var(--art-accent, var(--accent));
-  color: var(--on-accent);
+  color: var(--art-on-accent, var(--on-accent));
   border: 0;
   cursor: pointer;
   display: flex;
@@ -552,6 +671,30 @@ a.tile-title:hover {
 /* Circular variant for artist photos — mirrors the ArtistHeroCard
    convention so the hero strip and table views match. */
 .cover-thumb.is-circle { border-radius: var(--radius-full); }
+/* Cover thumb as a play button (AlbumTable rows given onPlayAlbum).
+   Mirrors .search-hero-play: dimmed overlay + glyph on row hover or
+   focus; revealed at rest on touch in the (hover: none) block below. */
+button.cover-thumb {
+  position: relative;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out-soft);
+}
+.tracks tbody tr:hover .thumb-play,
+button.cover-thumb:focus-visible .thumb-play {
+  opacity: 1;
+}
 /* When the cover is the leading column (e.g. ArtistTable, which has
    no row-number cell to provide a left gutter), restore the table's
    normal left padding so the thumbnail doesn't sit flush against
@@ -665,6 +808,45 @@ a.tile-title:hover {
   padding: 8px 10px;
   font-size: var(--text-xs);
   color: var(--fg-faint);
+}
+
+/* Toast stack (ToastContext). Bottom-center, floating above the player
+   bar. pointer-events split: the viewport ignores clicks (it spans the
+   width for centering), each toast accepts them (tap to dismiss). */
+.toast-viewport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--player-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 110; /* above .row-menu (100) — a toast can announce a menu action */
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-pop);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  animation: toast-in var(--dur-2) var(--ease-out-soft);
+}
+.toast.is-success { border-color: color-mix(in oklab, var(--success) 40%, var(--border-subtle)); }
+.toast.is-error {
+  border-color: color-mix(in oklab, var(--danger) 50%, var(--border-subtle));
+  color: var(--danger);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* Queue row's per-item action cluster (move-up / move-down / remove). */
@@ -846,6 +1028,12 @@ a.tile-title:hover {
   backdrop-filter: blur(20px);
   border-top: 1px solid var(--border-subtle);
   height: var(--player-h);
+}
+/* The bar carries the *playing* track's tint (mounted by PlayerBar via
+   artAttrs), independent of whichever page is open above it. */
+.player.has-art {
+  background: color-mix(in oklab, var(--art-bg) 30%, color-mix(in oklab, var(--surface-0) 88%, transparent));
+  border-top-color: color-mix(in oklab, var(--art-bg) 35%, var(--border-subtle));
 }
 .np {
   display: flex;
@@ -1558,6 +1746,20 @@ a.search-hero-title:hover {
      which never fires on touch. Show them at rest. */
   .tile-play { opacity: 1; transform: translateY(0); }
   .row-menu-trigger { opacity: 1; }
+  /* Queue rows gate remove-✕ / reorder behind tr:hover; a child's
+     opacity can't beat the parent's 0, so the cluster itself must be
+     un-hidden here — it's the only reorder/remove path on phones. */
+  .queue-row-actions { opacity: 1; }
+  /* Hero-card / table-thumb play glyphs too — but drop the dimming
+     wash (a permanent 50% black film over every cover reads as
+     broken art on phones); a drop shadow keeps the glyph legible
+     over busy artwork. */
+  .search-hero-play,
+  .thumb-play {
+    opacity: 1;
+    background: transparent;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+  }
 }
 
 @media (pointer: coarse) {
@@ -1685,6 +1887,11 @@ a.search-hero-title:hover {
   .transport-col .scrub { grid-area: scrub; }
   .right-cluster { grid-area: extra; }
   .np .cover { width: 40px; height: 40px; }
+  /* The two-row player is height:auto here, so --player-h understates
+     it — pin the toast stack above the real-world worst case. */
+  .toast-viewport {
+    bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+  }
   /* Squeeze-outs: the now-playing ⋯-menu (same actions are on every
      row), the rate-rec / rating pills (hidden at ≤900px already), the
      volume slider, and the perpetually-disabled repeat button. */

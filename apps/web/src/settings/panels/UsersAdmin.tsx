@@ -3,7 +3,7 @@
 // Account panel when `useIsAdmin()` is true; the gateway independently
 // 403s these calls for non-admins, so this is convenience, not security.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Trash2, UserPlus, Users } from "lucide-react";
 
@@ -191,12 +191,22 @@ function UserRow({
   onChanged: () => void;
 }) {
   const [resetting, setResetting] = useState(false);
+  // Two-step delete: first tap arms, second tap within the window fires.
+  // Deliberately not window.confirm — iOS standalone PWAs can suppress it,
+  // which would turn "confirm" into "silently never deletes".
+  const [confirming, setConfirming] = useState(false);
   const isOwner = user.id === 1;
 
   const del = useMutation({
     mutationFn: () => deleteUser(user.id),
     onSuccess: onChanged,
   });
+
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirming]);
 
   return (
     <div
@@ -231,9 +241,20 @@ function UserRow({
       </SettingsButton>
       {/* The owner can't be deleted (the gateway also enforces this). */}
       {!isOwner && (
-        <SettingsButton danger onClick={() => del.mutate()}>
+        <SettingsButton
+          danger
+          onClick={() => {
+            if (del.isPending) return;
+            if (confirming) {
+              setConfirming(false);
+              del.mutate();
+            } else {
+              setConfirming(true);
+            }
+          }}
+        >
           <Trash2 size={14} strokeWidth={1.5} />
-          {del.isPending ? "…" : "delete"}
+          {del.isPending ? "…" : confirming ? "really delete?" : "delete"}
         </SettingsButton>
       )}
       {del.isError && (

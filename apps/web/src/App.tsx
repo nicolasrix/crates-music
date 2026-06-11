@@ -2,7 +2,6 @@ import { ComponentType, useEffect } from "react";
 
 import { useAuth } from "./auth/AuthContext";
 import { AudioCacheProvider } from "./cache/AudioCacheContext";
-import { ArtworkProvider } from "./components/ArtworkPalette";
 import { Album } from "./pages/Album";
 import { Albums } from "./pages/Albums";
 import { Artist } from "./pages/Artist";
@@ -41,6 +40,7 @@ import { PlaybackPanel } from "./settings/panels/PlaybackPanel";
 import { StoragePanel } from "./settings/panels/StoragePanel";
 import { SettingsShell } from "./settings/SettingsShell";
 import { SyncProvider } from "./sync/SyncContext";
+import { ToastProvider } from "./toast/ToastContext";
 
 export function App() {
   const { path } = useRoute();
@@ -54,20 +54,22 @@ export function App() {
   if (!tokens) return <SignIn />;
 
   return (
-    <SyncProvider>
-      <AudioCacheProvider>
-        <PlayerProvider>
-          <AutoplayProvider>
-            <ArtworkProvider>
+    // ToastProvider sits outside SyncProvider so the sync layer can
+    // surface rejected ops (`op_error`) as toasts.
+    <ToastProvider>
+      <SyncProvider>
+        <AudioCacheProvider>
+          <PlayerProvider>
+            <AutoplayProvider>
               <div className="shell">
                 <Routed path={path} />
                 <PlayerBar />
               </div>
-            </ArtworkProvider>
-          </AutoplayProvider>
-        </PlayerProvider>
-      </AudioCacheProvider>
-    </SyncProvider>
+            </AutoplayProvider>
+          </PlayerProvider>
+        </AudioCacheProvider>
+      </SyncProvider>
+    </ToastProvider>
   );
 }
 

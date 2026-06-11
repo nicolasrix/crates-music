@@ -4,7 +4,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, Plus, Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { coverArtUrl } from "../api/client";
 import {
   addTrackToPlaylist,
@@ -15,11 +15,13 @@ import {
 import { suggestForPlaylist } from "../api/recommend";
 import { Cover } from "../components/Cover";
 import { DownloadAllButton } from "../components/DownloadAllButton";
+import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { navigate } from "../router";
 import { usePlayback } from "../sync/usePlayback";
+import { useToast } from "../toast/ToastContext";
 import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
 
@@ -32,11 +34,11 @@ export function Playlist({ id }: { id: string }) {
   // the playlist itself often lacks dedicated artwork.
   const seedCover =
     q.data?.tracks.find((t) => t.coverArt)?.coverArt ?? q.data?.playlist.coverArt;
-  const palette = useCoverPalette(
-    coverArtUrl(seedCover, 600, q.data?.playlist.name),
-  );
+  const cover = coverArtUrl(seedCover, 600, q.data?.playlist.name);
+  const palette = useCoverPalette(cover);
   const { playSingle, playList } = usePlayback();
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   // Lightweight dialogs — same prompt-based UX as new-playlist creation
   // in Sidebar. Once a proper modal primitive lands, swap these two and
@@ -54,16 +56,30 @@ export function Playlist({ id }: { id: string }) {
       await queryClient.invalidateQueries({ queryKey: ["playlist", id] });
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
     } catch (e) {
-      window.alert(`couldn't rename playlist: ${(e as Error).message}`);
+      toast(`couldn't rename playlist: ${(e as Error).message}`, {
+        variant: "error",
+      });
     }
   }
 
+  // Two-step delete (same pattern as admin delete-user): window.confirm
+  // is suppressed in iOS standalone PWAs, where it returns false — the
+  // delete would silently never fire on the installed app.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const t = setTimeout(() => setConfirmingDelete(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirmingDelete]);
+
   async function handleDelete() {
     if (!q.data) return;
-    const ok = window.confirm(
-      `delete playlist "${q.data.playlist.name}"? this can't be undone.`
-    );
-    if (!ok) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      toast(`tap delete again to remove “${q.data.playlist.name}”`);
+      return;
+    }
+    setConfirmingDelete(false);
     try {
       await deletePlaylist(id);
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
@@ -71,7 +87,9 @@ export function Playlist({ id }: { id: string }) {
       // the user staring at a deleted playlist's tracks.
       navigate("/");
     } catch (e) {
-      window.alert(`couldn't delete playlist: ${(e as Error).message}`);
+      toast(`couldn't delete playlist: ${(e as Error).message}`, {
+        variant: "error",
+      });
     }
   }
 
@@ -129,7 +147,7 @@ export function Playlist({ id }: { id: string }) {
           : s
       );
     } catch (e) {
-      window.alert(`couldn't add track: ${(e as Error).message}`);
+      toast(`couldn't add track: ${(e as Error).message}`, { variant: "error" });
     } finally {
       setAddingId(null);
     }
@@ -162,8 +180,8 @@ export function Playlist({ id }: { id: string }) {
 
   return (
     <Layout breadcrumb={`playlists · ${playlist.name}`} palette={palette}>
-      <div className="tinted-wash" />
       <div className="hero">
+        <HeroBackdrop url={cover} />
         <div className="cover-lg">
           <Quilt urls={quiltCovers} fallback={playlist.name} />
         </div>
@@ -209,9 +227,14 @@ export function Playlist({ id }: { id: string }) {
             <DownloadAllButton tracks={tracks} label="download playlist for offline" />
             <button
               className="icon-btn"
+              style={confirmingDelete ? { color: "var(--danger)" } : undefined}
               onClick={handleDelete}
-              aria-label="delete playlist"
-              title="delete playlist"
+              aria-label={
+                confirmingDelete ? "really delete playlist?" : "delete playlist"
+              }
+              title={
+                confirmingDelete ? "really delete playlist?" : "delete playlist"
+              }
             >
               <Trash2 size={18} strokeWidth={1.5} />
             </button>

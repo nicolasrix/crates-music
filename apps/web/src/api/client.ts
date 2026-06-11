@@ -149,6 +149,24 @@ export async function getArtist(id: string): Promise<ArtistWithAlbums> {
   return { artist, albums: album ?? [] };
 }
 
+// Per-artist top songs (Subsonic getTopSongs — Navidrome backs it with
+// play counts). An artist with no recorded plays can come back empty,
+// so callers need a fallback (see Artist.tsx's album-order fallback).
+export async function getTopSongs(
+  artistName: string,
+  count = 50
+): Promise<Track[]> {
+  const params = new URLSearchParams({
+    artist: artistName,
+    count: String(count),
+  });
+  const result = await getSubsonic<{ song?: Track[] }>(
+    `/rest/getTopSongs?${params.toString()}`,
+    "topSongs"
+  );
+  return result.song ?? [];
+}
+
 // Playlists moved off `/rest/*` to the gateway-owned `/v1/playlists/*`
 // store (user-system PR F). Their client wrappers — listPlaylists,
 // getPlaylist, createPlaylist, addTrackToPlaylist, renamePlaylist,

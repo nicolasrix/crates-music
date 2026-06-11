@@ -17,6 +17,7 @@ import {
 import { getSong } from "../api/client";
 import { Track } from "../api/types";
 import { readTokens } from "../auth/tokens";
+import { useToast } from "../toast/ToastContext";
 import { applyOp } from "./apply";
 import type { ClientMessage, ServerMessage, SyncOp, SyncState } from "./types";
 
@@ -53,6 +54,7 @@ const Ctx = createContext<SyncCtx | null>(null);
 export function SyncProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SyncState>(EMPTY);
   const [ready, setReady] = useState(false);
+  const toast = useToast();
   const wsRef = useRef<WebSocket | null>(null);
   // Ops submitted before the WS reaches OPEN are buffered here and
   // flushed on `onopen`. Without this, a user click that lands during
@@ -103,7 +105,10 @@ export function SyncProvider({ children }: { children: ReactNode }) {
         console.log("[sync] applied v=" + msg.version, "op=" + msg.op.type);
         setState((s) => applyOp(s, msg.op, msg.version));
       } else if (msg.type === "op_error") {
+        // A rejected op means an optimistic UI change silently reverted —
+        // tell the user why instead of leaving a mystery rollback.
         console.warn("[sync] op rejected:", msg.message);
+        toast(`sync: ${msg.message}`, { variant: "error" });
       }
     };
     ws.onclose = () => {
@@ -113,7 +118,9 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       ws.close();
       wsRef.current = null;
     };
-  }, [accessToken]);
+    // `toast` is referentially stable (useCallback in ToastProvider), so
+    // listing it doesn't churn the socket.
+  }, [accessToken, toast]);
 
   // Hydrate metadata for queue items we didn't push ourselves. trackMeta
   // is in-memory only, so after a page reload (the *normal* lifecycle for

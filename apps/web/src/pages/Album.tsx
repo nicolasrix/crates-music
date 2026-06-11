@@ -4,7 +4,7 @@
 // player bar) stays neutral by intent.
 
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { Plus, MoreHorizontal, Play, Sparkles } from "lucide-react";
+import { Plus, Play, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import { coverArtUrl, getAlbum, listArtists } from "../api/client";
 import {
@@ -20,11 +20,14 @@ import { EntityRating } from "../components/EntityRating";
 import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
 import { DownloadAllButton } from "../components/DownloadAllButton";
+import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { Link } from "../router";
+import { useSync } from "../sync/SyncContext";
 import { usePlayback } from "../sync/usePlayback";
+import { useToast } from "../toast/ToastContext";
 import { fmtDuration, fmtPlays, fmtRelativePast } from "../utils/format";
 import type { Album as AlbumType, Artist, Track } from "../api/types";
 
@@ -36,6 +39,8 @@ export function Album({ id }: { id: string }) {
   const cover = coverArtUrl(q.data?.album.coverArt, 600, q.data?.album.name);
   const palette = useCoverPalette(cover);
   const { playSingle, playList } = usePlayback();
+  const sync = useSync();
+  const toast = useToast();
 
   // Station state — surface "loading" / "not indexed" inline near the hero
   // actions row rather than as a toast, so the failure mode is co-located
@@ -108,8 +113,8 @@ export function Album({ id }: { id: string }) {
 
   return (
     <Layout breadcrumb={`albums · ${album.name}`} palette={palette}>
-      <div className="tinted-wash" />
       <div className="hero">
+        <HeroBackdrop url={cover} />
         <div className="cover-lg">
           <Cover
             coverArt={album.coverArt}
@@ -163,13 +168,22 @@ export function Album({ id }: { id: string }) {
             >
               <Sparkles size={18} strokeWidth={1.5} />
             </button>
-            <button className="icon-btn" aria-label="add to queue" title="add to queue">
+            <button
+              className="icon-btn"
+              onClick={() => {
+                for (const t of tracks) sync.pushTrack(t);
+                toast(
+                  `added ${tracks.length} track${tracks.length === 1 ? "" : "s"} to queue`,
+                  { variant: "success" },
+                );
+              }}
+              disabled={tracks.length === 0}
+              aria-label="add album to queue"
+              title="add album to queue"
+            >
               <Plus size={18} strokeWidth={1.5} />
             </button>
             <DownloadAllButton tracks={tracks} label="download album for offline" />
-            <button className="icon-btn" aria-label="more" title="more">
-              <MoreHorizontal size={18} strokeWidth={1.5} />
-            </button>
             <EntityRating kind="album" id={album.id} />
           </div>
           <StationStatus status={stationStatus} />
@@ -244,6 +258,7 @@ function SimilarSection({
   seedArtistId: string | null;
 }) {
   const hasSeeds = seedTrackIds.length > 0;
+  const { playAlbum } = usePlayback();
 
   const albumsQ = useQuery({
     queryKey: ["similar-albums", seedAlbumId],
@@ -322,12 +337,19 @@ function SimilarSection({
     hydratedAlbums.length > 0 ? (
       <SimilarBucket
         heading="similar albums"
-        hero={hydratedAlbums
-          .slice(0, TOP_HERO)
-          .map((a) => <AlbumHeroCard key={a.id} album={a} />)}
+        hero={hydratedAlbums.slice(0, TOP_HERO).map((a) => (
+          <AlbumHeroCard
+            key={a.id}
+            album={a}
+            onPlay={() => void playAlbum(a.id)}
+          />
+        ))}
         rest={
           hydratedAlbums.length > TOP_HERO ? (
-            <AlbumTable albums={hydratedAlbums.slice(TOP_HERO)} />
+            <AlbumTable
+              albums={hydratedAlbums.slice(TOP_HERO)}
+              onPlayAlbum={(a) => void playAlbum(a.id)}
+            />
           ) : null
         }
       />

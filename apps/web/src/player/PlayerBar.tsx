@@ -17,7 +17,8 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { useArtwork } from "../components/ArtworkPalette";
+import { artAttrs, useCoverPalette } from "../components/ArtworkPalette";
+import { coverArtUrl } from "../api/client";
 import { Cover } from "../components/Cover";
 import { EntityRating } from "../components/EntityRating";
 import { TrackRowMenu } from "../components/TrackRowMenu";
@@ -42,7 +43,14 @@ export function PlayerBar() {
     outputEnabled,
     setOutputEnabled,
   } = usePlayer();
-  const { palette } = useArtwork();
+  // Tint the bar from the *playing* track's cover — not the page being
+  // browsed. Same 600px URL as the detail pages, so the palette query
+  // cache is shared with them.
+  const palette = useCoverPalette(
+    nowPlaying
+      ? coverArtUrl(nowPlaying.coverArt, 600, nowPlaying.album ?? nowPlaying.title)
+      : null,
+  );
   const { path } = useRoute();
   const { autoplay, setAutoplay } = useAutoplay();
   const onQueuePage = path === "/queue";
@@ -60,10 +68,10 @@ export function PlayerBar() {
     );
   }
 
-  const artAccent = palette?.accent ?? "var(--accent)";
+  const art = artAttrs(palette);
 
   return (
-    <div className="player" style={{ ["--art-accent" as never]: artAccent }}>
+    <div className={`player ${art.className}`} style={art.style}>
       <div className="np">
         <div className="cover">
           <Cover

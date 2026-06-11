@@ -8,6 +8,7 @@ import { useState } from "react";
 
 import { useAudioCache } from "../cache/AudioCacheContext";
 import { formatBytes } from "../cache/format";
+import { useToast } from "../toast/ToastContext";
 import type { Track } from "../api/types";
 
 export function DownloadAllButton({
@@ -18,30 +19,45 @@ export function DownloadAllButton({
   label?: string;
 }) {
   const cache = useAudioCache();
+  const toast = useToast();
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   async function downloadAll() {
     if (progress || tracks.length === 0) return;
     setProgress({ done: 0, total: tracks.length });
     let budgetHit = false;
+    let failed = 0;
     for (let i = 0; i < tracks.length; i++) {
       try {
         const outcome = await cache.download(tracks[i]!.id);
         if (outcome.kind === "would-exceed-budget") {
           budgetHit = true;
-          window.alert(
+          toast(
             `Download budget full — short by ${formatBytes(outcome.overBy)}. ` +
               `Raise it in Settings to finish.`,
+            { variant: "error" },
           );
           break;
         }
       } catch {
-        /* skip tracks that fail to fetch (offline / catalog gap) */
+        // Tolerate per-track failures (offline / catalog gap) but count
+        // them — completing "N/N" while tracks are missing lies to the
+        // user about what's actually playable offline.
+        failed++;
       }
       setProgress({ done: i + 1, total: tracks.length });
     }
     setProgress(null);
-    void budgetHit;
+    if (!budgetHit) {
+      if (failed > 0) {
+        toast(
+          `saved ${tracks.length - failed}/${tracks.length} for offline — ${failed} failed`,
+          { variant: "error" },
+        );
+      } else {
+        toast(`${tracks.length} tracks saved for offline`, { variant: "success" });
+      }
+    }
   }
 
   return (

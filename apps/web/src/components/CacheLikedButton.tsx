@@ -18,6 +18,7 @@ import { useState } from "react";
 import { getAlbum, getArtist } from "../api/client";
 import { getRatings } from "../api/library";
 import { useAudioCache } from "../cache/AudioCacheContext";
+import { useToast } from "../toast/ToastContext";
 
 /** Resolve every liked song + liked-album track + liked-artist-album track
  *  into a deduped list of track ids. Individual album/artist lookups that fail
@@ -59,6 +60,7 @@ type Phase =
 
 export function CacheLikedButton() {
   const cache = useAudioCache();
+  const toast = useToast();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
   async function run() {
@@ -70,12 +72,14 @@ export function CacheLikedButton() {
       ids = await collectLikedTrackIds();
     } catch {
       setPhase({ kind: "idle" });
-      window.alert("Couldn't load your liked items — check your connection and try again.");
+      toast("Couldn't load your liked items — check your connection and try again.", {
+        variant: "error",
+      });
       return;
     }
     if (ids.length === 0) {
       setPhase({ kind: "idle" });
-      window.alert("Nothing liked yet — like some songs, albums, or artists first.");
+      toast("Nothing liked yet — like some songs, albums, or artists first.");
       return;
     }
 
