@@ -47,7 +47,7 @@ export function LikedSongs() {
     },
     staleTime: 30_000,
   });
-  const { playList } = usePlayback();
+  const { playList, playAlbum } = usePlayback();
   const tracks: Track[] = q.data?.tracks ?? [];
   const albums: Album[] = q.data?.albums ?? [];
   const artists: Artist[] = q.data?.artists ?? [];
@@ -85,7 +85,11 @@ export function LikedSongs() {
           </div>
           <div className="tile-grid">
             {albums.map((a) => (
-              <AlbumCard key={a.id} album={a} />
+              <AlbumCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
             ))}
           </div>
         </div>

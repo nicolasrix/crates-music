@@ -40,7 +40,7 @@ const EXPANDED_OPTS = {
 export function SearchBucket({ bucket }: { bucket: BucketKind }) {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle } = usePlayback();
+  const { playSingle, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query, "expanded"],
@@ -120,7 +120,10 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
 
       {bucket === "albums" && items.length > 0 && (
         <div className="section">
-          <AlbumTable albums={ranked!.albums} />
+          <AlbumTable
+            albums={ranked!.albums}
+            onPlayAlbum={(a) => void playAlbum(a.id)}
+          />
         </div>
       )}
 

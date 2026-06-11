@@ -2,11 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { listAlbums, listAllAlbums } from "../api/client";
 import { AlbumCard } from "../components/AlbumCard";
 import { Layout } from "../components/Layout";
+import { usePlayback } from "../sync/usePlayback";
 import { ListMode, MODE_ALBUM_TYPE, MODE_LABEL } from "./listMode";
 
 const HIGHLIGHT_SIZE = 60;
 
 export function Albums({ mode = "all" }: { mode?: ListMode }) {
+  const { playAlbum } = usePlayback();
   const subsonicType = MODE_ALBUM_TYPE[mode];
   // "all" paginates through the entire alphabetical listing; sub-modes
   // are bounded "highlight" views (top 60 by their respective ordering).
@@ -53,7 +55,11 @@ export function Albums({ mode = "all" }: { mode?: ListMode }) {
         {q.data && q.data.length > 0 && (
           <div className="tile-grid">
             {q.data.map((a) => (
-              <AlbumCard key={a.id} album={a} />
+              <AlbumCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
             ))}
           </div>
         )}
