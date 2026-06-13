@@ -9,6 +9,9 @@ export interface Album {
   songCount?: number;
   duration?: number;
   year?: number;
+  /** Album-level genre tag as reported by Subsonic. Single string (the
+   *  first/primary genre); albums with no genre tag omit it. */
+  genre?: string;
   coverArt?: string;
   /** Aggregate play count across the album's tracks. OpenSubsonic
    *  extension; older servers omit it. Source of truth lives upstream

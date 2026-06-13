@@ -7,6 +7,7 @@ import { Albums } from "./pages/Albums";
 import { Artist } from "./pages/Artist";
 import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
+import { Crates } from "./pages/Crates";
 import { Downloads } from "./pages/Downloads";
 import { Ingest } from "./pages/diagnostics/Ingest";
 import { Listening } from "./pages/diagnostics/Listening";
@@ -98,6 +99,7 @@ function Routed({ path }: { path: string }) {
   m = path.match(/^\/playlists\/([^/]+)$/);
   if (m && m[1]) return <Playlist id={m[1]} />;
 
+  if (path === "/crates") return <Crates />;
   if (path === "/search") return <Search />;
   if (path === "/search/artists") return <SearchBucket bucket="artists" />;
   if (path === "/search/albums") return <SearchBucket bucket="albums" />;

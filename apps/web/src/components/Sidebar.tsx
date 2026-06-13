@@ -8,7 +8,7 @@
 // below the parent. Sub-items match the URL exactly; the parent stays
 // active for any sub-page (via `prefix`).
 
-import { Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Search, Plus, SlidersHorizontal } from "lucide-react";
+import { Boxes, Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { createPlaylist, listPlaylists } from "../api/playlists";
@@ -61,6 +61,11 @@ const BROWSE: NavItem[] = [
     icon: <ListMusic size={18} strokeWidth={1.5} />,
     prefix: "/tracks",
     subs: SECTION_SUBS.map((s) => ({ to: `/tracks${s.to}`, label: s.label })),
+  },
+  {
+    to: "/crates",
+    label: "crates",
+    icon: <Boxes size={18} strokeWidth={1.5} />,
   },
   {
     to: "/liked",
