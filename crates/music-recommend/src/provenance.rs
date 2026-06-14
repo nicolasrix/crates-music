@@ -22,6 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
+use music_core::TrackId;
+
 use crate::Result;
 
 /// Which endpoint produced a recommendation. Stringly-typed in the DB
@@ -248,6 +250,34 @@ impl RecommendationLogStore {
             .await?;
         let n: i64 = row.get("n");
         Ok(u64::try_from(n.max(0)).unwrap_or(0))
+    }
+
+    /// Distinct track ids served to `user_id` at or after `since_ms` from
+    /// the *track-valued* recommendation kinds (`next`, `from_seeds`,
+    /// `from_any`, `station`). Powers the autoplay serve-cooldown: a track
+    /// offered recently — whether or not the listener played it — is
+    /// suppressed from the next few refills, so a deterministic pipeline
+    /// stops re-offering the same narrow head of the catalogue. The
+    /// album-/artist-valued kinds (`similar_albums`, `similar_artists`) are
+    /// excluded because their `entity_id`s are not track ids and would
+    /// poison a track exclusion set.
+    pub async fn served_since(&self, user_id: i64, since_ms: i64) -> Result<Vec<TrackId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ri.entity_id
+                 FROM recommendation r
+                 JOIN recommendation_item ri ON ri.recommendation_id = r.id
+                 WHERE r.user_id = ?
+                   AND r.served_ms >= ?
+                   AND r.kind IN ('next', 'from_seeds', 'from_any', 'station')",
+        )
+        .bind(user_id)
+        .bind(since_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TrackId::from(r.get::<String, _>("entity_id")))
+            .collect())
     }
 
     /// Most recent `limit` recommendations, newest first, with their
@@ -477,6 +507,46 @@ mod tests {
         assert_eq!(got.result_count, 0);
         assert!(got.degraded);
         assert!(got.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn served_since_filters_by_user_window_and_kind() {
+        let store = store().await;
+        let mk = |kind, ids: &[&str]| RecommendationRecord {
+            kind,
+            session_id: None,
+            model_version: "m".into(),
+            seeds: Some(vec!["s".into()]),
+            text_query: None,
+            params: json!({}),
+            degraded: false,
+            items: ids
+                .iter()
+                .map(|i| RecommendationItemRecord::new(*i, Some(0.5)))
+                .collect(),
+        };
+        // user 1: a track-valued slate + an artist-valued slate.
+        store
+            .record(1, &mk(RecommendationKind::FromSeeds, &["t1", "t2"]))
+            .await
+            .unwrap();
+        store
+            .record(1, &mk(RecommendationKind::SimilarArtists, &["artistX"]))
+            .await
+            .unwrap();
+        // user 2: served t3 — must not leak into user 1's cooldown.
+        store
+            .record(2, &mk(RecommendationKind::FromSeeds, &["t3"]))
+            .await
+            .unwrap();
+
+        let mut got = store.served_since(1, 0).await.unwrap();
+        got.sort();
+        // t1,t2 in (track-valued, own user); artistX out (wrong kind); t3 out (other user).
+        assert_eq!(got, vec![TrackId::from("t1"), TrackId::from("t2")]);
+
+        // A future cutoff excludes everything (served_ms < since_ms).
+        assert!(store.served_since(1, i64::MAX).await.unwrap().is_empty());
     }
 
     async fn insert_event(

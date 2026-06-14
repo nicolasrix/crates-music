@@ -14,6 +14,7 @@ pub mod aggregate;
 pub mod ann;
 pub mod embedder;
 pub mod events;
+pub mod explore;
 pub mod feedback;
 pub mod ingest;
 pub mod leash;

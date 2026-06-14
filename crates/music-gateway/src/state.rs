@@ -308,6 +308,29 @@ impl AppState {
         }
     }
 
+    /// Autoplay recency-exclusion window in milliseconds, or `None` when the
+    /// feature is disabled (`recently_played_exclude_hours <= 0`). Tracks
+    /// played within this window are hard-excluded from recommendation
+    /// candidates. `Some(ms)` is the lookback the handler subtracts from now.
+    pub fn recently_played_exclude_ms(&self) -> Option<i64> {
+        hours_to_ms(self.inner.config.recommend.recently_played_exclude_hours)
+    }
+
+    /// Autoplay serve-cooldown window in milliseconds, or `None` when disabled
+    /// (`served_cooldown_hours <= 0`). Tracks served within this window are
+    /// suppressed from the next refills. Only meaningful when provenance
+    /// logging is on — see [`Self::provenance_enabled`].
+    pub fn served_cooldown_ms(&self) -> Option<i64> {
+        hours_to_ms(self.inner.config.recommend.served_cooldown_hours)
+    }
+
+    /// Exploration temperature for the final autoplay pick (Gumbel-max
+    /// sampling). `0` (or negative) ⇒ deterministic argmax. See
+    /// [`music_recommend::explore`].
+    pub fn explore_temperature(&self) -> f32 {
+        self.inner.config.recommend.explore_temperature
+    }
+
     /// Affinity decay half-life (ms) from config. Available regardless of
     /// `preference_enabled`: the affinity counter is captured on every
     /// play / skip / vote so the feature has full history the moment it's
@@ -356,4 +379,17 @@ impl AppState {
     pub fn placeholder_revalidations(&self) -> &Mutex<HashMap<String, Instant>> {
         &self.inner.placeholder_revalidations
     }
+}
+
+/// Convert an hours knob into a millisecond window, or `None` when the knob
+/// is zero/negative (feature disabled). Centralised so the recency-exclusion
+/// and serve-cooldown accessors share one rounding rule.
+fn hours_to_ms(hours: f32) -> Option<i64> {
+    if hours <= 0.0 {
+        return None;
+    }
+    // Realistic config values (single- to double-digit hours) are far inside
+    // i64 ms range; the truncation the lint warns about can't occur here.
+    #[allow(clippy::cast_possible_truncation)]
+    Some((f64::from(hours) * 3_600_000.0) as i64)
 }

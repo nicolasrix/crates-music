@@ -49,6 +49,16 @@ Optional env (with defaults):
     RECOMMEND_LOG_PROVENANCE            (bool; gateway default true — capture
                                          served recommendations as model
                                          training data; false to disable)
+    RECOMMEND_RECENTLY_PLAYED_EXCLUDE_HOURS
+                                        (float >= 0; gateway default 4 —
+                                         autoplay: exclude recently-played
+                                         tracks from from-seeds; 0 disables)
+    RECOMMEND_SERVED_COOLDOWN_HOURS     (float >= 0; gateway default 2 —
+                                         autoplay: cooldown on recently-served
+                                         tracks; 0 disables)
+    RECOMMEND_EXPLORE_TEMPERATURE       (float >= 0; gateway default 0.15 —
+                                         autoplay: Gumbel sampling of the final
+                                         pick; 0 → deterministic argmax)
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
@@ -203,6 +213,20 @@ def build_config(env: Mapping[str, str]) -> str:
     # future ranking models. Set false to stop capturing (e.g. to bound
     # disk on a long-running deploy).
     log_provenance = _parse_bool(env, "RECOMMEND_LOG_PROVENANCE")
+    # Autoplay anti-repetition + exploration (gateway defaults 4h / 2h / 0.15).
+    # recently_played_exclude_hours and served_cooldown_hours hard-exclude
+    # recently-heard / recently-served tracks from from-seeds refills; 0
+    # disables either. explore_temperature samples the final pick from
+    # softmax(score/T) instead of a deterministic argmax; 0 → argmax.
+    recently_played_exclude_hours = _parse_float(
+        env, "RECOMMEND_RECENTLY_PLAYED_EXCLUDE_HOURS", non_negative=True
+    )
+    served_cooldown_hours = _parse_float(
+        env, "RECOMMEND_SERVED_COOLDOWN_HOURS", non_negative=True
+    )
+    explore_temperature = _parse_float(
+        env, "RECOMMEND_EXPLORE_TEMPERATURE", non_negative=True
+    )
 
     parts: list[str] = []
 
@@ -287,6 +311,14 @@ def build_config(env: Mapping[str, str]) -> str:
         recommend_lines.append(
             f"log_provenance = {'true' if log_provenance else 'false'}"
         )
+    if recently_played_exclude_hours is not None:
+        recommend_lines.append(
+            f"recently_played_exclude_hours = {recently_played_exclude_hours}"
+        )
+    if served_cooldown_hours is not None:
+        recommend_lines.append(f"served_cooldown_hours = {served_cooldown_hours}")
+    if explore_temperature is not None:
+        recommend_lines.append(f"explore_temperature = {explore_temperature}")
     if recommend_lines:
         parts.append("[recommend]")
         parts.extend(recommend_lines)
