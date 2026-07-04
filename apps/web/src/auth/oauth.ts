@@ -13,11 +13,17 @@ import {
   stashVerifier,
   writeTokens,
 } from "./tokens";
+import { clearUserData } from "./userData";
 
 const CLIENT_ID = "web";
 const REDIRECT_URI = `${location.origin}/oauth/callback`;
 
 export async function startLogin(options?: { forceLogin?: boolean }) {
+  // Switching users (prompt=login) is an explicit account change: wipe the
+  // outgoing user's offline cache + prefs before redirecting so the next
+  // account doesn't inherit them on a shared device (sec review 1.6). A
+  // first-time login (forceLogin=false) has nothing to clear.
+  if (options?.forceLogin) await clearUserData();
   const verifier = await generateVerifier();
   const challenge = await deriveChallenge(verifier);
   const state = crypto.randomUUID();
@@ -88,6 +94,11 @@ export async function joinAsGuest(
   code: string,
   displayName?: string,
 ): Promise<{ hostUserId: number }> {
+  // A guest joining is a new local identity — clear any prior occupant's
+  // cache + prefs first so the guest can't read them (sec review 1.6). On
+  // the guest's own device this is a no-op; on a shared/host device it
+  // closes the bleed.
+  await clearUserData();
   const body = new URLSearchParams({
     code: code.trim(),
     client_id: CLIENT_ID,
@@ -175,4 +186,7 @@ export async function logout(refreshToken: string | null) {
     // best-effort; clear local state regardless
   }
   clearTokens();
+  // Wipe the offline cache + prefs so the next user on this browser starts
+  // clean (sec review 1.6).
+  await clearUserData();
 }

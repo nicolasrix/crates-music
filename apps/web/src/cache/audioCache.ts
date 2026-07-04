@@ -261,6 +261,31 @@ export class AudioCache {
     return true;
   }
 
+  /** Delete the entire cache database — every blob, pin, and meta row —
+   *  and reset this instance so the next call re-opens a fresh DB. Used on
+   *  logout / account-switch so one user's offline library (and pinned
+   *  tracks) can't bleed into whoever signs in next on a shared device
+   *  (sec review 1.6). */
+  async wipe(): Promise<void> {
+    if (this.dbPromise) {
+      try {
+        (await this.dbPromise).close();
+      } catch {
+        /* open failed or already closed — the delete below still runs */
+      }
+      this.dbPromise = null;
+      this.persistTried = false;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(this.dbName);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error ?? new Error("deleteDatabase failed"));
+      // Another tab holding a connection blocks deletion until it closes;
+      // resolve anyway so logout isn't hung waiting on a background tab.
+      req.onblocked = () => resolve();
+    });
+  }
+
   async stats(): Promise<AudioCacheStats> {
     const agg = await this.aggregate();
     const b = this.budgets();
