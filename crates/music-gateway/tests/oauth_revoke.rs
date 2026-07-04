@@ -42,6 +42,7 @@ async fn revoke_endpoint_revokes_refresh_token_and_cascades_to_access() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();

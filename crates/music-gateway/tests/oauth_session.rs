@@ -122,6 +122,7 @@ async fn revoke_all_tokens_for_user_kills_refresh_and_access() {
             user_id: 1,
             client_id: "web".into(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();

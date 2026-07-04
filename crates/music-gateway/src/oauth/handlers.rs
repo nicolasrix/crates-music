@@ -42,6 +42,20 @@ pub const AUTH_CODE_TTL: Duration = Duration::from_mins(10);
 /// Access tokens are short-lived; clients refresh as needed.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::from_hours(1);
 
+/// Absolute lifetime of a refresh token (sec review 1.5). Rotation mints a
+/// fresh token on every use, so an *active* client slides this window
+/// forward indefinitely; an **abandoned** token now dies after 90 days
+/// instead of living forever (the old `ttl: None`).
+// `Duration::from_days` is not yet const-stable, so spell it in seconds.
+#[allow(clippy::duration_suboptimal_units)]
+pub const REFRESH_TOKEN_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// Grace window for refresh-token reuse detection (sec review 1.5). A
+/// token revoked within this window of a replay is treated as a benign
+/// near-simultaneous double-submit (the web-client singleflight gap, 1.7),
+/// not theft — see `OauthStore::detect_refresh_reuse`.
+const REFRESH_REUSE_GRACE: Duration = Duration::from_secs(10);
+
 /// Device codes are short-lived (RFC 8628 §3.2 example uses ~15 min; we
 /// match the auth-code window of 10 min).
 pub const DEVICE_CODE_TTL: Duration = Duration::from_mins(10);
@@ -627,7 +641,7 @@ async fn grant_authorization_code(
         ));
     }
 
-    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
+    let pair = mint_pair(state, &client_id, consumed.user_id, None).await?;
     Ok(Json(pair))
 }
 
@@ -658,21 +672,44 @@ async fn grant_refresh_token(
     // client_id, an unknown/expired/revoked token, and a replay all
     // collapse to the same `invalid_grant` (no oracle, and a
     // wrong-client attempt does not burn a valid token).
-    let consumed = state
+    let Some(consumed) = state
         .oauth()
         .consume_refresh_token(&refresh, &client_id)
         .await
         .map_err(|e| oauth_internal(&e))?
-        .ok_or_else(|| {
-            oauth_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_grant",
-                "refresh token is invalid, expired, revoked, or for a different client",
-            )
-        })?;
+    else {
+        // The token didn't consume. It may just be unknown/expired, or it
+        // may be a *replay of an already-rotated* token — the mark of theft
+        // (OAuth 2.1 §4.3.1). If so, revoke the whole family so both the
+        // attacker and the legitimate client are cut off.
+        if let Some(family_id) = state
+            .oauth()
+            .detect_refresh_reuse(&refresh, &client_id, REFRESH_REUSE_GRACE)
+            .await
+            .map_err(|e| oauth_internal(&e))?
+        {
+            let revoked = state
+                .oauth()
+                .revoke_family(&family_id)
+                .await
+                .map_err(|e| oauth_internal(&e))?;
+            tracing::warn!(
+                family_id = %family_id,
+                revoked,
+                "refresh token reuse detected; revoked the rotation family"
+            );
+        }
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh token is invalid, expired, revoked, or for a different client",
+        ));
+    };
 
-    // Rotation preserves identity: the new pair belongs to the same user.
-    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
+    // Rotation preserves identity *and* family: the new pair keeps the same
+    // user and rotation chain, so reuse of any prior member still revokes
+    // this successor.
+    let pair = mint_pair(state, &client_id, consumed.user_id, Some(consumed.family_id)).await?;
     Ok(Json(pair))
 }
 
@@ -734,23 +771,28 @@ async fn grant_device_code(
                 ));
             }
             // The approving browser session's user (owner if unstamped).
-            let pair = mint_pair(state, &client_id, user_id.unwrap_or(1)).await?;
+            let pair = mint_pair(state, &client_id, user_id.unwrap_or(1), None).await?;
             Ok(Json(pair))
         }
     }
 }
 
+/// Mint a fresh access+refresh pair. `family_id` threads the rotation
+/// chain: `None` starts a new family (auth-code / device-code grants),
+/// `Some(_)` inherits the consumed token's family on refresh (sec 1.5).
 async fn mint_pair(
     state: &AppState,
     client_id: &str,
     user_id: i64,
+    family_id: Option<String>,
 ) -> Result<TokenResponse, (StatusCode, Json<OauthError>)> {
     let refresh = state
         .oauth()
         .mint_refresh_token(NewRefreshToken {
             client_id: client_id.to_string(),
             user_id,
-            ttl: None, // rotation handles revocation
+            ttl: Some(REFRESH_TOKEN_TTL),
+            family_id,
         })
         .await
         .map_err(|e| oauth_internal(&e))?;
