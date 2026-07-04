@@ -9,6 +9,7 @@
 
 import { usePlayer } from "../player/PlayerContext";
 import { TrackRow } from "./TrackRow";
+import type { RowMenuExtraItem } from "./TrackRowMenu";
 import type { Track } from "../api/types";
 
 interface Props {
@@ -20,9 +21,12 @@ interface Props {
    *  same cover would repeat down every row, so it's hidden. */
   showCover?: boolean;
   onPlay: (index: number) => void;
+  /** Per-row extra ⋯-menu entries (e.g. the Playlist page's "remove from
+   *  playlist"). Called with the row's track + index. */
+  rowMenuExtras?: (track: Track, index: number) => RowMenuExtraItem[];
 }
 
-export function TrackTable({ tracks, showAlbum = false, showCover, onPlay }: Props) {
+export function TrackTable({ tracks, showAlbum = false, showCover, onPlay, rowMenuExtras }: Props) {
   const { nowPlaying } = usePlayer();
   const playingId = nowPlaying?.id ?? null;
   const renderCover = showCover ?? showAlbum;
@@ -50,6 +54,7 @@ export function TrackTable({ tracks, showAlbum = false, showCover, onPlay }: Pro
             showAlbum={showAlbum}
             showCover={renderCover}
             onPlay={onPlay}
+            extraMenuItems={rowMenuExtras?.(t, i)}
           />
         ))}
       </tbody>
