@@ -1408,6 +1408,15 @@ button.cover-thumb:focus-visible .thumb-play {
   top: 3px;
   bottom: 3px;
 }
+/* Highlight a playlist row while a dragged track hovers it (desktop DnD).
+   Outline (not layout) so the row doesn't shift under the cursor. */
+.nav-item.is-drop-target {
+  background: var(--surface-2);
+  color: var(--fg);
+  outline: 1px dashed var(--accent, var(--fg-muted));
+  outline-offset: -2px;
+  border-radius: var(--radius-2, 6px);
+}
 
 /* Diagnostics histogram inline 3-segment box-bar. */
 .hist-bar {

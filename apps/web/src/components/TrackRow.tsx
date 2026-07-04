@@ -9,6 +9,7 @@ import { forwardRef } from "react";
 import { Link } from "../router";
 import { Cover } from "./Cover";
 import { TrackRowMenu } from "./TrackRowMenu";
+import { setTrackDragData, usePointerFine } from "../dnd/trackDrag";
 import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
 
@@ -36,6 +37,10 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
   ) {
     const t = track;
     const renderCover = showCover ?? showAlbum;
+    // Desktop-only: let mouse users drag a row onto a sidebar playlist. Off on
+    // touch (see dnd/trackDrag) so it never fights list scrolling; the row
+    // menu's "add to playlist" remains the universal path.
+    const pointerFine = usePointerFine();
     // The "#" cell shows the row's ordinal. In a single-album list
     // (showAlbum=false, i.e. the album page) the album track-number tag
     // is that ordinal. In a multi-album list (playlist, all-tracks,
@@ -48,6 +53,12 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
         ref={ref}
         className={isPlaying ? "is-playing" : ""}
         onDoubleClick={() => onPlay(index)}
+        draggable={pointerFine}
+        onDragStart={
+          pointerFine
+            ? (e) => setTrackDragData(e.dataTransfer, t.id)
+            : undefined
+        }
         {...rest}
       >
         <td
@@ -97,7 +108,9 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
         </td>
         <td className="col-artist">
           {t.artistId && t.artist ? (
-            <Link to={`/artists/${t.artistId}`}>{t.artist}</Link>
+            // draggable=false so a drag starting on this link drags the *track*
+            // (via the row's draggable) rather than the anchor's URL.
+            <Link to={`/artists/${t.artistId}`} draggable={false}>{t.artist}</Link>
           ) : (
             (t.artist ?? "—")
           )}
@@ -105,7 +118,7 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
         {showAlbum && (
           <td className="col-album">
             {t.albumId && t.album ? (
-              <Link to={`/albums/${t.albumId}`}>{t.album}</Link>
+              <Link to={`/albums/${t.albumId}`} draggable={false}>{t.album}</Link>
             ) : (
               (t.album ?? "—")
             )}
