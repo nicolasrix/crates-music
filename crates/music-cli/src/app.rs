@@ -161,7 +161,7 @@ fn print_search(result: &SearchResult3) {
     }
 }
 
-fn audio_key(track_id: &TrackId) -> AudioKey {
+pub(crate) fn audio_key(track_id: &TrackId) -> AudioKey {
     AudioKey {
         track_id: track_id.as_str().to_string(),
         bitrate: None,
@@ -174,7 +174,7 @@ async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> any
     // Ensure the bytes are present (fetch if not).
     if cache.get(&key).await?.is_none() {
         tracing::info!(track = track_id.as_str(), "pin: track not cached, fetching");
-        fetch_into_cache(client, cache, track_id, &key).await?;
+        fetch_into_cache(client, cache, track_id).await?;
     }
     match cache.pin(&key).await? {
         PinOutcome::Pinned => println!("pinned {}", track_id.as_str()),
@@ -242,11 +242,26 @@ async fn fetch_into_cache(
     client: &Client,
     cache: &AudioCache,
     track_id: &TrackId,
-    key: &AudioKey,
 ) -> anyhow::Result<()> {
+    let _ = fetch_track_bytes(client, cache, track_id)
+        .await
+        .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
+    Ok(())
+}
+
+/// Resolve a track's audio bytes: cache hit returns the stored blob; miss
+/// streams from the gateway/Navidrome and caches. Shared by classic
+/// `play`/`pin` and the TUI's resolve/prefetch effects — callers attach
+/// their own user-facing context to failures.
+pub(crate) async fn fetch_track_bytes(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+) -> anyhow::Result<Bytes> {
+    let key = audio_key(track_id);
     let url = client.stream_url(track_id)?;
     let http = client.http().clone();
-    let _ = resolve_source(cache, key, || async move {
+    let bytes = resolve_source(cache, &key, || async move {
         let response = http
             .get(url)
             .send()
@@ -260,12 +275,11 @@ async fn fetch_into_cache(
             .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
         Ok::<Bytes, anyhow::Error>(bytes)
     })
-    .await
-    .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
-    Ok(())
+    .await?;
+    Ok(bytes)
 }
 
-async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
+pub(crate) async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     let root = resolve_cache_root(&config.cache)
         .context("could not determine audio cache root (no XDG cache dir)")?;
     AudioCache::open(
@@ -277,7 +291,7 @@ async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
-async fn build_client(config: &Config) -> anyhow::Result<Client> {
+pub(crate) async fn build_client(config: &Config) -> anyhow::Result<Client> {
     let creds = Credentials {
         username: config.server.username.clone(),
         password: config.server.password.clone(),
@@ -319,7 +333,7 @@ async fn build_client(config: &Config) -> anyhow::Result<Client> {
         .with_tls(ca_cert_pem.as_deref(), gateway.insecure_tls)?)
 }
 
-fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
+pub(crate) fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
     let path = match path_override {
         Some(p) => p.to_path_buf(),
         None => crate::config::default_config_path()
@@ -350,24 +364,7 @@ async fn play_tracks(
                 ),
             }
         } else {
-            let url = client.stream_url(track_id)?;
-            let http = client.http().clone();
-            resolve_source(cache, &key, || async move {
-                let response = http
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("stream request failed: {e}"))?
-                    .error_for_status()
-                    .map_err(|e| anyhow::anyhow!("stream returned error status: {e}"))?;
-                let bytes: Bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
-                Ok::<Bytes, anyhow::Error>(bytes)
-            })
-            .await
-            .with_context(|| {
+            fetch_track_bytes(client, cache, track_id).await.with_context(|| {
                 format!(
                     "could not resolve audio for track {}: server unreachable and \
                      not in local cache (try --offline to play only what's cached)",
