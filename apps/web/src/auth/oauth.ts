@@ -136,7 +136,24 @@ export async function joinAsGuest(
   return { hostUserId: json.host_user_id };
 }
 
-export async function refreshTokens(refreshToken: string): Promise<void> {
+// Singleflight guard for token refresh. The seven API modules each retry a
+// 401 by calling refreshTokens; on a cold page load several fire at once,
+// all holding the SAME stored refresh token. Refresh rotates (sec 1.5), so
+// only the first request's token survives — the rest present a now-revoked
+// token, fail, and log every tab out (and, without 1.5's grace window,
+// would trip family-reuse revocation). Coalescing concurrent callers onto
+// one in-flight rotation removes the race entirely.
+let inFlightRefresh: Promise<void> | null = null;
+
+export function refreshTokens(refreshToken: string): Promise<void> {
+  if (inFlightRefresh) return inFlightRefresh;
+  inFlightRefresh = doRefresh(refreshToken).finally(() => {
+    inFlightRefresh = null;
+  });
+  return inFlightRefresh;
+}
+
+async function doRefresh(refreshToken: string): Promise<void> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: CLIENT_ID,
