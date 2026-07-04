@@ -183,6 +183,29 @@ async fn guest_joins_host_room_and_shares_queue() {
 }
 
 #[tokio::test]
+async fn guest_redeem_rate_limits_after_the_cap() {
+    // The guest code is the highest-value brute-force target (~34.6 bits);
+    // past the per-source cap, redemption must 429 (sec 1.3). Wrong codes
+    // still consume a slot, so a guessing loop is throttled. Cap is 10/min;
+    // the 11th trips. Tests share one bucket (no ConnectInfo).
+    let oauth = seed_store().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+
+    for i in 0..10 {
+        let (status, _) = redeem(&state, "WRONG-CODE").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "guess {i} within cap (invalid_grant)");
+    }
+    let (status, body) = redeem(&state, "WRONG-CODE").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the 11th guess must be rate-limited"
+    );
+    assert_eq!(body["error"], "slow_down");
+}
+
+#[tokio::test]
 async fn unknown_code_is_rejected() {
     let oauth = seed_store().await;
     let state =

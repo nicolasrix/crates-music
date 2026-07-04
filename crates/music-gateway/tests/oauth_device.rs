@@ -89,6 +89,27 @@ async fn device_authorization_issues_codes() {
 }
 
 #[tokio::test]
+async fn device_authorization_rate_limits_after_the_cap() {
+    // Each call mints an unauthenticated device-code row; past the
+    // per-source cap it must 429 (sec 1.3). Cap is 30/min; the 31st trips.
+    // Tests share one bucket (no ConnectInfo).
+    let oauth = store_with_cli_client().await;
+    let app = build_app(oauth).await;
+
+    for i in 0..30 {
+        let (status, _) =
+            body_json(post_form(app.clone(), "/oauth/device_authorization", "client_id=cli".into()).await)
+                .await;
+        assert_eq!(status, StatusCode::OK, "request {i} within cap");
+    }
+    let (status, json) =
+        body_json(post_form(app.clone(), "/oauth/device_authorization", "client_id=cli".into()).await)
+            .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "the 31st request must be rate-limited");
+    assert_eq!(json["error"], "slow_down");
+}
+
+#[tokio::test]
 async fn device_authorization_rejects_unknown_client() {
     let oauth = store_with_cli_client().await;
     let app = build_app(oauth).await;

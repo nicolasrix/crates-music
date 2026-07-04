@@ -54,6 +54,45 @@ pub const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// no other rules; we go a little stricter (this is the *root* credential).
 pub const MIN_PASSWORD_LEN: usize = 12;
 
+/// Rolling window for the public, unauthenticated OAuth endpoint
+/// rate-limits (sec review 1.3). All three share one window; per-endpoint
+/// caps differ below.
+const PUBLIC_OAUTH_RL_WINDOW: Duration = Duration::from_mins(1);
+
+/// `POST /oauth/guest` per-source cap. Tight: the guest code is the
+/// highest-value brute-force target (~34.6 bits). 10/min caps guessing at
+/// ~14 k/day — astronomically short of the code space — while never
+/// bothering a household where a guest joins a handful of times.
+const GUEST_REDEEM_MAX_PER_WINDOW: u32 = 10;
+
+/// `POST /oauth/device_authorization` per-source cap. Each call mints an
+/// unauthenticated device-code row; 30/min bounds row-flooding without
+/// impeding a normal `music auth login`.
+const DEVICE_AUTH_MAX_PER_WINDOW: u32 = 30;
+
+/// `POST /oauth/revoke` per-source cap. Revoke is a free token-guessing
+/// oracle at wire speed (RFC 7009 always answers 200) and a revocation
+/// DoS; 30/min throttles both while allowing a client to revoke its
+/// handful of tokens on logout.
+const REVOKE_MAX_PER_WINDOW: u32 = 30;
+
+/// Peer address for rate-limiter keying, mirroring `login_post`. Absent
+/// connection info (unit tests via `oneshot`) buckets to the unspecified
+/// address — those callers share one bucket, which is fine. See
+/// `LoginLimiter` for the reverse-proxy caveat.
+fn peer_ip(connect: Option<&ConnectInfo<SocketAddr>>) -> IpAddr {
+    connect.map_or(IpAddr::from([0, 0, 0, 0]), |ci| ci.0.ip())
+}
+
+/// Shared 429 response for a tripped public-OAuth rate limit.
+fn too_many_requests(retry_after: Duration) -> (StatusCode, Json<OauthError>) {
+    oauth_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "slow_down",
+        &format!("too many requests; retry in {}s", retry_after.as_secs() + 1),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetupForm {
     pub token: String,
@@ -765,8 +804,19 @@ pub struct GuestTokenResponse {
 /// token. When it lapses, the visitor redeems the code again.
 pub async fn guest_grant(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<GuestForm>,
 ) -> Result<Json<GuestTokenResponse>, (StatusCode, Json<OauthError>)> {
+    // Throttle brute-force of the guest code + row-flooding (sec 1.3).
+    if let Err(retry) = state.public_oauth_limiter().check(
+        "guest",
+        peer_ip(connect.as_ref()),
+        GUEST_REDEEM_MAX_PER_WINDOW,
+        PUBLIC_OAUTH_RL_WINDOW,
+    ) {
+        return Err(too_many_requests(retry));
+    }
+
     // The redeeming client must be registered (mirrors the other grants).
     state
         .oauth()
@@ -902,7 +952,27 @@ pub struct RevokeForm {
 /// RFC 7009: the server MUST respond 200 even if the token is unknown,
 /// to avoid leaking which tokens exist. We probe refresh first
 /// (revoking a refresh cascades to its access tokens), then access.
-pub async fn revoke(State(state): State<AppState>, Form(form): Form<RevokeForm>) -> StatusCode {
+pub async fn revoke(
+    State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    Form(form): Form<RevokeForm>,
+) -> StatusCode {
+    // Throttle the revoke oracle + revocation DoS (sec 1.3). Returns 429
+    // rather than RFC 7009's 200 — a rate-limit is a transport-level
+    // decision, distinct from "token unknown but accepted".
+    if state
+        .public_oauth_limiter()
+        .check(
+            "revoke",
+            peer_ip(connect.as_ref()),
+            REVOKE_MAX_PER_WINDOW,
+            PUBLIC_OAUTH_RL_WINDOW,
+        )
+        .is_err()
+    {
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+
     let oauth = state.oauth();
     if let Err(e) = oauth.revoke_refresh_token(&form.token).await {
         tracing::error!("revoke refresh: {e}");
@@ -941,10 +1011,21 @@ pub struct DeviceAuthResponse {
 /// client where to send the user and how often to poll.
 pub async fn device_authorization(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     uri: Uri,
     headers: HeaderMap,
     Form(form): Form<DeviceAuthForm>,
 ) -> Result<Json<DeviceAuthResponse>, (StatusCode, Json<OauthError>)> {
+    // Throttle unauthenticated device-code row flooding (sec 1.3).
+    if let Err(retry) = state.public_oauth_limiter().check(
+        "device_authorization",
+        peer_ip(connect.as_ref()),
+        DEVICE_AUTH_MAX_PER_WINDOW,
+        PUBLIC_OAUTH_RL_WINDOW,
+    ) {
+        return Err(too_many_requests(retry));
+    }
+
     // The client must be registered (mirrors authorize()'s client check).
     state
         .oauth()

@@ -104,6 +104,39 @@ async fn revoke_endpoint_returns_200_for_unknown_token() {
 }
 
 #[tokio::test]
+async fn revoke_endpoint_rate_limits_after_the_cap() {
+    // Unauthenticated revoke is a token-guessing oracle (always 200) and a
+    // revocation DoS; past the per-source cap it must 429 (sec 1.3). Tests
+    // reach the handler without ConnectInfo, so all requests share one
+    // bucket. The cap is 30/min; the 31st trips.
+    let oauth = store_with_client().await;
+    let app = build_router(
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await,
+    );
+
+    let post = |app: axum::Router| async move {
+        app.oneshot(
+            Request::post("/oauth/revoke")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("token=ghost"))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    };
+
+    for i in 0..30 {
+        assert_eq!(post(app.clone()).await, StatusCode::OK, "request {i} within cap");
+    }
+    assert_eq!(
+        post(app.clone()).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the 31st request must be rate-limited"
+    );
+}
+
+#[tokio::test]
 async fn revoke_endpoint_revokes_a_standalone_access_token() {
     // Access tokens not derived from a refresh (legacy/test) can still
     // be revoked individually.
