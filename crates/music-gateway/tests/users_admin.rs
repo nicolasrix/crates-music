@@ -181,6 +181,30 @@ async fn cannot_delete_the_owner() {
 }
 
 #[tokio::test]
+async fn cannot_reset_the_owner_password() {
+    // The owner's credential is only resettable via the offline CLI
+    // `reset-master-password` path. Allowing it over HTTP would let ANY
+    // admin (id != 1) `POST /v1/admin/users/1/password` and take over the
+    // owner account — so the guard is unconditional, mirroring delete.
+    let oauth = store_with_owner_and_client().await;
+    let admin = token_for(&oauth, 1).await;
+    let app = app_for(oauth).await;
+
+    let (status, _) = post_json(
+        &app,
+        "/v1/admin/users/1/password",
+        &admin,
+        serde_json::json!({ "password": ALICE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the owner password is not resettable over HTTP"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_username_is_409() {
     let oauth = store_with_owner_and_client().await;
     let admin = token_for(&oauth, 1).await;

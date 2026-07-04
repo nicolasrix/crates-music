@@ -156,12 +156,20 @@ pub struct ResetPasswordForm {
 /// POST /v1/admin/users/:id/password — admin-driven password reset (D8:
 /// account recovery without email). Rewrites the hash in place, so the
 /// account keeps its id and all dependent data.
+///
+/// The owner (id=1) is exempt: its credential is only resettable via the
+/// offline CLI `reset-master-password` path. Without this guard any admin
+/// could `POST /v1/admin/users/1/password` and take over the owner
+/// account — so the block is unconditional, mirroring `delete_user`.
 #[tracing::instrument(name = "admin.users.reset_password", skip(state, form))]
 pub async fn reset_password(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(form): Json<ResetPasswordForm>,
 ) -> Response {
+    if id == OWNER_USER_ID {
+        return bad_request("the owner password can only be reset from the gateway host CLI");
+    }
     if form.password.len() < MIN_PASSWORD_LEN {
         return bad_request(&format!(
             "password must be at least {MIN_PASSWORD_LEN} characters"
