@@ -25,6 +25,7 @@ pub mod readyz;
 pub mod recommend;
 pub mod recommend_feedback;
 pub mod scrobble;
+pub mod search;
 pub mod state;
 pub mod sync;
 pub mod users;

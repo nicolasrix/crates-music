@@ -19,6 +19,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { artAttrs, useCoverPalette } from "../components/ArtworkPalette";
 import { coverArtUrl } from "../api/client";
+import { beginTrackDrag, usePointerFine } from "../dnd/trackDrag";
 import { Cover } from "../components/Cover";
 import { EntityRating } from "../components/EntityRating";
 import { TrackRowMenu } from "../components/TrackRowMenu";
@@ -54,6 +55,11 @@ export function PlayerBar() {
   const { path } = useRoute();
   const { autoplay, setAutoplay } = useAutoplay();
   const onQueuePage = path === "/queue";
+  // Desktop-only: drag the now-playing card onto a sidebar playlist. Same
+  // pointer:fine gate as the tracklist rows.
+  const pointerFine = usePointerFine();
+  // Fade the card while it's the drag source (mirrors the tracklist rows).
+  const [dragging, setDragging] = useState(false);
 
   // Empty state — keep the chrome bar visible so the layout doesn't shift.
   if (!nowPlaying) {
@@ -72,7 +78,19 @@ export function PlayerBar() {
 
   return (
     <div className={`player ${art.className}`} style={art.style}>
-      <div className="np">
+      <div
+        className={`np${pointerFine ? " is-draggable" : ""}${dragging ? " is-dragging" : ""}`}
+        draggable={pointerFine}
+        onDragStart={
+          pointerFine
+            ? (e) => {
+                beginTrackDrag(e.dataTransfer, nowPlaying.id, nowPlaying.title);
+                setDragging(true);
+              }
+            : undefined
+        }
+        onDragEnd={pointerFine ? () => setDragging(false) : undefined}
+      >
         <div className="cover">
           <Cover
             coverArt={nowPlaying.coverArt}
@@ -85,7 +103,9 @@ export function PlayerBar() {
           <div className="title">{nowPlaying.title}</div>
           <div className="sub">
             {nowPlaying.artistId && nowPlaying.artist ? (
-              <Link to={`/artists/${nowPlaying.artistId}`}>
+              // draggable=false so a drag here moves the track (via the .np
+              // card's draggable), not the anchor's URL.
+              <Link to={`/artists/${nowPlaying.artistId}`} draggable={false}>
                 {nowPlaying.artist}
               </Link>
             ) : (
@@ -93,7 +113,7 @@ export function PlayerBar() {
             )}
             <span className="sep"> · </span>
             {nowPlaying.albumId && nowPlaying.album ? (
-              <Link to={`/albums/${nowPlaying.albumId}`}>
+              <Link to={`/albums/${nowPlaying.albumId}`} draggable={false}>
                 {nowPlaying.album}
               </Link>
             ) : (

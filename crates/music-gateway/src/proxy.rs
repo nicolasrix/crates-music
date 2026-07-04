@@ -17,7 +17,10 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH},
+        header::{
+            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+            IF_NONE_MATCH, RANGE,
+        },
     },
     response::Response,
 };
@@ -203,7 +206,11 @@ async fn proxy_inner(
     }
     tracing::Span::current().record("kind", "stream");
 
-    pass_through(&state, subsonic_method, client_query).await
+    // Forward the browser's byte-range so `<audio>` can seek. Without it the
+    // proxy always streamed the full file from byte 0, so any forward seek
+    // past the buffered region snapped playback back to the start.
+    let range = request.headers().get(RANGE).cloned();
+    pass_through(&state, subsonic_method, client_query, range).await
 }
 
 #[tracing::instrument(
@@ -773,12 +780,19 @@ async fn pass_through(
     state: &AppState,
     method: &str,
     client_query: &str,
+    range: Option<HeaderValue>,
 ) -> Result<Response, StatusCode> {
     let upstream_url =
         build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
-    let upstream = state
-        .http()
-        .get(upstream_url)
+    let mut request = state.http().get(upstream_url);
+    // Relay the byte-range so Navidrome answers with `206 Partial Content`
+    // for direct-play tracks — the mechanism that lets the browser seek.
+    // (Navidrome ignores Range for transcoded streams; those degrade to a
+    // full 200 download, i.e. today's behaviour, so this is never worse.)
+    if let Some(range) = &range {
+        request = request.header(RANGE, range);
+    }
+    let upstream = request
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -786,12 +800,21 @@ async fn pass_through(
     let status = upstream.status();
     tracing::Span::current().record("status", status.as_u16());
     let mut downstream_headers = HeaderMap::new();
-    if let Some(ct) = upstream.headers().get(CONTENT_TYPE).cloned() {
-        downstream_headers.insert(CONTENT_TYPE, ct);
+    // Forward the headers that make `<audio>`/`<video>` seeking work: the
+    // content type, plus the range-negotiation trio. `Accept-Ranges` tells
+    // the browser seeking is possible; `Content-Range`/`Content-Length`
+    // describe the returned slice and the whole-resource size. Missing any
+    // of these leaves the element unable to build a seekable range.
+    for name in [CONTENT_TYPE, ACCEPT_RANGES, CONTENT_RANGE, CONTENT_LENGTH] {
+        if let Some(value) = upstream.headers().get(&name).cloned() {
+            downstream_headers.insert(name, value);
+        }
     }
     let stream = upstream.bytes_stream();
     let body = Body::from_stream(stream);
 
+    // Status is forwarded verbatim, so a `206` from upstream reaches the
+    // client as `206` — the browser needs that to treat the body as a slice.
     let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = downstream_headers;

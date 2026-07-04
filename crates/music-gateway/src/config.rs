@@ -22,6 +22,40 @@ pub struct Config {
     /// Optional Python embedder sidecar. Absent / unreachable = degraded mode.
     #[serde(default)]
     pub embedder: Option<EmbedderConfigSection>,
+    /// Typo-tolerant `/v1/search` fuzzy index. On by default; degrades to
+    /// proxied Navidrome `search3` when disabled or still building.
+    #[serde(default)]
+    pub search: SearchConfig,
+}
+
+/// `[search]` — the fuzzy catalog index behind `GET /v1/search`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchConfig {
+    /// Master switch. When false the endpoint always falls back to
+    /// Navidrome `search3` (no typo tolerance).
+    #[serde(default = "default_search_enabled")]
+    pub enabled: bool,
+    /// How often to rebuild the index from Navidrome so new/renamed tracks
+    /// become searchable. `0` builds once at boot and never refreshes.
+    #[serde(default = "default_search_refresh_seconds")]
+    pub refresh_interval_seconds: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_search_enabled(),
+            refresh_interval_seconds: default_search_refresh_seconds(),
+        }
+    }
+}
+
+fn default_search_enabled() -> bool {
+    true
+}
+
+fn default_search_refresh_seconds() -> u64 {
+    900
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

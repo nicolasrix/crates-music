@@ -11,7 +11,8 @@
 import { Boxes, Disc3, Download, Heart, Home as HomeIcon, ListMusic, Radio, User, Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { createPlaylist, listPlaylists } from "../api/playlists";
+import { addTrackToPlaylist, createPlaylist, listPlaylists } from "../api/playlists";
+import { getTrackDragData, isTrackDrag } from "../dnd/trackDrag";
 import { Link, navigate, useRoute } from "../router";
 import { useToast } from "../toast/ToastContext";
 import { BrandMark } from "./BrandMark";
@@ -142,6 +143,31 @@ export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [creating, setCreating] = useState(false);
+  // Playlist id currently under a track drag (desktop DnD) — drives the
+  // drop-target highlight. See dnd/trackDrag; touch never starts a drag.
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+
+  async function handleDropOnPlaylist(
+    e: React.DragEvent,
+    playlistId: string,
+    playlistName: string,
+  ) {
+    e.preventDefault();
+    setDropTargetId(null);
+    const trackId = getTrackDragData(e.dataTransfer);
+    if (!trackId) return;
+    try {
+      await addTrackToPlaylist(playlistId, trackId);
+      toast(`added to ${playlistName}`);
+      // Refresh the target playlist if it's open, plus the list (counts).
+      await queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
+      await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+    } catch (err) {
+      toast(`couldn't add to ${playlistName}: ${(err as Error).message}`, {
+        variant: "error",
+      });
+    }
+  }
   // Shared cache key with TrackRowMenu's playlist picker — both surfaces
   // refetch via the same `["playlists"]` invalidation after a create or
   // edit, so navigating away and back doesn't cause a redundant fetch.
@@ -249,11 +275,27 @@ export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
         <div className="nav-subs">
           {playlistsQ.data.map((p) => {
             const to = `/playlists/${p.id}`;
+            const isDropTarget = dropTargetId === p.id;
             return (
               <Link
                 key={p.id}
                 to={to}
-                className={`nav-item is-sub ${path === to ? "is-active" : ""}`}
+                className={`nav-item is-sub ${path === to ? "is-active" : ""} ${
+                  isDropTarget ? "is-drop-target" : ""
+                }`}
+                // Drop target for desktop track drags. dragover must
+                // preventDefault to permit the drop; we only do so for our
+                // own track payload so file/text drags pass through inert.
+                onDragOver={(e) => {
+                  if (!isTrackDrag(e.dataTransfer)) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                  if (dropTargetId !== p.id) setDropTargetId(p.id);
+                }}
+                onDragLeave={() => {
+                  if (dropTargetId === p.id) setDropTargetId(null);
+                }}
+                onDrop={(e) => void handleDropOnPlaylist(e, p.id, p.name)}
               >
                 <span className="truncate" title={p.name}>{p.name}</span>
               </Link>

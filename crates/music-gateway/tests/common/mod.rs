@@ -75,6 +75,7 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
             ..RecommendConfig::default()
         },
         embedder: None,
+        search: Default::default(),
     }
 }
 

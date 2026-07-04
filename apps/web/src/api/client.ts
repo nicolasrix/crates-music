@@ -258,15 +258,19 @@ export interface SearchResults {
   tracks: Track[];
 }
 
-// Library-wide search via Subsonic search3. Caller decides per-section
-// caps; the defaults match what the Search page renders without paging.
+// Library-wide search via the gateway's typo-tolerant /v1/search. Returns
+// the same Subsonic `searchResult3` envelope as `search3` (so the parser is
+// unchanged), but the gateway fuzzy-matches and relevance-orders the
+// results server-side — a misspelled query still finds the track. When the
+// gateway's index isn't built yet it transparently falls back to proxying
+// Navidrome `search3`. Caller decides per-section caps.
 export async function searchAll(
   query: string,
   opts: { artistCount?: number; albumCount?: number; songCount?: number } = {}
 ): Promise<SearchResults> {
   const { artistCount = 20, albumCount = 40, songCount = 60 } = opts;
   const path =
-    `/rest/search3?query=${encodeURIComponent(query)}` +
+    `/v1/search?query=${encodeURIComponent(query)}` +
     `&artistCount=${artistCount}&albumCount=${albumCount}&songCount=${songCount}`;
   type Resp = { artist?: Artist[]; album?: Album[]; song?: Track[] };
   const result = await getSubsonic<Resp>(path, "searchResult3");
