@@ -13,3 +13,4 @@ pub mod gateway;
 pub mod ratings;
 pub mod recommend;
 pub mod sync;
+pub mod tui;

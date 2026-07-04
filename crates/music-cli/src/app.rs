@@ -26,6 +26,11 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         return crate::auth::run_auth(&config, action).await;
     }
 
+    // The TUI owns its own client/cache lifecycle (and the terminal).
+    if let Command::Tui = &cli.command {
+        return crate::tui::run(config).await;
+    }
+
     let client = build_client(&config)
         .await
         .context("constructing Subsonic client")?;
@@ -125,7 +130,9 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
         // Handled above, before the client is built.
-        Command::Auth { .. } => unreachable!("auth dispatched before client construction"),
+        Command::Auth { .. } | Command::Tui => {
+            unreachable!("dispatched before client construction")
+        }
     }
     Ok(())
 }

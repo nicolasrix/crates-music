@@ -155,6 +155,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
+
+    /// Interactive full-screen mode (hidden: the supported entry point is
+    /// running the binary with no subcommand on a TTY).
+    #[command(hide = true)]
+    Tui,
 }
 
 #[derive(Subcommand, Debug)]
