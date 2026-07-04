@@ -3,6 +3,7 @@
 //!
 //! The binary at `src/main.rs` is a thin wrapper that just calls `app::run`.
 
+pub mod api;
 pub mod app;
 pub mod auth;
 pub mod cli;
@@ -11,4 +12,6 @@ pub mod format;
 pub mod gateway;
 pub mod ratings;
 pub mod recommend;
+pub mod style;
 pub mod sync;
+pub mod tui;

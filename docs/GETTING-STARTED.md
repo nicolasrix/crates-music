@@ -121,14 +121,19 @@ EOF
 # own. (Needs a `[[oauth.clients]] client_id = "cli"` block in gateway.toml.)
 cargo run -p music-cli -- auth login
 
-cargo run -p music-cli -- albums list
+cargo run -p music-cli -- albums
 ```
+
+The binary is named **`crates-cli`** (`cargo install --path
+crates/music-cli` puts it on your PATH). Running it bare on a terminal —
+`crates-cli` with no subcommand — opens the interactive full-screen UI;
+see [components/music-cli.md § Interactive mode](./components/music-cli.md#interactive-mode-tui).
 
 > Installing the CLI as a **client against an already-running gateway**
 > (e.g. your production box) rather than the dev stack? See
 > [components/music-cli.md § Install](./components/music-cli.md#install-as-a-client-against-a-running-gateway)
-> — it covers `cargo install`, the prod-cert vs mkcert TLS split, the
-> device-login flow, and a convenience alias.
+> — it covers `cargo install`, the prod-cert vs mkcert TLS split, and the
+> device-login flow.
 
 You should see your Navidrome's albums. If you get a TLS error,
 either `mkcert -install` didn't take effect, or `gateway.local` isn't

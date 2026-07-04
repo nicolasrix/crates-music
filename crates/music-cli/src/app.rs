@@ -19,10 +19,20 @@ use crate::format::{album_header, albums_table, artist_header, artists_table, tr
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
 
+    // Bare invocation (main.rs only routes it here on a TTY) and the hidden
+    // `tui` subcommand both open the interactive UI, which owns its own
+    // client/cache lifecycle (and the terminal).
+    let Some(command) = cli.command else {
+        return crate::tui::run(config).await;
+    };
+    if let Command::Tui = &command {
+        return crate::tui::run(config).await;
+    }
+
     // `auth` is special: `login` bootstraps the token store and the others
     // manage it, so they run before we try to construct an authed client
     // (which, in gateway mode, would require a token we may not have yet).
-    if let Command::Auth { action } = &cli.command {
+    if let Command::Auth { action } = &command {
         return crate::auth::run_auth(&config, action).await;
     }
 
@@ -30,38 +40,38 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         .await
         .context("constructing Subsonic client")?;
 
-    match cli.command {
+    match command {
         Command::Ping => {
             client.ping().await.context("ping failed")?;
-            println!("ok");
+            println!("{}", crate::style::ok("ok"));
         }
         Command::Albums { size, kind } => {
             let albums = client
                 .get_album_list2(kind.into(), Some(size), None)
                 .await?;
-            print!("{}", albums_table(&albums));
+            print!("{}", crate::style::table(&albums_table(&albums)));
         }
         Command::Album { id } => {
             let result = client.get_album(&AlbumId::from(id)).await?;
             println!("{}", album_header(&result.album));
             println!();
-            print!("{}", tracks_table(&result.tracks));
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         }
         Command::Artists => {
             let artists = client.get_artists().await?;
-            print!("{}", artists_table(&artists));
+            print!("{}", crate::style::table(&artists_table(&artists)));
         }
         Command::Artist { id } => {
             let result = client.get_artist(&ArtistId::from(id)).await?;
             println!("{}", artist_header(&result.artist));
             println!();
-            print!("{}", albums_table(&result.albums));
+            print!("{}", crate::style::table(&albums_table(&result.albums)));
         }
         Command::Tracks { size, offset } => {
             // Empty query matches the whole library on Navidrome; paging is
             // via search3's shared offset.
             let result = client.search3("", size, offset).await?;
-            print!("{}", tracks_table(&result.tracks));
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         }
         Command::Search { query, limit } => {
             let result = client.search3(&query, limit, 0).await?;
@@ -125,7 +135,9 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
         // Handled above, before the client is built.
-        Command::Auth { .. } => unreachable!("auth dispatched before client construction"),
+        Command::Auth { .. } | Command::Tui => {
+            unreachable!("dispatched before client construction")
+        }
     }
     Ok(())
 }
@@ -136,24 +148,24 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
 fn print_search(result: &SearchResult3) {
     let mut printed = false;
     if !result.artists.is_empty() {
-        println!("ARTISTS");
-        print!("{}", artists_table(&result.artists));
+        println!("{}", crate::style::heading("ARTISTS"));
+        print!("{}", crate::style::table(&artists_table(&result.artists)));
         printed = true;
     }
     if !result.albums.is_empty() {
         if printed {
             println!();
         }
-        println!("ALBUMS");
-        print!("{}", albums_table(&result.albums));
+        println!("{}", crate::style::heading("ALBUMS"));
+        print!("{}", crate::style::table(&albums_table(&result.albums)));
         printed = true;
     }
     if !result.tracks.is_empty() {
         if printed {
             println!();
         }
-        println!("TRACKS");
-        print!("{}", tracks_table(&result.tracks));
+        println!("{}", crate::style::heading("TRACKS"));
+        print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         printed = true;
     }
     if !printed {
@@ -161,7 +173,7 @@ fn print_search(result: &SearchResult3) {
     }
 }
 
-fn audio_key(track_id: &TrackId) -> AudioKey {
+pub(crate) fn audio_key(track_id: &TrackId) -> AudioKey {
     AudioKey {
         track_id: track_id.as_str().to_string(),
         bitrate: None,
@@ -174,7 +186,7 @@ async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> any
     // Ensure the bytes are present (fetch if not).
     if cache.get(&key).await?.is_none() {
         tracing::info!(track = track_id.as_str(), "pin: track not cached, fetching");
-        fetch_into_cache(client, cache, track_id, &key).await?;
+        fetch_into_cache(client, cache, track_id).await?;
     }
     match cache.pin(&key).await? {
         PinOutcome::Pinned => println!("pinned {}", track_id.as_str()),
@@ -242,11 +254,26 @@ async fn fetch_into_cache(
     client: &Client,
     cache: &AudioCache,
     track_id: &TrackId,
-    key: &AudioKey,
 ) -> anyhow::Result<()> {
+    let _ = fetch_track_bytes(client, cache, track_id)
+        .await
+        .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
+    Ok(())
+}
+
+/// Resolve a track's audio bytes: cache hit returns the stored blob; miss
+/// streams from the gateway/Navidrome and caches. Shared by classic
+/// `play`/`pin` and the TUI's resolve/prefetch effects — callers attach
+/// their own user-facing context to failures.
+pub(crate) async fn fetch_track_bytes(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+) -> anyhow::Result<Bytes> {
+    let key = audio_key(track_id);
     let url = client.stream_url(track_id)?;
     let http = client.http().clone();
-    let _ = resolve_source(cache, key, || async move {
+    let bytes = resolve_source(cache, &key, || async move {
         let response = http
             .get(url)
             .send()
@@ -260,12 +287,11 @@ async fn fetch_into_cache(
             .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
         Ok::<Bytes, anyhow::Error>(bytes)
     })
-    .await
-    .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
-    Ok(())
+    .await?;
+    Ok(bytes)
 }
 
-async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
+pub(crate) async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     let root = resolve_cache_root(&config.cache)
         .context("could not determine audio cache root (no XDG cache dir)")?;
     AudioCache::open(
@@ -277,7 +303,7 @@ async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
-async fn build_client(config: &Config) -> anyhow::Result<Client> {
+pub(crate) async fn build_client(config: &Config) -> anyhow::Result<Client> {
     let creds = Credentials {
         username: config.server.username.clone(),
         password: config.server.password.clone(),
@@ -319,7 +345,7 @@ async fn build_client(config: &Config) -> anyhow::Result<Client> {
         .with_tls(ca_cert_pem.as_deref(), gateway.insecure_tls)?)
 }
 
-fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
+pub(crate) fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
     let path = match path_override {
         Some(p) => p.to_path_buf(),
         None => crate::config::default_config_path()
@@ -350,24 +376,7 @@ async fn play_tracks(
                 ),
             }
         } else {
-            let url = client.stream_url(track_id)?;
-            let http = client.http().clone();
-            resolve_source(cache, &key, || async move {
-                let response = http
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("stream request failed: {e}"))?
-                    .error_for_status()
-                    .map_err(|e| anyhow::anyhow!("stream returned error status: {e}"))?;
-                let bytes: Bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
-                Ok::<Bytes, anyhow::Error>(bytes)
-            })
-            .await
-            .with_context(|| {
+            fetch_track_bytes(client, cache, track_id).await.with_context(|| {
                 format!(
                     "could not resolve audio for track {}: server unreachable and \
                      not in local cache (try --offline to play only what's cached)",

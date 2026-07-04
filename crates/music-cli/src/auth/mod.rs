@@ -1,7 +1,7 @@
 //! Gateway authentication: the OAuth 2.1 Device Authorization Grant
 //! (RFC 8628) and the token store that backs every gateway request.
 //!
-//! The CLI has no static bearer token. `music auth login` runs the device
+//! The CLI has no static bearer token. `crates-cli auth login` runs the device
 //! flow and persists the resulting tokens (see [`store`]); every
 //! gateway-backed command then calls [`resolve_bearer`], which returns the
 //! cached access token or silently rotates it via the refresh grant.
@@ -60,7 +60,7 @@ pub fn token_store_path(config: &Config) -> PathBuf {
 }
 
 /// Resolve a valid gateway access token, refreshing if the cached one has
-/// expired. Errors (telling the user to `music auth login`) when there's
+/// expired. Errors (telling the user to `crates-cli auth login`) when there's
 /// no stored token or the refresh grant is rejected.
 ///
 /// Concurrency note: two CLI invocations refreshing at the same instant
@@ -70,7 +70,7 @@ pub fn token_store_path(config: &Config) -> PathBuf {
 pub async fn resolve_bearer(config: &Config, gw: &GatewayConfig) -> Result<String> {
     let path = token_store_path(config);
     let tokens = store::load(&path)?.ok_or_else(|| {
-        anyhow::anyhow!("not authenticated with the gateway — run `music auth login`")
+        anyhow::anyhow!("not authenticated with the gateway — run `crates-cli auth login`")
     })?;
 
     if store::now_ms() < tokens.access_expires_at_ms - EXPIRY_SKEW_MS {
@@ -80,7 +80,7 @@ pub async fn resolve_bearer(config: &Config, gw: &GatewayConfig) -> Result<Strin
     // Access token expired (or about to): rotate via the refresh grant.
     let refreshed = refresh(gw, &tokens.client_id, &tokens.refresh_token)
         .await
-        .context("refreshing the gateway access token — run `music auth login` if this persists")?;
+        .context("refreshing the gateway access token — run `crates-cli auth login` if this persists")?;
     store::save(&path, &refreshed)?;
     Ok(refreshed.access_token)
 }
@@ -117,7 +117,7 @@ async fn refresh(
     ))
 }
 
-/// Dispatch `music auth <action>`. Runs *before* the Subsonic client is
+/// Dispatch `crates-cli auth <action>`. Runs *before* the Subsonic client is
 /// built (login has no token yet), so it only needs the `[gateway]` block.
 pub async fn run_auth(config: &Config, action: &AuthAction) -> Result<()> {
     let gw = require_gateway(config)?;

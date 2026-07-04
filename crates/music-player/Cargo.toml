@@ -11,7 +11,7 @@ music-core = { workspace = true }
 music-cache = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 rodio = { workspace = true }
 

@@ -4,14 +4,20 @@ use clap::{Parser, Subcommand, ValueEnum};
 use music_subsonic::AlbumListType;
 
 #[derive(Parser, Debug)]
-#[command(name = "music", version, about = "Subsonic / Navidrome client")]
+#[command(
+    name = "crates-cli",
+    version,
+    about = "crates — Subsonic / Navidrome client",
+    after_help = "Run with no subcommand on a terminal to open the interactive UI."
+)]
 pub struct Cli {
     /// Path to config file (default: platform XDG config dir).
     #[arg(long, global = true, env = "MUSIC_CONFIG")]
     pub config: Option<PathBuf>,
 
+    /// Omitted entirely → interactive TUI (when stdout is a terminal).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -155,6 +161,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
+
+    /// Interactive full-screen mode (hidden: the supported entry point is
+    /// running the binary with no subcommand on a TTY).
+    #[command(hide = true)]
+    Tui,
 }
 
 #[derive(Subcommand, Debug)]

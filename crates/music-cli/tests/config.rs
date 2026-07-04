@@ -70,7 +70,7 @@ fn config_without_gateway_block_has_no_gateway() {
 fn config_with_gateway_block_parses_gateway_url() {
     // A legacy `bearer_token` key is now unused; it must still parse
     // (serde ignores the unknown field) so old configs don't break — the
-    // user just needs to run `music auth login`.
+    // user just needs to run `crates-cli auth login`.
     let raw = r#"
         [server]
         url = "https://nav.example.com"
