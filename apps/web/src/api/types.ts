@@ -78,4 +78,10 @@ export interface PlaylistSummary {
 export interface PlaylistWithTracks {
   playlist: PlaylistSummary;
   tracks: Track[];
+  /** The playlist's raw stored track ids, in order — the source of truth
+   *  for membership edits (reorder / remove). `tracks` is the hydrated
+   *  subset (ids that failed to resolve against the catalog are dropped),
+   *  so edits must be computed against `trackIds`, never `tracks`, or a
+   *  transient hydration miss would silently delete that id from storage. */
+  trackIds: string[];
 }

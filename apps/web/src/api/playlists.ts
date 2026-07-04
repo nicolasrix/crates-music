@@ -89,7 +89,10 @@ export async function getPlaylist(id: string): Promise<PlaylistWithTracks> {
   const tracks = settled
     .filter((r): r is PromiseFulfilledResult<Track> => r.status === "fulfilled")
     .map((r) => r.value);
-  return { playlist: toSummary(body.playlist), tracks };
+  // Keep the raw ordered ids alongside the hydrated tracks — membership
+  // edits (remove/reorder) replace against these, so an id that failed to
+  // hydrate this load isn't dropped from the stored playlist.
+  return { playlist: toSummary(body.playlist), tracks, trackIds: body.track_ids };
 }
 
 export async function createPlaylist(name: string): Promise<PlaylistSummary> {
@@ -121,6 +124,21 @@ export async function setPlaylistTracks(playlistId: string, trackIds: string[]):
     body: JSON.stringify({ track_ids: trackIds, mode: "replace" }),
   });
   if (!res.ok) throw new Error(`setPlaylistTracks HTTP ${res.status}`);
+}
+
+// Remove every occurrence of a track id from a playlist. `currentTrackIds`
+// MUST be the raw stored ids (`PlaylistWithTracks.trackIds`), not the
+// hydrated `tracks` — replacing against the hydrated subset would delete any
+// id that failed to resolve against the catalog this load. Returns the new
+// id list so callers can update their optimistic cache with the same value.
+export async function removeTrackFromPlaylist(
+  playlistId: string,
+  trackId: string,
+  currentTrackIds: readonly string[],
+): Promise<string[]> {
+  const next = currentTrackIds.filter((t) => t !== trackId);
+  await setPlaylistTracks(playlistId, next);
+  return next;
 }
 
 export async function renamePlaylist(playlistId: string, name: string): Promise<void> {

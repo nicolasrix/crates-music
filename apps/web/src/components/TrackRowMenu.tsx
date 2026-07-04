@@ -61,7 +61,7 @@ export function TrackRowMenu({
 }: {
   track: Track;
   showQueueActions?: boolean;
-  extraItems?: RowMenuExtraItem[];
+  extraItems?: RowMenuExtraItem[] | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"root" | "playlists">("root");

@@ -8,7 +8,7 @@ import { Play } from "lucide-react";
 import { forwardRef, useState } from "react";
 import { Link } from "../router";
 import { Cover } from "./Cover";
-import { TrackRowMenu } from "./TrackRowMenu";
+import { TrackRowMenu, type RowMenuExtraItem } from "./TrackRowMenu";
 import { beginTrackDrag, usePointerFine } from "../dnd/trackDrag";
 import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
@@ -25,6 +25,9 @@ interface TrackRowProps {
    *  albums" signal — so consumers don't usually need to set it. */
   showCover?: boolean;
   onPlay: (index: number) => void;
+  /** Extra entries prepended to this row's ⋯ menu (e.g. the Playlist
+   *  page's "remove from playlist"). Passed straight to TrackRowMenu. */
+  extraMenuItems?: RowMenuExtraItem[] | undefined;
   /** Forwarded to `<tr>` so the virtualizer can attach
    *  `measureElement` for accurate row-height tracking. */
   "data-index"?: number;
@@ -32,7 +35,7 @@ interface TrackRowProps {
 
 export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
   function TrackRow(
-    { track, index, isPlaying, showAlbum, showCover, onPlay, ...rest },
+    { track, index, isPlaying, showAlbum, showCover, onPlay, extraMenuItems, ...rest },
     ref,
   ) {
     const t = track;
@@ -134,7 +137,7 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
         )}
         <td className="col-time">{fmtDuration(t.duration)}</td>
         <td className="col-menu" onClick={(e) => e.stopPropagation()}>
-          <TrackRowMenu track={t} />
+          <TrackRowMenu track={t} extraItems={extraMenuItems} />
         </td>
       </tr>
     );
