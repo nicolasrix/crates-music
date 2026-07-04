@@ -184,7 +184,18 @@ pub async fn reset_password(
     };
     match state.oauth().set_user_password(id, &phc).await {
         Ok(true) => {
-            tracing::info!(user_id = id, "reset user password");
+            // Account recovery assumes the account may be compromised, so
+            // cut off everything it holds (sec review 1.4): all browser
+            // sessions + all refresh/access tokens. Best-effort — the
+            // password is already rotated; log but don't fail the reset if
+            // revocation errors (leaving stale tokens that expire on TTL).
+            if let Err(e) = state.oauth().revoke_all_sessions_for_user(id).await {
+                tracing::error!(error = %e, user_id = id, "reset: revoke sessions failed");
+            }
+            if let Err(e) = state.oauth().revoke_all_tokens_for_user(id).await {
+                tracing::error!(error = %e, user_id = id, "reset: revoke tokens failed");
+            }
+            tracing::info!(user_id = id, "reset user password + revoked sessions/tokens");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => StatusCode::NOT_FOUND.into_response(),

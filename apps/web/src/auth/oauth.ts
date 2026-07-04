@@ -164,5 +164,15 @@ export async function logout(refreshToken: string | null) {
       // best-effort; clear local state regardless
     }
   }
+  // Also kill the server-side browser session + its `gw_session` cookie.
+  // Clearing SPA tokens alone leaves the cookie valid for its full TTL, so
+  // /oauth/authorize would silently re-mint a code for the signed-out user.
+  // `credentials: "include"` so the cookie is sent (same-origin normally
+  // includes it, but be explicit — the cookie is the whole point here).
+  try {
+    await fetch("/oauth/logout", { method: "POST", credentials: "include" });
+  } catch {
+    // best-effort; clear local state regardless
+  }
   clearTokens();
 }

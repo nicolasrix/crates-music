@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::header::{COOKIE, LOCATION};
+use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use music_gateway::build_router;
 use music_gateway::oauth::{
@@ -260,6 +260,88 @@ async fn authorize_with_prompt_login_forces_login_despite_session() {
     assert!(
         !next.contains("prompt"),
         "next= must drop prompt to avoid a redirect loop: {next}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_prompt_login_revokes_the_old_session_server_side() {
+    // prompt=login must not merely ignore the cookie — it must revoke the
+    // session server-side (sec 1.4), or a second tab / back-button keeps
+    // authorizing as the switched-away user for the full TTL.
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth.clone(), SetupToken::none())
+            .await;
+    let app = build_router(state);
+
+    // First: a prompt=login authorize (bounces to login, kills the session).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}&prompt=login"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The session is dead in storage.
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_none(),
+        "prompt=login must revoke the old session"
+    );
+
+    // And presenting the same cookie to a normal authorize now goes to
+    // login (no code minted) — before the fix it would authorize.
+    let resp2 = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
+    let loc = resp2.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(
+        loc.starts_with("/oauth/login?next="),
+        "a revoked session must not authorize: {loc}"
+    );
+}
+
+#[tokio::test]
+async fn logout_revokes_session_and_clears_cookie() {
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth.clone(), SetupToken::none())
+            .await;
+    let app = build_router(state);
+
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_some(),
+        "session valid before logout"
+    );
+
+    let resp = app
+        .oneshot(
+            Request::post("/oauth/logout")
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let set_cookie = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+    assert!(set_cookie.contains("gw_session="), "clears the cookie: {set_cookie}");
+    assert!(set_cookie.contains("Max-Age=0"), "expires the cookie: {set_cookie}");
+
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_none(),
+        "session revoked server-side after logout"
     );
 }
 

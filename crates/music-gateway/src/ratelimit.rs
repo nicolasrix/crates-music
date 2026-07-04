@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn rate_limiter_allows_up_to_max_then_429s() {
         let lim = RateLimiter::default();
-        let win = Duration::from_secs(60);
+        let win = Duration::from_mins(1);
         // First `max` requests pass.
         for _ in 0..3 {
             assert!(lim.check("guest", ip(), 3, win).is_ok());
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn rate_limiter_buckets_are_independent_per_endpoint() {
         let lim = RateLimiter::default();
-        let win = Duration::from_secs(60);
+        let win = Duration::from_mins(1);
         // Exhaust the guest bucket.
         for _ in 0..2 {
             assert!(lim.check("guest", ip(), 2, win).is_ok());

@@ -89,7 +89,7 @@ fn too_many_requests(retry_after: Duration) -> (StatusCode, Json<OauthError>) {
     oauth_error(
         StatusCode::TOO_MANY_REQUESTS,
         "slow_down",
-        &format!("too many requests; retry in {}s", retry_after.as_secs() + 1),
+        format!("too many requests; retry in {}s", retry_after.as_secs() + 1),
     )
 }
 
@@ -409,7 +409,15 @@ pub async fn authorize(
     // `next` URL we build below deliberately omits `prompt`, so once a fresh
     // session is minted the bounce-back authorize reuses it (no redirect
     // loop) and issues the code for the newly chosen user.
+    //
+    // Crucially we also revoke it **server-side** (sec review 1.4), not just
+    // ignore the cookie: otherwise the old session stays valid for its full
+    // 24 h TTL, so a second tab (or the back button) could silently re-auth
+    // as the switched-away user — the exact gap PR #33 meant to close.
     let session = if q.prompt.as_deref() == Some("login") {
+        if let Some(t) = session_token.as_deref() {
+            state.oauth().revoke_session(t).await.map_err(internal)?;
+        }
         None
     } else {
         session
@@ -981,6 +989,33 @@ pub async fn revoke(
         tracing::error!("revoke access: {e}");
     }
     StatusCode::OK
+}
+
+/// POST /oauth/logout — revoke the browser session and clear its cookie.
+///
+/// Web sign-out clears the SPA's OAuth tokens (and `/oauth/revoke`s the
+/// refresh token), but the `gw_session` cookie is server-side state the
+/// SPA can't reach. Without this endpoint it stayed valid for its full
+/// 24 h TTL, so `/oauth/authorize` would silently re-mint a code for the
+/// "signed-out" user (sec review 1.4). Idempotent — a missing/absent
+/// session is fine; the cookie is cleared regardless so the browser stops
+/// presenting it. No CSRF token needed: the cookie is `SameSite=Lax`, so a
+/// cross-site POST won't carry it and the call no-ops.
+pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = extract_session_cookie(&headers)
+        && let Err(e) = state.oauth().revoke_session(&token).await
+    {
+        // Best-effort: still clear the cookie below.
+        tracing::error!("logout revoke_session: {e}");
+    }
+    let clear =
+        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    resp.headers_mut().insert(
+        SET_COOKIE,
+        clear.parse().expect("clear-cookie header value is valid"),
+    );
+    resp
 }
 
 // ---------------------------------------------------------------------

@@ -437,6 +437,51 @@ impl OauthStore {
         Ok(())
     }
 
+    /// Revoke every active session for a user. Returns the number of
+    /// sessions revoked. Used on admin password reset (sec review 1.4): a
+    /// recovered/compromised account must lose all its browser sessions,
+    /// not just its password.
+    pub async fn revoke_all_sessions_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let res = sqlx::query(
+            "UPDATE sessions SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke every active refresh **and** access token for a user, in one
+    /// transaction. Returns the total rows revoked. Paired with
+    /// `revoke_all_sessions_for_user` on password reset so a compromised
+    /// account is fully cut off — not left with live access tokens for the
+    /// remainder of their 1 h TTL, nor able to refresh.
+    pub async fn revoke_all_tokens_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        let refresh = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        let access = sqlx::query(
+            "UPDATE access_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(refresh.rows_affected() + access.rows_affected())
+    }
+
     /// Mint and store a fresh authorization code. The plaintext is in
     /// the return value (goes into the redirect URL); the row holds only
     /// its sha256.

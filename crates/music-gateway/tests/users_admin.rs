@@ -181,6 +181,51 @@ async fn cannot_delete_the_owner() {
 }
 
 #[tokio::test]
+async fn reset_password_revokes_target_sessions_and_tokens() {
+    // Admin password reset is account recovery: the account may be
+    // compromised, so the reset must also cut off its live sessions and
+    // tokens (sec 1.4), not just rotate the hash.
+    let oauth = store_with_owner_and_client().await;
+    let admin = token_for(&oauth, 1).await;
+    let alice = oauth
+        .insert_user(NewUser {
+            username: Some("alice".to_string()),
+            display_name: None,
+            role: "user".to_string(),
+            password_hash: Some("$argon2id$dummy".to_string()),
+            host_user_id: None,
+            expires_at_unix_ms: None,
+        })
+        .await
+        .unwrap();
+    // A live session + access token for alice.
+    let sess = oauth.create_session(alice, Duration::from_hours(1)).await.unwrap();
+    let alice_token = oauth
+        .mint_access_token_for_user("web", None, Duration::from_hours(1), Some(alice))
+        .await
+        .unwrap();
+
+    let app = app_for(oauth.clone()).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/admin/users/{alice}/password"),
+        &admin,
+        serde_json::json!({ "password": ALICE_PASSWORD }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "reset succeeds");
+
+    assert!(
+        oauth.find_session(&sess.token).await.unwrap().is_none(),
+        "alice's session must be revoked by the reset"
+    );
+    assert!(
+        oauth.find_access_token(&alice_token.token).await.unwrap().is_none(),
+        "alice's access token must be revoked by the reset"
+    );
+}
+
+#[tokio::test]
 async fn cannot_reset_the_owner_password() {
     // The owner's credential is only resettable via the offline CLI
     // `reset-master-password` path. Allowing it over HTTP would let ANY
