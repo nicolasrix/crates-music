@@ -251,9 +251,19 @@ async fn refresh_grant_returns_new_pair_and_revokes_old() {
     // New refresh works.
     assert!(oauth.find_refresh_token(&new_rt).await.unwrap().is_some());
 
-    // Replaying the old refresh fails.
-    let (replay_status, _) = body_json(post_token(app, body).await).await;
-    assert_eq!(replay_status, StatusCode::BAD_REQUEST);
+    // Replaying the old refresh *immediately* is honored by the rotation
+    // grace window (REFRESH_ROTATION_GRACE): a lagging device that shared
+    // the token gets its own fresh, independent pair instead of a spurious
+    // `invalid_grant` sign-out. (The strict post-grace hard-fail is covered
+    // at the storage layer, which can inject a zero grace.)
+    let (replay_status, replay_json) = body_json(post_token(app, body).await).await;
+    assert_eq!(replay_status, StatusCode::OK);
+    let graced_rt = replay_json["refresh_token"].as_str().unwrap();
+    assert_ne!(graced_rt, issued.token);
+    assert_ne!(
+        graced_rt, new_rt,
+        "grace redemption mints its own independent pair"
+    );
 }
 
 #[tokio::test]
@@ -335,20 +345,93 @@ async fn consume_refresh_token_is_single_use_under_concurrency() {
         .await
         .unwrap();
 
+    // Zero grace → strict single-use: the atomic gate must let exactly one
+    // of two simultaneous redemptions win.
     let (a, b) = tokio::join!(
-        oauth.consume_refresh_token(&issued.token, "web"),
-        oauth.consume_refresh_token(&issued.token, "web"),
+        oauth.consume_refresh_token(&issued.token, "web", Duration::ZERO),
+        oauth.consume_refresh_token(&issued.token, "web", Duration::ZERO),
     );
     let winners = [a.unwrap(), b.unwrap()].into_iter().flatten().count();
     assert_eq!(winners, 1, "exactly one concurrent consume may win");
 
-    // And the token is now spent for everyone.
+    // And the token is now spent for everyone (still zero grace).
     assert!(
         oauth
-            .consume_refresh_token(&issued.token, "web")
+            .consume_refresh_token(&issued.token, "web", Duration::ZERO)
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn consume_refresh_token_grace_window_tolerates_rotation_race() {
+    // The rotation-race fix: a token rotated moments ago is still honored
+    // within the grace window, so two devices sharing a refresh token don't
+    // sign each other out.
+    let oauth = store_with_client().await;
+    let issued = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+        })
+        .await
+        .unwrap();
+    let grace = Duration::from_mins(1);
+
+    // First redemption wins the atomic rotation.
+    let first = oauth
+        .consume_refresh_token(&issued.token, "web", grace)
+        .await
+        .unwrap();
+    assert!(first.is_some(), "first redemption wins");
+
+    // A lagging context presenting the SAME token within the window still
+    // succeeds (it will mint its own independent pair).
+    let second = oauth
+        .consume_refresh_token(&issued.token, "web", grace)
+        .await
+        .unwrap();
+    assert!(
+        second.is_some(),
+        "a just-rotated token is honored within the grace window"
+    );
+
+    // With zero grace the same token is spent — the window, not the token,
+    // is what kept it alive.
+    let third = oauth
+        .consume_refresh_token(&issued.token, "web", Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(third.is_none(), "outside the grace window the token is spent");
+}
+
+#[tokio::test]
+async fn logout_revoked_token_is_not_resurrected_by_grace() {
+    // Security invariant: the grace window is keyed on rotation, NOT on
+    // `revoked_at`. A token killed by an explicit logout must stay dead even
+    // inside a generous grace window — a kill-switch is instant.
+    let oauth = store_with_client().await;
+    let issued = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+        })
+        .await
+        .unwrap();
+
+    // Explicit logout stamps `revoked_at` only (no `rotated_at`).
+    oauth.revoke_refresh_token(&issued.token).await.unwrap();
+
+    assert!(
+        oauth
+            .consume_refresh_token(&issued.token, "web", Duration::from_mins(1))
+            .await
+            .unwrap()
+            .is_none(),
+        "a logged-out token must never be resurrected by the rotation grace window"
     );
 }
 
@@ -368,7 +451,7 @@ async fn consume_refresh_token_wrong_client_does_not_burn_token() {
 
     assert!(
         oauth
-            .consume_refresh_token(&issued.token, "someone-else")
+            .consume_refresh_token(&issued.token, "someone-else", Duration::ZERO)
             .await
             .unwrap()
             .is_none(),
@@ -377,7 +460,7 @@ async fn consume_refresh_token_wrong_client_does_not_burn_token() {
     // Still valid for the rightful client.
     assert!(
         oauth
-            .consume_refresh_token(&issued.token, "web")
+            .consume_refresh_token(&issued.token, "web", Duration::ZERO)
             .await
             .unwrap()
             .is_some(),

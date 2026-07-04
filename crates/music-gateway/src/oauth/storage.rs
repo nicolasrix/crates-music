@@ -553,30 +553,45 @@ impl OauthStore {
         }))
     }
 
-    /// Atomic single-use redemption for rotation: revoke the refresh
-    /// token (and every access token derived from it) and return its row
-    /// **exactly once**, scoped to `client_id`. Returns `None` for a
-    /// token that is missing, expired, already revoked, or registered to
-    /// a different client.
+    /// Single-use redemption for rotation, with a `grace` window that
+    /// tolerates a just-rotated token. Revokes the refresh token (and every
+    /// access token derived from it) and returns its row, scoped to
+    /// `client_id`. Returns `None` for a token that is missing, expired,
+    /// registered to a different client, revoked by logout/reset, or
+    /// rotated longer than `grace` ago.
     ///
-    /// The single-row `UPDATE ... RETURNING` is the concurrency gate
-    /// (mirrors `consume_auth_code`): two simultaneous refreshes of the
-    /// same token can't both win because only the row whose `revoked_at`
-    /// was still NULL is updated and returned — the loser matches no rows
-    /// and gets `None`. SQLite serialises the write transactions, so the
-    /// access-token cascade in the winning transaction is consistent.
-    /// A non-matching `client_id` leaves the token untouched (the WHERE
-    /// doesn't match), so a wrong-client attempt can't burn a valid token.
+    /// **Hard path (first redemption).** The single-row `UPDATE ...
+    /// RETURNING` is the concurrency gate (mirrors `consume_auth_code`):
+    /// only the row whose `revoked_at` was still NULL is updated and
+    /// returned. It stamps both `revoked_at` *and* `rotated_at` (the latter
+    /// marks this a rotation — the only revocation the grace path honors)
+    /// and cascade-revokes the access tokens derived from the old refresh.
+    /// SQLite serialises the write transactions, so the cascade is
+    /// consistent. A non-matching `client_id` leaves the token untouched.
+    ///
+    /// **Grace path (rotation race).** When the hard `UPDATE` matches
+    /// nothing, the token may have been *rotated* within the last `grace`
+    /// milliseconds — e.g. the PWA and an open browser tab both refreshed
+    /// the shared token, and this caller lost the atomic race. Rather than
+    /// a spurious `invalid_grant` sign-out, we return the row (the caller
+    /// mints a fresh, independent pair) **without** re-running the cascade,
+    /// so the winner's freshly-minted access token survives. This is keyed
+    /// strictly on `rotated_at`, so a token killed by logout/reset
+    /// (`revoked_at` set, `rotated_at` NULL) is never resurrected — hard
+    /// kill-switches stay instant. `grace == 0` disables the window
+    /// (strict single-use). The window is measured from the *first*
+    /// rotation, so repeated grace redemptions can't extend it.
     pub async fn consume_refresh_token(
         &self,
         token: &str,
         client_id: &str,
+        grace: Duration,
     ) -> Result<Option<RefreshToken>> {
         let token_hash = session::hash_token(token);
         let now = unix_ms_now();
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
-            "UPDATE refresh_tokens SET revoked_at = ? \
+            "UPDATE refresh_tokens SET revoked_at = ?, rotated_at = ? \
              WHERE token_hash = ? \
                AND client_id = ? \
                AND revoked_at IS NULL \
@@ -584,15 +599,16 @@ impl OauthStore {
              RETURNING token_hash, client_id, user_id, issued_at, expires_at",
         )
         .bind(now)
+        .bind(now)
         .bind(&token_hash)
         .bind(client_id)
         .bind(now)
         .fetch_optional(&mut *tx)
         .await?;
 
-        // Cascade-revoke derived access tokens only when we actually
-        // consumed the refresh (otherwise a no-op).
-        if row.is_some() {
+        if let Some(r) = row {
+            // First (winning) redemption: cascade-revoke the access tokens
+            // derived from this refresh.
             sqlx::query(
                 "UPDATE access_tokens SET revoked_at = ? \
                  WHERE refresh_token_hash = ? AND revoked_at IS NULL",
@@ -601,10 +617,38 @@ impl OauthStore {
             .bind(&token_hash)
             .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
+            return Ok(Some(RefreshToken {
+                token_hash: r.get("token_hash"),
+                client_id: r.get("client_id"),
+                user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
+                issued_at_unix_ms: r.get("issued_at"),
+                expires_at_unix_ms: r.get("expires_at"),
+            }));
         }
+
+        // Grace path: honor a token rotated within the window. Keyed on
+        // `rotated_at` (not `revoked_at`) so logout/reset stay dead.
+        let grace_floor =
+            now.saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        let graced = sqlx::query(
+            "SELECT token_hash, client_id, user_id, issued_at, expires_at \
+             FROM refresh_tokens \
+             WHERE token_hash = ? \
+               AND client_id = ? \
+               AND rotated_at IS NOT NULL \
+               AND rotated_at > ? \
+               AND (expires_at IS NULL OR expires_at > ?)",
+        )
+        .bind(&token_hash)
+        .bind(client_id)
+        .bind(grace_floor)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
         tx.commit().await?;
 
-        Ok(row.map(|r| RefreshToken {
+        Ok(graced.map(|r| RefreshToken {
             token_hash: r.get("token_hash"),
             client_id: r.get("client_id"),
             user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),

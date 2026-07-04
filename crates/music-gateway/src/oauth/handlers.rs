@@ -42,6 +42,16 @@ pub const AUTH_CODE_TTL: Duration = Duration::from_mins(10);
 /// Access tokens are short-lived; clients refresh as needed.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::from_hours(1);
 
+/// Grace window during which a *just-rotated* refresh token is still
+/// honored. Closes the refresh-rotation race: when two contexts share a
+/// refresh token (e.g. the installed PWA and a still-open browser tab) and
+/// both refresh near-simultaneously, the one that loses the atomic rotation
+/// would otherwise receive a spurious `invalid_grant` and be signed out.
+/// Within this window it instead gets its own fresh, independent pair.
+/// Only rotations are graceable — logout and password/master reset revoke
+/// instantly (see `consume_refresh_token`).
+pub const REFRESH_ROTATION_GRACE: Duration = Duration::from_mins(1);
+
 /// Device codes are short-lived (RFC 8628 §3.2 example uses ~15 min; we
 /// match the auth-code window of 10 min).
 pub const DEVICE_CODE_TTL: Duration = Duration::from_mins(10);
@@ -604,16 +614,17 @@ async fn grant_refresh_token(
     })?;
 
     // Rotation is a single atomic step: `consume_refresh_token` revokes
-    // the presented token and returns its row exactly once, scoped to
-    // this client. A concurrent replay of the same token loses the race
-    // and gets `None` here — closing the find-then-revoke window that
-    // would otherwise let one refresh mint two valid pairs. A wrong
-    // client_id, an unknown/expired/revoked token, and a replay all
-    // collapse to the same `invalid_grant` (no oracle, and a
-    // wrong-client attempt does not burn a valid token).
+    // the presented token and returns its row, scoped to this client. The
+    // atomic winner mints the new pair; a concurrent/lagging replay of the
+    // same token is honored only within `REFRESH_ROTATION_GRACE` (so two
+    // devices sharing a token don't sign each other out) and otherwise gets
+    // `None`. A wrong client_id, an unknown/expired token, a logout/reset
+    // revocation, and a stale (post-grace) replay all collapse to the same
+    // `invalid_grant` (no oracle, and a wrong-client attempt does not burn
+    // a valid token).
     let consumed = state
         .oauth()
-        .consume_refresh_token(&refresh, &client_id)
+        .consume_refresh_token(&refresh, &client_id, REFRESH_ROTATION_GRACE)
         .await
         .map_err(|e| oauth_internal(&e))?
         .ok_or_else(|| {

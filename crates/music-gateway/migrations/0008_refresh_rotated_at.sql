@@ -1,0 +1,18 @@
+-- Refresh-token rotation grace window.
+--
+-- `revoked_at` is stamped by BOTH rotation (consume_refresh_token) and
+-- explicit kill-switches (logout via revoke_refresh_token, and the
+-- password/master reset flows). To offer a grace window on rotation
+-- WITHOUT resurrecting a logged-out/reset session, we need to tell the two
+-- apart — so rotation additionally stamps `rotated_at`.
+--
+-- The grace path in consume_refresh_token keys on `rotated_at` (NOT
+-- `revoked_at`): a token revoked by rotation within the last N seconds is
+-- still honored (a lagging device that shared the token — PWA + open tab —
+-- gets its own fresh pair instead of a spurious `invalid_grant` sign-out),
+-- while a token revoked by logout/reset (revoked_at set, rotated_at NULL)
+-- is dead immediately, keeping kill-switches instant.
+--
+-- Existing rows (all currently-live sessions) get NULL, i.e. "not rotated",
+-- which is correct — they're active tokens, not rotated ones.
+ALTER TABLE refresh_tokens ADD COLUMN rotated_at INTEGER;  -- unix-ms; non-NULL = revoked BY ROTATION (graceable)
