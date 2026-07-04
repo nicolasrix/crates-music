@@ -19,7 +19,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { artAttrs, useCoverPalette } from "../components/ArtworkPalette";
 import { coverArtUrl } from "../api/client";
-import { setTrackDragData, usePointerFine } from "../dnd/trackDrag";
+import { beginTrackDrag, usePointerFine } from "../dnd/trackDrag";
 import { Cover } from "../components/Cover";
 import { EntityRating } from "../components/EntityRating";
 import { TrackRowMenu } from "../components/TrackRowMenu";
@@ -58,6 +58,8 @@ export function PlayerBar() {
   // Desktop-only: drag the now-playing card onto a sidebar playlist. Same
   // pointer:fine gate as the tracklist rows.
   const pointerFine = usePointerFine();
+  // Fade the card while it's the drag source (mirrors the tracklist rows).
+  const [dragging, setDragging] = useState(false);
 
   // Empty state — keep the chrome bar visible so the layout doesn't shift.
   if (!nowPlaying) {
@@ -77,13 +79,17 @@ export function PlayerBar() {
   return (
     <div className={`player ${art.className}`} style={art.style}>
       <div
-        className="np"
+        className={`np${pointerFine ? " is-draggable" : ""}${dragging ? " is-dragging" : ""}`}
         draggable={pointerFine}
         onDragStart={
           pointerFine
-            ? (e) => setTrackDragData(e.dataTransfer, nowPlaying.id)
+            ? (e) => {
+                beginTrackDrag(e.dataTransfer, nowPlaying.id, nowPlaying.title);
+                setDragging(true);
+              }
             : undefined
         }
+        onDragEnd={pointerFine ? () => setDragging(false) : undefined}
       >
         <div className="cover">
           <Cover

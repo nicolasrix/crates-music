@@ -5,11 +5,11 @@
 // the row itself is shared.
 
 import { Play } from "lucide-react";
-import { forwardRef } from "react";
+import { forwardRef, useState } from "react";
 import { Link } from "../router";
 import { Cover } from "./Cover";
 import { TrackRowMenu } from "./TrackRowMenu";
-import { setTrackDragData, usePointerFine } from "../dnd/trackDrag";
+import { beginTrackDrag, usePointerFine } from "../dnd/trackDrag";
 import { fmtDuration } from "../utils/format";
 import type { Track } from "../api/types";
 
@@ -41,6 +41,10 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
     // touch (see dnd/trackDrag) so it never fights list scrolling; the row
     // menu's "add to playlist" remains the universal path.
     const pointerFine = usePointerFine();
+    // While this row is the drag source, fade it so the user sees which
+    // track left the list (the pill under the cursor is the copy). Cleared
+    // on dragend whether the drop landed or was cancelled.
+    const [dragging, setDragging] = useState(false);
     // The "#" cell shows the row's ordinal. In a single-album list
     // (showAlbum=false, i.e. the album page) the album track-number tag
     // is that ordinal. In a multi-album list (playlist, all-tracks,
@@ -51,14 +55,18 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
     return (
       <tr
         ref={ref}
-        className={isPlaying ? "is-playing" : ""}
+        className={`${isPlaying ? "is-playing" : ""}${dragging ? " is-dragging" : ""}`}
         onDoubleClick={() => onPlay(index)}
         draggable={pointerFine}
         onDragStart={
           pointerFine
-            ? (e) => setTrackDragData(e.dataTransfer, t.id)
+            ? (e) => {
+                beginTrackDrag(e.dataTransfer, t.id, t.title);
+                setDragging(true);
+              }
             : undefined
         }
+        onDragEnd={pointerFine ? () => setDragging(false) : undefined}
         {...rest}
       >
         <td

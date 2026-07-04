@@ -644,10 +644,15 @@ main.has-art .tile:hover .tile-cover {
   vertical-align: middle;
 }
 .tracks tbody tr {
-  transition: background var(--dur-1) var(--ease-out-soft);
+  transition: background var(--dur-1) var(--ease-out-soft),
+    opacity var(--dur-2) var(--ease-out-soft);
   cursor: pointer;
 }
 .tracks tbody tr:hover { background: color-mix(in oklab, var(--surface-2) 60%, transparent); }
+/* Desktop DnD: fade the row while it's the drag source so the user sees
+   which track was picked up. The compact pill under the cursor is the copy;
+   the row stays in place (a copy-into-playlist, not a move). */
+.tracks tbody tr.is-dragging { opacity: 0.4; }
 .tracks .col-num { width: 48px; color: var(--fg-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 /* Optional album-cover thumbnail column. The thumb is sized so the cell
    ends up the same total height as a normal text cell — i.e. row height
@@ -1079,6 +1084,26 @@ button.cover-thumb:focus-visible .thumb-play {
    pattern leaves the affordance invisible. Same reasoning as the
    queue-row-actions override. */
 .np .row-menu-trigger { opacity: 1; flex-shrink: 0; }
+/* Desktop drag affordance: the now-playing card is a draggable source
+   (onto sidebar playlists). Signal it with a grab cursor + a faint
+   rounded hover backing so the whole card reads as one grabbable object.
+   Padding + equal negative margin keeps the layout from shifting when the
+   backing appears. The inner artist/album links keep their own pointer
+   cursor (they're anchors) so navigation stays discoverable. */
+.np.is-draggable {
+  cursor: grab;
+  margin: 0 calc(var(--space-2) * -1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  transition: background var(--dur-2) var(--ease-out-soft);
+}
+.np.is-draggable:hover {
+  background: color-mix(in oklab, var(--fg) 7%, transparent);
+}
+.np.is-draggable:active { cursor: grabbing; }
+/* Source-fade while this card is being dragged (the pill under the cursor
+   is the live copy). Mirrors the tracklist rows. */
+.np.is-dragging { opacity: 0.45; }
 .transport-col {
   display: flex;
   flex-direction: column;
@@ -1409,13 +1434,51 @@ button.cover-thumb:focus-visible .thumb-play {
   bottom: 3px;
 }
 /* Highlight a playlist row while a dragged track hovers it (desktop DnD).
-   Outline (not layout) so the row doesn't shift under the cursor. */
+   Outline (not layout) so the row doesn't shift under the cursor. A gentle
+   pulse draws the eye to the live drop target. */
 .nav-item.is-drop-target {
   background: var(--surface-2);
   color: var(--fg);
   outline: 1px dashed var(--accent, var(--fg-muted));
   outline-offset: -2px;
   border-radius: var(--radius-2, 6px);
+  animation: drop-target-pulse var(--dur-3) var(--ease-out-soft) infinite alternate;
+}
+@keyframes drop-target-pulse {
+  from { outline-color: color-mix(in oklab, var(--accent, var(--fg-muted)) 55%, transparent); }
+  to { outline-color: var(--accent, var(--fg-muted)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-item.is-drop-target { animation: none; }
+}
+
+/* Compact drag image for a track source (built in dnd/trackDrag, snapshotted
+   by setDragImage). Replaces the browser's default full-element bitmap — an
+   ugly full-width row ghost — with a small titled pill that trails the
+   cursor. Lives off-screen only for the instant the browser snapshots it. */
+.track-drag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 260px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--surface-2) 92%, var(--accent, transparent));
+  color: var(--fg);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+.track-drag-chip__icon {
+  color: var(--accent, var(--fg-muted));
+  font-size: var(--text-sm);
+}
+.track-drag-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Diagnostics histogram inline 3-segment box-bar. */
