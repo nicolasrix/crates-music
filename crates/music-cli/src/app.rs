@@ -43,35 +43,35 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
     match command {
         Command::Ping => {
             client.ping().await.context("ping failed")?;
-            println!("ok");
+            println!("{}", crate::style::ok("ok"));
         }
         Command::Albums { size, kind } => {
             let albums = client
                 .get_album_list2(kind.into(), Some(size), None)
                 .await?;
-            print!("{}", albums_table(&albums));
+            print!("{}", crate::style::table(&albums_table(&albums)));
         }
         Command::Album { id } => {
             let result = client.get_album(&AlbumId::from(id)).await?;
             println!("{}", album_header(&result.album));
             println!();
-            print!("{}", tracks_table(&result.tracks));
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         }
         Command::Artists => {
             let artists = client.get_artists().await?;
-            print!("{}", artists_table(&artists));
+            print!("{}", crate::style::table(&artists_table(&artists)));
         }
         Command::Artist { id } => {
             let result = client.get_artist(&ArtistId::from(id)).await?;
             println!("{}", artist_header(&result.artist));
             println!();
-            print!("{}", albums_table(&result.albums));
+            print!("{}", crate::style::table(&albums_table(&result.albums)));
         }
         Command::Tracks { size, offset } => {
             // Empty query matches the whole library on Navidrome; paging is
             // via search3's shared offset.
             let result = client.search3("", size, offset).await?;
-            print!("{}", tracks_table(&result.tracks));
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         }
         Command::Search { query, limit } => {
             let result = client.search3(&query, limit, 0).await?;
@@ -148,24 +148,24 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
 fn print_search(result: &SearchResult3) {
     let mut printed = false;
     if !result.artists.is_empty() {
-        println!("ARTISTS");
-        print!("{}", artists_table(&result.artists));
+        println!("{}", crate::style::heading("ARTISTS"));
+        print!("{}", crate::style::table(&artists_table(&result.artists)));
         printed = true;
     }
     if !result.albums.is_empty() {
         if printed {
             println!();
         }
-        println!("ALBUMS");
-        print!("{}", albums_table(&result.albums));
+        println!("{}", crate::style::heading("ALBUMS"));
+        print!("{}", crate::style::table(&albums_table(&result.albums)));
         printed = true;
     }
     if !result.tracks.is_empty() {
         if printed {
             println!();
         }
-        println!("TRACKS");
-        print!("{}", tracks_table(&result.tracks));
+        println!("{}", crate::style::heading("TRACKS"));
+        print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         printed = true;
     }
     if !printed {

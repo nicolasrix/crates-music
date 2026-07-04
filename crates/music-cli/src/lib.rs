@@ -12,5 +12,6 @@ pub mod format;
 pub mod gateway;
 pub mod ratings;
 pub mod recommend;
+pub mod style;
 pub mod sync;
 pub mod tui;

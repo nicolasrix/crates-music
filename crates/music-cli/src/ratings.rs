@@ -51,14 +51,14 @@ pub async fn run_liked(config: &Config) -> Result<()> {
         return Ok(());
     }
     if !liked.is_empty() {
-        println!("LIKED");
+        println!("{}", crate::style::heading("LIKED"));
         print_items(&liked);
     }
     if !disliked.is_empty() {
         if !liked.is_empty() {
             println!();
         }
-        println!("DISLIKED");
+        println!("{}", crate::style::heading("DISLIKED"));
         print_items(&disliked);
     }
     Ok(())
