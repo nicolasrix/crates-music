@@ -36,6 +36,68 @@ const GATEWAY_CLIENT_NAME: &str = "crates-music-gateway";
 // upstream request so Navidrome doesn't see an unexpected param.
 const STRIPPED_PARAM_KEYS: &[&str] = &["u", "p", "t", "s", "v", "c", "f", "seed", "access_token"];
 
+/// Mutating Subsonic methods the `/rest` proxy refuses for **every** role
+/// (403, before any upstream call). Rationale (sec review 1.2): the gateway
+/// owns the write surface — playlists moved to `/v1/playlists`, ratings/likes
+/// to `/v1/library/rating` (with a hard no-Navidrome-writeback rule), and
+/// accounts to `/v1/admin/users`. Proxying these to Navidrome under the
+/// gateway's *shared* credential (typically a Navidrome admin) would let any
+/// authenticated caller — a guest most acutely — mutate shared catalog state
+/// or reach Navidrome-admin operations (`createUser`/`changePassword`). No
+/// legitimate client calls them through `/rest`, so blocking is zero-regression.
+///
+/// Compared case-insensitively with any trailing `.view` stripped (see
+/// [`is_subsonic_write_method`]). `scrobble` is deliberately absent — it is a
+/// separate, intentional route (`/rest/scrobble`) writing Navidrome's
+/// canonical play-count ledger.
+const SUBSONIC_WRITE_METHODS: &[&str] = &[
+    // Ratings / stars (gateway-owned, no writeback).
+    "star",
+    "unstar",
+    "setrating",
+    // Playlists (gateway-owned via /v1/playlists).
+    "createplaylist",
+    "updateplaylist",
+    "deleteplaylist",
+    // Play queue (gateway sync owns this).
+    "saveplayqueue",
+    // Sharing.
+    "createshare",
+    "updateshare",
+    "deleteshare",
+    // Navidrome user administration — must never be reachable via the proxy.
+    "createuser",
+    "updateuser",
+    "deleteuser",
+    "changepassword",
+    // Internet radio.
+    "createinternetradiostation",
+    "updateinternetradiostation",
+    "deleteinternetradiostation",
+    // Podcasts.
+    "createpodcastchannel",
+    "deletepodcastchannel",
+    "deletepodcastepisode",
+    "downloadpodcastepisode",
+    "refreshpodcasts",
+    // Bookmarks.
+    "createbookmark",
+    "deletebookmark",
+    // Library scan + jukebox control.
+    "startscan",
+    "jukeboxcontrol",
+];
+
+/// `true` iff `method` is a mutating Subsonic method the proxy blocks. The
+/// comparison strips a legacy `.view` suffix and lower-cases, so `star`,
+/// `star.view`, and `STAR` all match — Navidrome's routing tolerates case
+/// and the `.view` form, so the guard must too, or it's trivially bypassed.
+fn is_subsonic_write_method(method: &str) -> bool {
+    let lower = method.to_ascii_lowercase();
+    let base = lower.strip_suffix(".view").unwrap_or(&lower);
+    SUBSONIC_WRITE_METHODS.contains(&base)
+}
+
 /// Subsonic methods we cache. Catalog browse only — playback / mutating /
 /// session endpoints stay pass-through.
 const BROWSE_METHODS: &[&str] = &[
@@ -102,6 +164,16 @@ async fn proxy_inner(
         return Err(StatusCode::NOT_FOUND);
     }
     tracing::Span::current().record("method", subsonic_method);
+
+    // Read-only proxy: refuse mutating Subsonic methods for every role
+    // before touching upstream (sec review 1.2). These are gateway-owned
+    // or Navidrome-admin operations no legitimate client proxies.
+    if is_subsonic_write_method(subsonic_method) {
+        tracing::Span::current().record("kind", "write_blocked");
+        tracing::warn!(method = %subsonic_method, "blocked mutating subsonic method on read-only proxy");
+        return Ok(subsonic_forbidden());
+    }
+
     let client_query = request.uri().query().unwrap_or("");
 
     if BROWSE_METHODS.contains(&subsonic_method) && is_cacheable(subsonic_method, client_query) {
@@ -726,6 +798,21 @@ async fn pass_through(
     Ok(response)
 }
 
+/// 403 for a blocked mutating method, shaped as a Subsonic error envelope
+/// (code 50 = "user not authorized for the given operation") so a Subsonic
+/// client gets a coherent failure rather than an opaque empty body.
+fn subsonic_forbidden() -> Response {
+    let body = Bytes::from_static(
+        br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":50,"message":"This operation is not permitted through the gateway proxy."}}}"#,
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
 fn not_modified(etag: &str) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NOT_MODIFIED;
@@ -1064,6 +1151,48 @@ mod tests {
             "stream.view",
         ] {
             assert!(is_valid_subsonic_method(m), "should accept {m:?}");
+        }
+    }
+
+    #[test]
+    fn write_methods_detected_case_and_view_insensitive() {
+        for m in [
+            "star",
+            "unstar",
+            "setRating",
+            "createPlaylist",
+            "updatePlaylist",
+            "deletePlaylist",
+            "createUser",
+            "deleteUser",
+            "changePassword",
+            "savePlayQueue",
+            "startScan",
+            "jukeboxControl",
+            // legacy `.view` suffix + case variants must still match
+            "star.view",
+            "STAR",
+            "SetRating.View",
+        ] {
+            assert!(is_subsonic_write_method(m), "should block {m:?}");
+        }
+    }
+
+    #[test]
+    fn read_methods_not_flagged_as_writes() {
+        for m in [
+            "ping",
+            "stream",
+            "getAlbumList2",
+            "getAlbum",
+            "search3",
+            "getCoverArt",
+            "getSong",
+            "getPlayQueue", // read counterpart of the blocked savePlayQueue
+            "scrobble",     // intentional separate route — never blocked here
+            "getStarred",   // reads stars; only the mutating star/unstar are blocked
+        ] {
+            assert!(!is_subsonic_write_method(m), "should allow {m:?}");
         }
     }
 
