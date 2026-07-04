@@ -244,6 +244,17 @@ async fn main() -> Result<()> {
         Duration::from_secs(state.config().oauth.guest_sweep_interval_seconds),
     );
 
+    // Typo-tolerant search: build the fuzzy catalog index in the background
+    // and refresh it on an interval. Until it lands, `/v1/search` falls
+    // back to proxying Navidrome `search3`.
+    if state.config().search.enabled {
+        music_gateway::search::spawn_index_builder(
+            state.search_handle(),
+            state.config().upstream.clone(),
+            Duration::from_secs(state.config().search.refresh_interval_seconds),
+        );
+    }
+
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");

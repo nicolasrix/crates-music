@@ -47,6 +47,7 @@ rodio = { version = "0.20", default-features = false, features = ["symphonia-all
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 async-trait = "0.1"
+fst = { version = "0.4", features = ["levenshtein"] }
 
 # auth / crypto
 argon2 = "0.5"

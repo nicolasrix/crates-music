@@ -24,6 +24,7 @@ use crate::proxy::proxy;
 use crate::readyz;
 use crate::recommend;
 use crate::recommend_feedback;
+use crate::search::handlers as search_handlers;
 use crate::scrobble;
 use crate::state::AppState;
 use crate::sync::handlers as sync_handlers;
@@ -180,6 +181,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/library/rating", put(library_rating::put_rating))
         .route("/v1/library/ratings", get(library_rating::list_ratings))
+        // Typo-tolerant catalog search (fuzzy fst index; falls back to
+        // Navidrome search3 until the index is built).
+        .route("/v1/search", get(search_handlers::search))
         .route("/v1/events", post(events::submit))
         // Host-side guest-code management (PR D). Any authenticated real
         // account manages its *own* codes; the handlers 403 a guest.

@@ -60,6 +60,9 @@ struct Inner {
     /// Gateway-owned playlists (PR F). Shares the OAuth pool — same
     /// `gateway-state.sqlite` file, migration `0007_playlists.sql`.
     playlists: PlaylistStore,
+    /// Typo-tolerant search index (`GET /v1/search`). `None` until the
+    /// boot builder fills it; queries fall back to Navidrome meanwhile.
+    search: crate::search::SearchHandle,
     setup_token: SetupToken,
     sync: SyncStore,
     embedder: EmbedderHandle,
@@ -158,6 +161,7 @@ impl AppState {
                 cache,
                 oauth,
                 playlists,
+                search: crate::search::new_handle(),
                 setup_token,
                 sync: SyncStore::with_sessions(sessions.clone()),
                 embedder,
@@ -189,6 +193,18 @@ impl AppState {
 
     pub fn refit_gate(&self) -> &Arc<Semaphore> {
         &self.inner.refit_gate
+    }
+
+    /// Clone of the shared search-index handle — for the boot builder task.
+    pub fn search_handle(&self) -> crate::search::SearchHandle {
+        self.inner.search.clone()
+    }
+
+    /// The current built search index, if any. `None` during the boot
+    /// window (or when `[search].enabled = false`), which callers treat as
+    /// "fall back to Navidrome `search3`".
+    pub fn search_index(&self) -> Option<std::sync::Arc<crate::search::SearchIndex>> {
+        self.inner.search.read().ok().and_then(|guard| guard.clone())
     }
 
     pub fn config(&self) -> &Config {
