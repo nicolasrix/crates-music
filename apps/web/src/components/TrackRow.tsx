@@ -36,6 +36,13 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
   ) {
     const t = track;
     const renderCover = showCover ?? showAlbum;
+    // The "#" cell shows the row's ordinal. In a single-album list
+    // (showAlbum=false, i.e. the album page) the album track-number tag
+    // is that ordinal. In a multi-album list (playlist, all-tracks,
+    // search, liked, downloads, station) the album tag is meaningless as
+    // a position, so number by the row's place in *this* list instead —
+    // same "spans multiple albums" signal that drives showCover.
+    const displayNum = showAlbum ? index + 1 : (t.track ?? index + 1);
     return (
       <tr
         ref={ref}
@@ -56,7 +63,7 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
           }}
           aria-label={`play ${t.title}`}
         >
-          <span className="num-text tabular">{t.track ?? index + 1}</span>
+          <span className="num-text tabular">{displayNum}</span>
           <span className="num-play">
             <Play size={14} fill="currentColor" strokeWidth={0} />
           </span>
