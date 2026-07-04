@@ -42,6 +42,20 @@ pub const AUTH_CODE_TTL: Duration = Duration::from_mins(10);
 /// Access tokens are short-lived; clients refresh as needed.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::from_hours(1);
 
+/// Absolute lifetime of a refresh token (sec review 1.5). Rotation mints a
+/// fresh token on every use, so an *active* client slides this window
+/// forward indefinitely; an **abandoned** token now dies after 90 days
+/// instead of living forever (the old `ttl: None`).
+// `Duration::from_days` is not yet const-stable, so spell it in seconds.
+#[allow(clippy::duration_suboptimal_units)]
+pub const REFRESH_TOKEN_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// Grace window for refresh-token reuse detection (sec review 1.5). A
+/// token revoked within this window of a replay is treated as a benign
+/// near-simultaneous double-submit (the web-client singleflight gap, 1.7),
+/// not theft — see `OauthStore::detect_refresh_reuse`.
+const REFRESH_REUSE_GRACE: Duration = Duration::from_secs(10);
+
 /// Device codes are short-lived (RFC 8628 §3.2 example uses ~15 min; we
 /// match the auth-code window of 10 min).
 pub const DEVICE_CODE_TTL: Duration = Duration::from_mins(10);
@@ -53,6 +67,45 @@ pub const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Minimum master-password length. NIST SP 800-63B recommends ≥ 8 with
 /// no other rules; we go a little stricter (this is the *root* credential).
 pub const MIN_PASSWORD_LEN: usize = 12;
+
+/// Rolling window for the public, unauthenticated OAuth endpoint
+/// rate-limits (sec review 1.3). All three share one window; per-endpoint
+/// caps differ below.
+const PUBLIC_OAUTH_RL_WINDOW: Duration = Duration::from_mins(1);
+
+/// `POST /oauth/guest` per-source cap. Tight: the guest code is the
+/// highest-value brute-force target (~34.6 bits). 10/min caps guessing at
+/// ~14 k/day — astronomically short of the code space — while never
+/// bothering a household where a guest joins a handful of times.
+const GUEST_REDEEM_MAX_PER_WINDOW: u32 = 10;
+
+/// `POST /oauth/device_authorization` per-source cap. Each call mints an
+/// unauthenticated device-code row; 30/min bounds row-flooding without
+/// impeding a normal `music auth login`.
+const DEVICE_AUTH_MAX_PER_WINDOW: u32 = 30;
+
+/// `POST /oauth/revoke` per-source cap. Revoke is a free token-guessing
+/// oracle at wire speed (RFC 7009 always answers 200) and a revocation
+/// DoS; 30/min throttles both while allowing a client to revoke its
+/// handful of tokens on logout.
+const REVOKE_MAX_PER_WINDOW: u32 = 30;
+
+/// Peer address for rate-limiter keying, mirroring `login_post`. Absent
+/// connection info (unit tests via `oneshot`) buckets to the unspecified
+/// address — those callers share one bucket, which is fine. See
+/// `LoginLimiter` for the reverse-proxy caveat.
+fn peer_ip(connect: Option<&ConnectInfo<SocketAddr>>) -> IpAddr {
+    connect.map_or(IpAddr::from([0, 0, 0, 0]), |ci| ci.0.ip())
+}
+
+/// Shared 429 response for a tripped public-OAuth rate limit.
+fn too_many_requests(retry_after: Duration) -> (StatusCode, Json<OauthError>) {
+    oauth_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "slow_down",
+        format!("too many requests; retry in {}s", retry_after.as_secs() + 1),
+    )
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SetupForm {
@@ -370,7 +423,15 @@ pub async fn authorize(
     // `next` URL we build below deliberately omits `prompt`, so once a fresh
     // session is minted the bounce-back authorize reuses it (no redirect
     // loop) and issues the code for the newly chosen user.
+    //
+    // Crucially we also revoke it **server-side** (sec review 1.4), not just
+    // ignore the cookie: otherwise the old session stays valid for its full
+    // 24 h TTL, so a second tab (or the back button) could silently re-auth
+    // as the switched-away user — the exact gap PR #33 meant to close.
     let session = if q.prompt.as_deref() == Some("login") {
+        if let Some(t) = session_token.as_deref() {
+            state.oauth().revoke_session(t).await.map_err(internal)?;
+        }
         None
     } else {
         session
@@ -580,7 +641,7 @@ async fn grant_authorization_code(
         ));
     }
 
-    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
+    let pair = mint_pair(state, &client_id, consumed.user_id, None).await?;
     Ok(Json(pair))
 }
 
@@ -611,21 +672,44 @@ async fn grant_refresh_token(
     // client_id, an unknown/expired/revoked token, and a replay all
     // collapse to the same `invalid_grant` (no oracle, and a
     // wrong-client attempt does not burn a valid token).
-    let consumed = state
+    let Some(consumed) = state
         .oauth()
         .consume_refresh_token(&refresh, &client_id)
         .await
         .map_err(|e| oauth_internal(&e))?
-        .ok_or_else(|| {
-            oauth_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_grant",
-                "refresh token is invalid, expired, revoked, or for a different client",
-            )
-        })?;
+    else {
+        // The token didn't consume. It may just be unknown/expired, or it
+        // may be a *replay of an already-rotated* token — the mark of theft
+        // (OAuth 2.1 §4.3.1). If so, revoke the whole family so both the
+        // attacker and the legitimate client are cut off.
+        if let Some(family_id) = state
+            .oauth()
+            .detect_refresh_reuse(&refresh, &client_id, REFRESH_REUSE_GRACE)
+            .await
+            .map_err(|e| oauth_internal(&e))?
+        {
+            let revoked = state
+                .oauth()
+                .revoke_family(&family_id)
+                .await
+                .map_err(|e| oauth_internal(&e))?;
+            tracing::warn!(
+                family_id = %family_id,
+                revoked,
+                "refresh token reuse detected; revoked the rotation family"
+            );
+        }
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh token is invalid, expired, revoked, or for a different client",
+        ));
+    };
 
-    // Rotation preserves identity: the new pair belongs to the same user.
-    let pair = mint_pair(state, &client_id, consumed.user_id).await?;
+    // Rotation preserves identity *and* family: the new pair keeps the same
+    // user and rotation chain, so reuse of any prior member still revokes
+    // this successor.
+    let pair = mint_pair(state, &client_id, consumed.user_id, Some(consumed.family_id)).await?;
     Ok(Json(pair))
 }
 
@@ -687,23 +771,28 @@ async fn grant_device_code(
                 ));
             }
             // The approving browser session's user (owner if unstamped).
-            let pair = mint_pair(state, &client_id, user_id.unwrap_or(1)).await?;
+            let pair = mint_pair(state, &client_id, user_id.unwrap_or(1), None).await?;
             Ok(Json(pair))
         }
     }
 }
 
+/// Mint a fresh access+refresh pair. `family_id` threads the rotation
+/// chain: `None` starts a new family (auth-code / device-code grants),
+/// `Some(_)` inherits the consumed token's family on refresh (sec 1.5).
 async fn mint_pair(
     state: &AppState,
     client_id: &str,
     user_id: i64,
+    family_id: Option<String>,
 ) -> Result<TokenResponse, (StatusCode, Json<OauthError>)> {
     let refresh = state
         .oauth()
         .mint_refresh_token(NewRefreshToken {
             client_id: client_id.to_string(),
             user_id,
-            ttl: None, // rotation handles revocation
+            ttl: Some(REFRESH_TOKEN_TTL),
+            family_id,
         })
         .await
         .map_err(|e| oauth_internal(&e))?;
@@ -765,8 +854,19 @@ pub struct GuestTokenResponse {
 /// token. When it lapses, the visitor redeems the code again.
 pub async fn guest_grant(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<GuestForm>,
 ) -> Result<Json<GuestTokenResponse>, (StatusCode, Json<OauthError>)> {
+    // Throttle brute-force of the guest code + row-flooding (sec 1.3).
+    if let Err(retry) = state.public_oauth_limiter().check(
+        "guest",
+        peer_ip(connect.as_ref()),
+        GUEST_REDEEM_MAX_PER_WINDOW,
+        PUBLIC_OAUTH_RL_WINDOW,
+    ) {
+        return Err(too_many_requests(retry));
+    }
+
     // The redeeming client must be registered (mirrors the other grants).
     state
         .oauth()
@@ -902,7 +1002,27 @@ pub struct RevokeForm {
 /// RFC 7009: the server MUST respond 200 even if the token is unknown,
 /// to avoid leaking which tokens exist. We probe refresh first
 /// (revoking a refresh cascades to its access tokens), then access.
-pub async fn revoke(State(state): State<AppState>, Form(form): Form<RevokeForm>) -> StatusCode {
+pub async fn revoke(
+    State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    Form(form): Form<RevokeForm>,
+) -> StatusCode {
+    // Throttle the revoke oracle + revocation DoS (sec 1.3). Returns 429
+    // rather than RFC 7009's 200 — a rate-limit is a transport-level
+    // decision, distinct from "token unknown but accepted".
+    if state
+        .public_oauth_limiter()
+        .check(
+            "revoke",
+            peer_ip(connect.as_ref()),
+            REVOKE_MAX_PER_WINDOW,
+            PUBLIC_OAUTH_RL_WINDOW,
+        )
+        .is_err()
+    {
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+
     let oauth = state.oauth();
     if let Err(e) = oauth.revoke_refresh_token(&form.token).await {
         tracing::error!("revoke refresh: {e}");
@@ -911,6 +1031,33 @@ pub async fn revoke(State(state): State<AppState>, Form(form): Form<RevokeForm>)
         tracing::error!("revoke access: {e}");
     }
     StatusCode::OK
+}
+
+/// POST /oauth/logout — revoke the browser session and clear its cookie.
+///
+/// Web sign-out clears the SPA's OAuth tokens (and `/oauth/revoke`s the
+/// refresh token), but the `gw_session` cookie is server-side state the
+/// SPA can't reach. Without this endpoint it stayed valid for its full
+/// 24 h TTL, so `/oauth/authorize` would silently re-mint a code for the
+/// "signed-out" user (sec review 1.4). Idempotent — a missing/absent
+/// session is fine; the cookie is cleared regardless so the browser stops
+/// presenting it. No CSRF token needed: the cookie is `SameSite=Lax`, so a
+/// cross-site POST won't carry it and the call no-ops.
+pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = extract_session_cookie(&headers)
+        && let Err(e) = state.oauth().revoke_session(&token).await
+    {
+        // Best-effort: still clear the cookie below.
+        tracing::error!("logout revoke_session: {e}");
+    }
+    let clear =
+        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    resp.headers_mut().insert(
+        SET_COOKIE,
+        clear.parse().expect("clear-cookie header value is valid"),
+    );
+    resp
 }
 
 // ---------------------------------------------------------------------
@@ -941,10 +1088,21 @@ pub struct DeviceAuthResponse {
 /// client where to send the user and how often to poll.
 pub async fn device_authorization(
     State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
     uri: Uri,
     headers: HeaderMap,
     Form(form): Form<DeviceAuthForm>,
 ) -> Result<Json<DeviceAuthResponse>, (StatusCode, Json<OauthError>)> {
+    // Throttle unauthenticated device-code row flooding (sec 1.3).
+    if let Err(retry) = state.public_oauth_limiter().check(
+        "device_authorization",
+        peer_ip(connect.as_ref()),
+        DEVICE_AUTH_MAX_PER_WINDOW,
+        PUBLIC_OAUTH_RL_WINDOW,
+    ) {
+        return Err(too_many_requests(retry));
+    }
+
     // The client must be registered (mirrors authorize()'s client check).
     state
         .oauth()

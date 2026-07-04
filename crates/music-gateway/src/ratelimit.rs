@@ -78,12 +78,120 @@ impl LoginLimiter {
     }
 }
 
+/// Cap on the number of distinct `(endpoint, source)` buckets the
+/// [`RateLimiter`] tracks. The gateway is internet-reachable, so an
+/// attacker rotating source IPs could otherwise grow the map without
+/// bound — a memory-exhaustion DoS that defeats the very endpoints this
+/// limiter protects. When the map exceeds this, expired windows are
+/// swept before inserting a new key.
+const MAX_TRACKED_SOURCES: usize = 10_000;
+
+#[derive(Debug)]
+struct RateWindow {
+    count: u32,
+    started: Instant,
+}
+
+/// Fixed-window request-rate limiter for the public, unauthenticated
+/// OAuth endpoints (`/oauth/guest`, `/oauth/device_authorization`,
+/// `/oauth/revoke`). Unlike [`LoginLimiter`] — which counts *failures* —
+/// these endpoints have no pass/fail signal (RFC 7009 revoke always
+/// answers 200; device-auth and guest redemption "succeed" structurally
+/// on every call), so we cap the *request rate* per source instead.
+///
+/// Keyed on `(endpoint, IpAddr)` so hammering one endpoint can't throttle
+/// a legitimate caller on another. Same reverse-proxy caveat as
+/// `LoginLimiter`: behind Caddy every peer collapses to the proxy IP and
+/// each endpoint's bucket becomes a global throttle — the safe failure
+/// mode for endpoints that are rare human actions. `X-Forwarded-For` is
+/// deliberately not trusted for keying (an attacker would rotate it).
+#[derive(Debug, Default)]
+pub struct RateLimiter {
+    windows: Mutex<HashMap<(&'static str, IpAddr), RateWindow>>,
+}
+
+impl RateLimiter {
+    /// Count one request against `(endpoint, ip)`. Returns `Ok(())` when
+    /// the caller is within `max` requests for the current `window`, or
+    /// `Err(retry_after)` when over. A window whose span has elapsed
+    /// resets in passing, so the next request starts a fresh count.
+    pub fn check(
+        &self,
+        endpoint: &'static str,
+        ip: IpAddr,
+        max: u32,
+        window: Duration,
+    ) -> Result<(), Duration> {
+        let now = Instant::now();
+        let mut map = self.windows.lock().expect("rate limiter poisoned");
+
+        // Bound the map: if it has grown large, drop windows that have
+        // fully expired (they'd reset on next use anyway) before adding
+        // a new source. O(n) but only when the map is already big.
+        if map.len() >= MAX_TRACKED_SOURCES && !map.contains_key(&(endpoint, ip)) {
+            map.retain(|_, w| now.duration_since(w.started) < window);
+        }
+
+        let w = map.entry((endpoint, ip)).or_insert(RateWindow {
+            count: 0,
+            started: now,
+        });
+        let elapsed = now.duration_since(w.started);
+        if elapsed >= window {
+            w.count = 0;
+            w.started = now;
+        }
+        if w.count >= max {
+            // Time until the current window rolls over.
+            return Err(window.saturating_sub(now.duration_since(w.started)));
+        }
+        w.count += 1;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ip() -> IpAddr {
         IpAddr::from([10, 0, 0, 7])
+    }
+
+    #[test]
+    fn rate_limiter_allows_up_to_max_then_429s() {
+        let lim = RateLimiter::default();
+        let win = Duration::from_mins(1);
+        // First `max` requests pass.
+        for _ in 0..3 {
+            assert!(lim.check("guest", ip(), 3, win).is_ok());
+        }
+        // The next is over the limit.
+        assert!(lim.check("guest", ip(), 3, win).is_err());
+    }
+
+    #[test]
+    fn rate_limiter_buckets_are_independent_per_endpoint() {
+        let lim = RateLimiter::default();
+        let win = Duration::from_mins(1);
+        // Exhaust the guest bucket.
+        for _ in 0..2 {
+            assert!(lim.check("guest", ip(), 2, win).is_ok());
+        }
+        assert!(lim.check("guest", ip(), 2, win).is_err());
+        // A different endpoint for the same IP is unaffected.
+        assert!(lim.check("revoke", ip(), 2, win).is_ok());
+    }
+
+    #[test]
+    fn rate_limiter_window_resets_after_elapse() {
+        let lim = RateLimiter::default();
+        // A zero-length window means every request sees an elapsed window
+        // and resets, so the cap never trips.
+        let zero = Duration::from_secs(0);
+        for _ in 0..10 {
+            assert!(lim.check("guest", ip(), 1, zero).is_ok());
+        }
     }
 
     #[test]

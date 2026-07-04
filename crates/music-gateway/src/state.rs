@@ -32,7 +32,7 @@ use crate::embedder::EmbedderHandle;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::playlists::PlaylistStore;
 use crate::proxy::build_http_client;
-use crate::ratelimit::LoginLimiter;
+use crate::ratelimit::{LoginLimiter, RateLimiter};
 use crate::sync::SyncStore;
 
 #[derive(Debug, Clone)]
@@ -112,6 +112,10 @@ struct Inner {
     placeholder_revalidations: Mutex<HashMap<String, Instant>>,
     /// Brute-force throttle for `POST /oauth/login`. See `LoginLimiter`.
     login_limiter: LoginLimiter,
+    /// Request-rate throttle for the public, unauthenticated OAuth
+    /// endpoints (`/oauth/guest`, `/oauth/device_authorization`,
+    /// `/oauth/revoke`). See `RateLimiter`.
+    public_oauth_limiter: RateLimiter,
     /// Single-permit gate serialising `POST /v1/recommend/refit_whitening`.
     /// A refit is an expensive whole-corpus power-iteration plus
     /// embedder prompt-corpus calls; concurrent refits would duplicate
@@ -178,6 +182,7 @@ impl AppState {
                 placeholder_etags: RwLock::new(HashSet::new()),
                 placeholder_revalidations: Mutex::new(HashMap::new()),
                 login_limiter: LoginLimiter::default(),
+                public_oauth_limiter: RateLimiter::default(),
                 refit_gate: Arc::new(Semaphore::new(1)),
             }),
         }
@@ -185,6 +190,10 @@ impl AppState {
 
     pub fn login_limiter(&self) -> &LoginLimiter {
         &self.inner.login_limiter
+    }
+
+    pub fn public_oauth_limiter(&self) -> &RateLimiter {
+        &self.inner.public_oauth_limiter
     }
 
     pub fn refit_gate(&self) -> &Arc<Semaphore> {

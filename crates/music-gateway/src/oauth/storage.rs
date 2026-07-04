@@ -56,6 +56,11 @@ pub struct NewRefreshToken {
     pub user_id: i64,
     /// `None` = no expiry; rotation is the revocation path.
     pub ttl: Option<Duration>,
+    /// Rotation-chain family (sec review 1.5). `None` starts a new family
+    /// (a fresh grant from an auth code / device code); on rotation the
+    /// caller threads the parent's `family_id` so the whole chain shares
+    /// one id and reuse of any member can revoke the family.
+    pub family_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +77,9 @@ pub struct RefreshToken {
     pub user_id: i64,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: Option<i64>,
+    /// Rotation-chain family id (sec review 1.5). Shared by every token
+    /// in the chain; the rotation path threads this into the successor.
+    pub family_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +445,51 @@ impl OauthStore {
         Ok(())
     }
 
+    /// Revoke every active session for a user. Returns the number of
+    /// sessions revoked. Used on admin password reset (sec review 1.4): a
+    /// recovered/compromised account must lose all its browser sessions,
+    /// not just its password.
+    pub async fn revoke_all_sessions_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let res = sqlx::query(
+            "UPDATE sessions SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke every active refresh **and** access token for a user, in one
+    /// transaction. Returns the total rows revoked. Paired with
+    /// `revoke_all_sessions_for_user` on password reset so a compromised
+    /// account is fully cut off — not left with live access tokens for the
+    /// remainder of their 1 h TTL, nor able to refresh.
+    pub async fn revoke_all_tokens_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        let refresh = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        let access = sqlx::query(
+            "UPDATE access_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(refresh.rows_affected() + access.rows_affected())
+    }
+
     /// Mint and store a fresh authorization code. The plaintext is in
     /// the return value (goes into the redirect URL); the row holds only
     /// its sha256.
@@ -509,16 +562,20 @@ impl OauthStore {
         let expires_at = input
             .ttl
             .map(|t| issued_at.saturating_add(i64::try_from(t.as_millis()).unwrap_or(i64::MAX)));
+        // A new grant starts its own family (id = the token's own hash);
+        // rotation threads the parent's id so the whole chain matches.
+        let family_id = input.family_id.unwrap_or_else(|| token_hash.clone());
         sqlx::query(
             "INSERT INTO refresh_tokens \
-                (token_hash, client_id, issued_at, expires_at, user_id) \
-             VALUES (?, ?, ?, ?, ?)",
+                (token_hash, client_id, issued_at, expires_at, user_id, family_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&token_hash)
         .bind(&input.client_id)
         .bind(issued_at)
         .bind(expires_at)
         .bind(input.user_id)
+        .bind(&family_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedRefreshToken {
@@ -534,7 +591,7 @@ impl OauthStore {
         let token_hash = session::hash_token(token);
         let now = unix_ms_now();
         let row = sqlx::query(
-            "SELECT token_hash, client_id, user_id, issued_at, expires_at \
+            "SELECT token_hash, client_id, user_id, issued_at, expires_at, family_id \
              FROM refresh_tokens \
              WHERE token_hash = ? \
                AND revoked_at IS NULL \
@@ -550,6 +607,7 @@ impl OauthStore {
             user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
+            family_id: r.get("family_id"),
         }))
     }
 
@@ -581,7 +639,7 @@ impl OauthStore {
                AND client_id = ? \
                AND revoked_at IS NULL \
                AND (expires_at IS NULL OR expires_at > ?) \
-             RETURNING token_hash, client_id, user_id, issued_at, expires_at",
+             RETURNING token_hash, client_id, user_id, issued_at, expires_at, family_id",
         )
         .bind(now)
         .bind(&token_hash)
@@ -610,7 +668,77 @@ impl OauthStore {
             user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
+            family_id: r.get("family_id"),
         }))
+    }
+
+    /// Reuse detection (OAuth 2.1 §4.3.1, sec review 1.5). Given a token
+    /// that [`consume_refresh_token`] just rejected, decide whether the
+    /// rejection is a *replay of an already-rotated* token — the
+    /// fingerprint of theft — and if so return its `family_id` so the
+    /// caller can revoke the whole chain.
+    ///
+    /// Only a row that exists, matches `client_id`, is revoked, **and was
+    /// revoked longer than `grace` ago** counts as reuse. The grace window
+    /// suppresses the benign race where two near-simultaneous refreshes of
+    /// the same live token both fire (the loser sees a just-revoked token —
+    /// see the web singleflight gap, sec review 1.7): those are
+    /// milliseconds apart, so they fall inside `grace` and are treated as a
+    /// plain `invalid_grant`, not a family-killing reuse. A genuine
+    /// exfiltrated-token replay happens far later and trips detection.
+    /// Unknown / wrong-client / expired-never-revoked tokens return `None`.
+    pub async fn detect_refresh_reuse(
+        &self,
+        token: &str,
+        client_id: &str,
+        grace: Duration,
+    ) -> Result<Option<String>> {
+        let token_hash = session::hash_token(token);
+        let cutoff = unix_ms_now()
+            .saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        let row = sqlx::query(
+            "SELECT family_id FROM refresh_tokens \
+             WHERE token_hash = ? \
+               AND client_id = ? \
+               AND revoked_at IS NOT NULL \
+               AND revoked_at <= ?",
+        )
+        .bind(&token_hash)
+        .bind(client_id)
+        .bind(cutoff)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<String, _>("family_id")))
+    }
+
+    /// Revoke every refresh token in a rotation family plus every access
+    /// token derived from any of them, in one transaction. The blunt
+    /// response to reuse detection: a stolen token means the attacker and
+    /// the legitimate client share a chain, so the whole family dies.
+    /// Returns the number of refresh-token rows revoked.
+    pub async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE access_tokens SET revoked_at = ? \
+             WHERE revoked_at IS NULL \
+               AND refresh_token_hash IN \
+                 (SELECT token_hash FROM refresh_tokens WHERE family_id = ?)",
+        )
+        .bind(now)
+        .bind(family_id)
+        .execute(&mut *tx)
+        .await?;
+        let refresh = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE family_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(family_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(refresh.rows_affected())
     }
 
     /// Revoke a refresh token plus every access token derived from it.

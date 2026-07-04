@@ -200,4 +200,25 @@ describe("AudioCache", () => {
     expect(await cache.getMetaByTrack("a")).toBeNull();
     expect(await cache.getBlob(e.key)).toBeNull();
   });
+
+  it("wipe() drops every entry including pinned ones (sec 1.6)", async () => {
+    const { cache } = makeCache({ regularBudgetBytes: 1000, pinnedBudgetBytes: 1000 });
+    await cache.put(key("regular"), blob(100));
+    const p = await cache.put(key("pinned"), blob(100));
+    await cache.pin(p.key);
+
+    await cache.wipe();
+
+    // Re-opens a fresh DB: nothing survives.
+    expect(await cache.getMetaByTrack("regular")).toBeNull();
+    expect(await cache.getMetaByTrack("pinned")).toBeNull();
+    expect(await cache.listPinned()).toEqual([]);
+    const s = await cache.stats();
+    expect(s.regularCount).toBe(0);
+    expect(s.pinnedCount).toBe(0);
+
+    // The instance is still usable after a wipe.
+    await cache.put(key("fresh"), blob(50));
+    expect(await cache.getMetaByTrack("fresh")).not.toBeNull();
+  });
 });

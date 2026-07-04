@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use music_gateway::build_router;
 use music_gateway::oauth::{
-    NewAuthCode, NewClient, NewRefreshToken, OauthStore, SetupToken, password,
+    NewAuthCode, NewClient, NewRefreshToken, OauthStore, SetupToken, password, session,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -221,6 +221,7 @@ async fn refresh_grant_returns_new_pair_and_revokes_old() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();
@@ -275,6 +276,7 @@ async fn refresh_rejects_revoked_token() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();
@@ -302,6 +304,7 @@ async fn mint_refresh_token_round_trips() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: Some(Duration::from_hours(1)),
+            family_id: None,
         })
         .await
         .unwrap();
@@ -331,6 +334,7 @@ async fn consume_refresh_token_is_single_use_under_concurrency() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();
@@ -362,6 +366,7 @@ async fn consume_refresh_token_wrong_client_does_not_burn_token() {
             user_id: 1,
             client_id: "web".to_string(),
             ttl: None,
+            family_id: None,
         })
         .await
         .unwrap();
@@ -382,5 +387,192 @@ async fn consume_refresh_token_wrong_client_does_not_burn_token() {
             .unwrap()
             .is_some(),
         "rightful client can still redeem"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Refresh-token reuse detection (sec review 1.5)
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn rotation_preserves_the_refresh_token_family() {
+    // A rotated pair must stay in the same family so reuse of any earlier
+    // member can revoke the whole chain.
+    let oauth = store_with_client().await;
+    let t1 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: None,
+        })
+        .await
+        .unwrap();
+    let c1 = oauth
+        .consume_refresh_token(&t1.token, "web")
+        .await
+        .unwrap()
+        .unwrap();
+    // A brand-new grant is its own family (id = its own hash).
+    assert_eq!(c1.family_id, t1.token_hash);
+
+    // The successor inherits that family.
+    let t2 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: Some(c1.family_id.clone()),
+        })
+        .await
+        .unwrap();
+    let c2 = oauth
+        .consume_refresh_token(&t2.token, "web")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(c2.family_id, c1.family_id, "rotation keeps one family");
+}
+
+#[tokio::test]
+async fn detect_refresh_reuse_flags_replayed_rotated_token_outside_grace() {
+    // A token that was rotated (revoked) and is replayed after the grace
+    // window is the fingerprint of theft — detection returns its family.
+    let oauth = store_with_client().await;
+    let t1 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: None,
+        })
+        .await
+        .unwrap();
+    oauth.consume_refresh_token(&t1.token, "web").await.unwrap();
+
+    // Zero grace → a just-revoked token already counts as reuse.
+    let family = oauth
+        .detect_refresh_reuse(&t1.token, "web", Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(family.as_deref(), Some(t1.token_hash.as_str()));
+
+    // An unknown token is never flagged.
+    assert!(
+        oauth
+            .detect_refresh_reuse("ghost", "web", Duration::ZERO)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn detect_refresh_reuse_ignores_just_revoked_token_within_grace() {
+    // A large grace window suppresses the benign concurrent double-submit:
+    // a token revoked "just now" is not treated as theft.
+    let oauth = store_with_client().await;
+    let t1 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: None,
+        })
+        .await
+        .unwrap();
+    oauth.consume_refresh_token(&t1.token, "web").await.unwrap();
+
+    let family = oauth
+        .detect_refresh_reuse(&t1.token, "web", Duration::from_hours(1))
+        .await
+        .unwrap();
+    assert!(family.is_none(), "within grace must not flag reuse");
+}
+
+#[tokio::test]
+async fn revoke_family_kills_the_chain_and_derived_access_tokens() {
+    let oauth = store_with_client().await;
+    let t1 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: None,
+        })
+        .await
+        .unwrap();
+    // A live successor in the same family, with a derived access token.
+    let t2 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: Some(t1.token_hash.clone()),
+        })
+        .await
+        .unwrap();
+    let a2 = oauth
+        .mint_access_token("web", Some(&t2.token_hash), Duration::from_hours(1))
+        .await
+        .unwrap();
+
+    let revoked = oauth.revoke_family(&t1.token_hash).await.unwrap();
+    assert!(revoked >= 1, "family revocation touches live members");
+    assert!(
+        oauth.find_refresh_token(&t2.token).await.unwrap().is_none(),
+        "successor refresh token is revoked"
+    );
+    assert!(
+        oauth.find_access_token(&a2.token).await.unwrap().is_none(),
+        "access token derived from the family is revoked"
+    );
+}
+
+#[tokio::test]
+async fn refresh_reuse_over_http_revokes_the_whole_family() {
+    // End-to-end: rotate once, then replay the original (aged past the
+    // grace window) — the endpoint must revoke the successor pair too.
+    let oauth = store_with_client().await;
+    let t1 = oauth
+        .mint_refresh_token(NewRefreshToken {
+            user_id: 1,
+            client_id: "web".to_string(),
+            ttl: None,
+            family_id: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(
+        common::build_state_with_oauth(common::test_config(), oauth.clone(), SetupToken::none())
+            .await,
+    );
+
+    // First refresh rotates T1 → T2 (+ access A2), same family.
+    let body = format!("grant_type=refresh_token&client_id=web&refresh_token={}", t1.token);
+    let (status, json) = body_json(post_token(app.clone(), body.clone()).await).await;
+    assert_eq!(status, StatusCode::OK);
+    let t2 = json["refresh_token"].as_str().unwrap().to_string();
+    let a2 = json["access_token"].as_str().unwrap().to_string();
+    assert!(oauth.find_refresh_token(&t2).await.unwrap().is_some());
+
+    // Age T1's revocation past the grace window so the replay reads as
+    // theft rather than a concurrent double-submit.
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = 1 WHERE token_hash = ?")
+        .bind(session::hash_token(&t1.token))
+        .execute(oauth.pool())
+        .await
+        .unwrap();
+
+    // Replay T1 → invalid_grant AND family revocation.
+    let (replay_status, _) = body_json(post_token(app, body).await).await;
+    assert_eq!(replay_status, StatusCode::BAD_REQUEST);
+    assert!(
+        oauth.find_refresh_token(&t2).await.unwrap().is_none(),
+        "reuse must revoke the successor refresh token"
+    );
+    assert!(
+        oauth.find_access_token(&a2).await.unwrap().is_none(),
+        "reuse must revoke the successor access token"
     );
 }
