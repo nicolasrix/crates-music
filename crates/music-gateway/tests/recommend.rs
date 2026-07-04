@@ -291,6 +291,122 @@ async fn from_seeds_excludes_the_seeds_themselves() {
     }
 }
 
+/// Wall-clock now in unix ms, for stamping play_history / asserting windows.
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn from_seeds_excludes_recently_played_tracks() {
+    // #1 recency exclusion: a track the listener heard inside the window must
+    // not be re-served by autoplay, even though it's a strong acoustic
+    // neighbour of the seed.
+    let mut cfg = test_config();
+    cfg.recommend.recently_played_exclude_hours = 24.0; // wide window
+    let state = build_state(cfg).await;
+    let ann = state.ann();
+    // Seed e0; two near neighbours of the seed that would both normally rank.
+    ann.upsert(&TrackId::from("seed"), &unit_at(0)).unwrap();
+    ann.upsert(&TrackId::from("keep"), &unit_at(0)).unwrap();
+    ann.upsert(&TrackId::from("recent"), &unit_at(0)).unwrap();
+    // The owner (TEST_BEARER ⇒ user id 1) played "recent" just now.
+    state
+        .play_history()
+        .record_submission(1, &TrackId::from("recent"), now_ms())
+        .await
+        .unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(auth_post(
+            "/v1/recommend/from-seeds",
+            &json!({"seeds": ["seed"], "per_seed_n": 20, "top_n": 20}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"keep"), "un-played neighbour must still appear");
+    assert!(
+        !ids.contains(&"recent"),
+        "recently-played track must be excluded, got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_serve_cooldown_suppresses_previously_served() {
+    // #2 serve-cooldown: tracks served by a prior from-seeds call are
+    // suppressed from the next refill (read back from the provenance log), so
+    // a deterministic pipeline stops re-offering the same head every time.
+    let mut cfg = test_config();
+    cfg.recommend.served_cooldown_hours = 24.0;
+    // log_provenance defaults on; the cooldown reads that log.
+    assert!(cfg.recommend.log_provenance);
+    let state = build_state(cfg).await;
+    let ann = state.ann();
+    ann.upsert(&TrackId::from("seed"), &unit_at(0)).unwrap();
+    for i in 1..=4 {
+        ann.upsert(&TrackId::from(format!("c{i}")), &unit_at(0))
+            .unwrap();
+    }
+    let app = build_router(state);
+
+    // First refill: serve two candidates. Those get logged as served.
+    let first = read_json(
+        app.clone()
+            .oneshot(auth_post(
+                "/v1/recommend/from-seeds",
+                &json!({"seeds": ["seed"], "per_seed_n": 20, "top_n": 2}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let served: Vec<String> = first["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(served.len(), 2, "first refill should serve two");
+
+    // Second refill: the just-served tracks must not reappear.
+    let second = read_json(
+        app.oneshot(auth_post(
+            "/v1/recommend/from-seeds",
+            &json!({"seeds": ["seed"], "per_seed_n": 20, "top_n": 20}),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    let again: Vec<String> = second["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect();
+    for id in &served {
+        assert!(
+            !again.contains(id),
+            "previously-served {id} must be on cooldown, got {again:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn from_seeds_honours_exclude_track_ids() {
     let state = build_state(test_config()).await;

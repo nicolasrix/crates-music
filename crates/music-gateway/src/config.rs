@@ -308,6 +308,37 @@ pub struct RecommendConfig {
     /// capturing (e.g. to bound disk on a long-running deploy).
     #[serde(default = "default_log_provenance")]
     pub log_provenance: bool,
+
+    /// Autoplay recency exclusion (hours). Tracks the listener played within
+    /// this many hours are hard-excluded from recommendation candidate
+    /// generation, so a song heard minutes ago doesn't resurface in the next
+    /// refill. This is the primary fix for autoplay over-serving — a
+    /// deterministic pipeline otherwise re-picks the same head of the
+    /// catalogue. `0` disables. Sourced from `play_history`.
+    #[serde(default = "default_recently_played_exclude_hours")]
+    pub recently_played_exclude_hours: f32,
+
+    /// Autoplay serve-cooldown (hours). Tracks *served* by a track-valued
+    /// recommendation within this many hours — whether or not they were
+    /// played — are suppressed from the next refills, breaking the loop where
+    /// the station keeps re-offering a track the listener skips past. `0`
+    /// disables. Reads the `recommendation` log, so it is a no-op when
+    /// `log_provenance` is false (no data to read). Kept shorter than
+    /// `recently_played_exclude_hours` since serving is more frequent than
+    /// playing.
+    #[serde(default = "default_served_cooldown_hours")]
+    pub served_cooldown_hours: f32,
+
+    /// Exploration temperature for the final autoplay pick. Adds
+    /// `temperature · Gumbel(0,1)` noise to candidate relevance scores so the
+    /// top pick is sampled from `softmax(score / temperature)` rather than a
+    /// deterministic argmax — widening the served pool without abandoning
+    /// relevance (a clearly-better candidate still usually wins). Applied to
+    /// `/from-seeds` (the autoplay path). `0` disables (deterministic). Kept
+    /// on the order of the leash/preference scales so it only reshuffles
+    /// near-ties.
+    #[serde(default = "default_explore_temperature")]
+    pub explore_temperature: f32,
 }
 
 impl Default for RecommendConfig {
@@ -324,6 +355,9 @@ impl Default for RecommendConfig {
             leash_tau: default_leash_tau(),
             leash_lambda: default_leash_lambda(),
             log_provenance: default_log_provenance(),
+            recently_played_exclude_hours: default_recently_played_exclude_hours(),
+            served_cooldown_hours: default_served_cooldown_hours(),
+            explore_temperature: default_explore_temperature(),
         }
     }
 }
@@ -370,6 +404,18 @@ fn default_leash_lambda() -> f32 {
 
 fn default_log_provenance() -> bool {
     true
+}
+
+fn default_recently_played_exclude_hours() -> f32 {
+    4.0
+}
+
+fn default_served_cooldown_hours() -> f32 {
+    2.0
+}
+
+fn default_explore_temperature() -> f32 {
+    0.15
 }
 
 impl Default for OauthConfig {

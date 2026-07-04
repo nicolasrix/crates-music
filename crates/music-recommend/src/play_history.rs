@@ -67,6 +67,27 @@ impl PlayHistoryStore {
         .await?;
         Ok(row.map(|r| r.get::<i64, _>("last_played_ms")))
     }
+
+    /// Track ids whose most-recent submission is at or after `since_ms`,
+    /// for the given user. The autoplay recency exclusion: the recommender
+    /// hard-excludes these from candidate generation so a song the listener
+    /// heard minutes ago doesn't resurface in the next refill. A small
+    /// listening window yields a handful of ids — cheap to fold into the
+    /// exclude set. Empty vec when nothing was played in the window.
+    pub async fn played_since(&self, user_id: i64, since_ms: i64) -> Result<Vec<TrackId>> {
+        let rows = sqlx::query(
+            "SELECT track_id FROM play_history
+             WHERE user_id = ? AND last_played_ms >= ?",
+        )
+        .bind(user_id)
+        .bind(since_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TrackId::from(r.get::<String, _>("track_id")))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +148,29 @@ mod tests {
         s.record_submission(1, &tid("t1"), 1_000).await.unwrap();
         s.record_submission(1, &tid("t1"), 1_000).await.unwrap();
         assert_eq!(s.last_played(1, &tid("t1")).await.unwrap(), Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn played_since_returns_only_window_and_respects_user() {
+        let s = store().await;
+        // user 1: t-old (before window), t-new (in window)
+        s.record_submission(1, &tid("t-old"), 1_000).await.unwrap();
+        s.record_submission(1, &tid("t-new"), 5_000).await.unwrap();
+        // user 2: t-new in window — must not leak into user 1's result
+        s.record_submission(2, &tid("t-other"), 6_000)
+            .await
+            .unwrap();
+
+        let mut got = s.played_since(1, 4_000).await.unwrap();
+        got.sort();
+        assert_eq!(got, vec![tid("t-new")]);
+
+        // Boundary is inclusive (>= since_ms).
+        let at_boundary = s.played_since(1, 5_000).await.unwrap();
+        assert_eq!(at_boundary, vec![tid("t-new")]);
+
+        // Nothing recent enough → empty.
+        assert!(s.played_since(1, 9_000).await.unwrap().is_empty());
     }
 
     #[tokio::test]

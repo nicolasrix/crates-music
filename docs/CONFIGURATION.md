@@ -116,6 +116,9 @@ override when running CLaMP 3.
 | `leash_tau` | f32 | no | `0.28` | Anchor leash for travelling autoplay stations: candidates whose cosine to the nearest anchor falls below `tau` are demoted. Server-side fallback only — clients (web Settings) send per-request overrides. |
 | `leash_lambda` | f32 | no | `16.0` | Strength of the leash demotion, `λ·(τ − sim)²`. `0` disables the leash entirely. Per-request overrides apply as with `leash_tau`. |
 | `log_provenance` | bool | no | `true` | Persist every served recommendation (request context, ordered slate, per-item scores) to the `recommendation` / `recommendation_item` tables in `gateway-state.recommend.sqlite`. Append-only training substrate; no effect on what gets recommended. No automatic trimming. |
+| `recently_played_exclude_hours` | f32 | no | `4.0` | **Autoplay anti-repetition.** Tracks the listener played within this many hours are hard-excluded from `from-seeds` candidate generation, so a song heard minutes ago doesn't resurface in the next refill. Sourced from `play_history`. `0` disables. Does not affect `/next` ("more like this" stays stable on re-invocation). |
+| `served_cooldown_hours` | f32 | no | `2.0` | **Autoplay anti-repetition.** Tracks *served* by a track-valued recommendation within this many hours — whether or not they were played — are suppressed from the next `from-seeds` refills, breaking the loop where the station re-offers a track the listener keeps skipping past. Reads the `recommendation` log, so it is a no-op when `log_provenance` is `false`. Kept shorter than `recently_played_exclude_hours` since serving is more frequent than playing. `0` disables. |
+| `explore_temperature` | f32 | no | `0.15` | **Autoplay exploration.** Adds `temperature · Gumbel(0,1)` noise to candidate relevance scores so the final `from-seeds` pick is sampled from `softmax(score / temperature)` instead of a deterministic argmax — widening the served pool without abandoning relevance (a clearly-better candidate still usually wins; leash-penalised ones stay demoted). `0` disables (deterministic argmax). |
 
 ```toml
 [recommend]
@@ -124,6 +127,9 @@ whitening_enabled      = true
 preference_enabled     = false # tilt ranking by like/skip/play affinity
 preference_weight      = 0.15
 affinity_half_life_days = 30.0
+recently_played_exclude_hours = 4.0  # autoplay: don't re-serve recently-heard tracks
+served_cooldown_hours         = 2.0  # autoplay: cooldown on recently-served tracks
+explore_temperature           = 0.15 # autoplay: sample the pick, don't always argmax
 ```
 
 ## CLI config (`~/.config/crates-music/config.toml`)

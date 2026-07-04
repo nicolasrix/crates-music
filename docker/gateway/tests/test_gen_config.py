@@ -504,3 +504,43 @@ def test_log_provenance_rejects_non_boolean() -> None:
     env = _minimum_env() | {"RECOMMEND_LOG_PROVENANCE": "yes-please"}
     with pytest.raises(ConfigError):
         build_config(env)
+
+
+# --- autoplay anti-repetition + exploration knobs -------------------------
+
+
+def test_autoplay_knobs_emitted_when_set() -> None:
+    env = _minimum_env() | {
+        "RECOMMEND_RECENTLY_PLAYED_EXCLUDE_HOURS": "6",
+        "RECOMMEND_SERVED_COOLDOWN_HOURS": "3",
+        "RECOMMEND_EXPLORE_TEMPERATURE": "0.2",
+    }
+    rec = tomllib.loads(build_config(env))["recommend"]
+    assert rec["recently_played_exclude_hours"] == pytest.approx(6.0)
+    assert rec["served_cooldown_hours"] == pytest.approx(3.0)
+    assert rec["explore_temperature"] == pytest.approx(0.2)
+
+
+def test_autoplay_zero_values_are_emitted() -> None:
+    # 0 is a meaningful "disable this knob" value, not "unset" — must survive.
+    env = _minimum_env() | {
+        "RECOMMEND_SERVED_COOLDOWN_HOURS": "0",
+        "RECOMMEND_EXPLORE_TEMPERATURE": "0",
+    }
+    rec = tomllib.loads(build_config(env))["recommend"]
+    assert rec["served_cooldown_hours"] == pytest.approx(0)
+    assert rec["explore_temperature"] == pytest.approx(0)
+
+
+def test_autoplay_knobs_omitted_when_unset() -> None:
+    env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "768"}
+    rec = tomllib.loads(build_config(env))["recommend"]
+    assert "recently_played_exclude_hours" not in rec
+    assert "served_cooldown_hours" not in rec
+    assert "explore_temperature" not in rec
+
+
+def test_autoplay_rejects_negative() -> None:
+    env = _minimum_env() | {"RECOMMEND_EXPLORE_TEMPERATURE": "-0.1"}
+    with pytest.raises(ConfigError, match="non-negative"):
+        build_config(env)

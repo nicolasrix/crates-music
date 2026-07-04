@@ -63,7 +63,17 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         },
         cache: CacheConfig::default(),
         oauth: OauthConfig::default(),
-        recommend: RecommendConfig::default(),
+        // Deterministic recommend baseline: the autoplay anti-repetition knobs
+        // (recency exclusion, serve-cooldown, exploration jitter) are runtime
+        // behaviours that would make exact-ranking assertions flaky or
+        // stateful across calls. Tests that exercise those features opt back
+        // in explicitly (see the recency/exploration tests in recommend.rs).
+        recommend: RecommendConfig {
+            recently_played_exclude_hours: 0.0,
+            served_cooldown_hours: 0.0,
+            explore_temperature: 0.0,
+            ..RecommendConfig::default()
+        },
         embedder: None,
     }
 }

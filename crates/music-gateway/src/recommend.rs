@@ -147,6 +147,11 @@ pub async fn next(
     let rescore = rescore_ctx(&state, room).await;
     let mut exclude: Vec<TrackId> = vec![seed_id.clone()];
     exclude.extend(disliked_exclusions(&state, room).await);
+    // NB: the autoplay recency/serve-cooldown exclusion is deliberately NOT
+    // applied here. `/next` is a one-shot "more like this seed" surface that
+    // clients re-invoke on the same seed; suppressing everything it just
+    // served would empty the pool. Anti-repetition lives on the autoplay
+    // refill path (`from-seeds`) instead.
     let fetch_n = n.saturating_mul(MMR_POOL_BUFFER_FACTOR);
     let mut results = state
         .ann()
@@ -841,6 +846,13 @@ pub async fn from_seeds(
     // Disliked tracks are hard-excluded from all candidate generation
     // (always-on, independent of preference).
     exclude.extend(disliked_exclusions(&state, room).await);
+    // Recently-played + recently-served suppression. The client already sends
+    // the *visible* queue (a handful of ids) in `queue_context`; this adds the
+    // tracks that scrolled off it — the real fix for the same song reappearing
+    // every few minutes. `recency_count` is recorded in provenance below.
+    let recency_excluded = recency_exclusions(&state, room).await;
+    let recency_count = recency_excluded.len();
+    exclude.extend(recency_excluded);
 
     // Per-seed ANN queries. Each seed lookup is short and CPU-bound,
     // and the ANN takes its own internal RwLock; running these in
@@ -900,6 +912,15 @@ pub async fn from_seeds(
         leash_params,
     );
 
+    // Exploration: sample the final pick from softmax(score/T) instead of a
+    // deterministic argmax (Gumbel-max), so a travelling station stops
+    // re-picking the identical neighbour every refill. Reuses the
+    // request-scoped RNG. Applied *after* the leash so out-of-boundary
+    // candidates (heavily penalised) stay demoted — only the relevant head is
+    // reshuffled. No-op when `explore_temperature <= 0`.
+    let explore_temperature = state.explore_temperature();
+    apply_exploration(&mut aggregated, &mut rng, explore_temperature);
+
     let rescore = rescore_ctx(&state, room).await;
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
@@ -932,6 +953,8 @@ pub async fn from_seeds(
         "sample_size": sample_size,
         "seeds_total": req.seeds.len(),
         "exclude_count": req.exclude_track_ids.len(),
+        "recency_excluded": recency_count,
+        "explore_temperature": explore_temperature,
         "leash": {
             "tau": leash_params.tau,
             "lambda": leash_params.lambda,
@@ -2029,6 +2052,55 @@ async fn disliked_exclusions(state: &AppState, user_id: i64) -> HashSet<TrackId>
     excluded
 }
 
+/// Autoplay anti-repetition exclusion: the union of
+///
+/// * **recently played** — tracks the user heard within
+///   `[recommend] recently_played_exclude_hours` (from `play_history`), and
+/// * **recently served** — tracks offered by a track-valued recommendation
+///   within `[recommend] served_cooldown_hours` (from the provenance log).
+///
+/// Both windows are config-gated; a zero window disables that source. The
+/// serve-cooldown additionally requires provenance logging to be on, since it
+/// reads the `recommendation` log. Every lookup degrades to "exclude nothing
+/// from that source" on error — a stale recency clock must never fail an
+/// autoplay refill. Scoped to the room's host `user_id` (PR E).
+async fn recency_exclusions(state: &AppState, user_id: i64) -> HashSet<TrackId> {
+    let mut excluded: HashSet<TrackId> = HashSet::new();
+    let now = now_unix_ms();
+
+    if let Some(window) = state.recently_played_exclude_ms() {
+        match state
+            .play_history()
+            .played_since(user_id, now - window)
+            .await
+        {
+            Ok(ids) => excluded.extend(ids),
+            Err(err) => {
+                tracing::warn!(error = %err, "played_since lookup failed; autoplay without recently-played exclusion");
+            }
+        }
+    }
+
+    // Serve-cooldown reads the provenance log; skip entirely when logging is
+    // off (there is nothing to read) so we don't run a guaranteed-empty query.
+    if state.provenance_enabled()
+        && let Some(window) = state.served_cooldown_ms()
+    {
+        match state
+            .recommendation_log()
+            .served_since(user_id, now - window)
+            .await
+        {
+            Ok(ids) => excluded.extend(ids),
+            Err(err) => {
+                tracing::warn!(error = %err, "served_since lookup failed; autoplay without serve-cooldown");
+            }
+        }
+    }
+
+    excluded
+}
+
 /// Fold the tracks of every disliked album-or-artist (per `kind`) into
 /// `excluded`. Each step degrades to a warn-and-skip on error. Scoped to
 /// the room's host `user_id` (PR E).
@@ -2404,6 +2476,34 @@ fn apply_anchor_leash(
     // built from the same iteration order) and re-rank.
     for (c, adj) in aggregated.iter_mut().zip(&adjustments) {
         c.score -= adj.penalty;
+    }
+    aggregated.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.seed_hits.cmp(&a.seed_hits))
+            .then_with(|| a.track_id.as_str().cmp(b.track_id.as_str()))
+    });
+}
+
+/// Perturb aggregated relevance scores with Gumbel jitter and re-sort, so the
+/// top-of-list pick is a *sample* from `softmax(score / temperature)` rather
+/// than a deterministic argmax. The re-sort uses the same comparator as the
+/// leash (score desc, then seed_hits, then id) so ties stay deterministic
+/// within a fixed perturbation. No-op for `temperature <= 0` or fewer than two
+/// candidates. See [`music_recommend::explore`].
+fn apply_exploration(
+    aggregated: &mut [music_recommend::aggregate::AggregatedResult],
+    rng: &mut SmallRng,
+    temperature: f32,
+) {
+    if temperature <= 0.0 || aggregated.len() < 2 {
+        return;
+    }
+    let mut scores: Vec<f32> = aggregated.iter().map(|a| a.score).collect();
+    music_recommend::explore::perturb_scores(&mut scores, rng, temperature);
+    for (c, s) in aggregated.iter_mut().zip(scores) {
+        c.score = s;
     }
     aggregated.sort_by(|a, b| {
         b.score
