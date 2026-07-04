@@ -8,6 +8,91 @@ The `music` CLI. Talks to either the gateway (default) or directly
 to Navidrome (diagnostic mode). Manages local audio cache, plays
 tracks, syncs queue across devices.
 
+## Install (as a client against a running gateway)
+
+The CLI is a thin client — it needs a reachable gateway (your production
+box, or a local dev one). This is the end-user install path; for bringing
+up the whole dev stack from scratch see
+[../GETTING-STARTED.md](../GETTING-STARTED.md).
+
+**1. Build the binary.** From the repo root:
+
+```bash
+cargo build -p music-cli               # debug build — fine for everyday use
+# …or an optimized copy on your PATH that survives `cargo clean`:
+cargo install --path crates/music-cli  # installs `music` into ~/.cargo/bin
+```
+
+`cargo build` drops the binary at `<target>/debug/music`. `<target>` is
+usually `target/`, but this workspace can redirect it via
+`.cargo/config.toml` (`build.target-dir`) — if `./target/debug/music`
+isn't there, find it with:
+
+```bash
+echo "$(cargo metadata --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/debug/music"
+```
+
+**2. Point it at a gateway.** Create `~/.config/crates-music/config.toml`:
+
+```toml
+[gateway]
+url = "https://crates.example.com:8443"   # your gateway
+
+[server]                     # optional; only used in --no-gateway direct mode
+url = "http://nav.lan:4533"
+username = "placeholder"
+password = "placeholder"
+```
+
+TLS trust depends on the gateway's certificate:
+
+- **Public/LAN gateway with a real cert** (e.g. Let's Encrypt, like the
+  production `crates.example.com`): nothing to configure — the CLI's
+  bundled webpki roots already trust it.
+- **Dev gateway with an mkcert cert** (`gateway.local`): add
+  `ca_cert_path = "<mkcert -CAROOT>/rootCA.pem"` under `[gateway]`. The
+  CLI's HTTP stack trusts **only** its bundled roots, so running
+  `mkcert -install` system-wide does *not* help here — you must name the
+  CA file explicitly.
+
+**3. Log in (once).**
+
+```bash
+music auth login
+```
+
+Prints a short code and a URL (`…/oauth/device`). Open the URL in a
+browser already signed into the gateway, enter the code, approve. The CLI
+stores rotating tokens in `cli-tokens.json` next to the config (`0600`)
+and refreshes the access token on its own. `music auth status` shows the
+state; `music auth logout` revokes + clears it.
+
+**4. (Optional) Add a shorter alias.** The binary path can be long:
+
+```fish
+# fish:
+alias crates-cli '<path-to>/music'
+funcsave crates-cli
+```
+
+```bash
+# bash / zsh — add to ~/.bashrc or ~/.zshrc:
+alias crates-cli='<path-to>/music'
+```
+
+### Install gotchas
+
+- **The token store format can change across versions.** If a command
+  errors with `missing field … at cli-tokens.json`, the stored tokens
+  predate a schema change — delete
+  `~/.config/crates-music/cli-tokens.json` and `music auth login` again.
+- **`recommend next <seed>` needs the *seed* track embedded.** Only tracks
+  the ingest pipeline has processed are in the content index; a
+  not-yet-embedded seed returns *"the seed track isn't embedded yet."*
+  Seed from a track the recommender already surfaced (e.g. an ID from a
+  `station` result) — those are guaranteed embedded. Free-text
+  `station "…"` prompts have no such constraint.
+
 ## Usage
 
 ```bash

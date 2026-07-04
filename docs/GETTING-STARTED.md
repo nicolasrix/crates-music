@@ -124,6 +124,12 @@ cargo run -p music-cli -- auth login
 cargo run -p music-cli -- albums list
 ```
 
+> Installing the CLI as a **client against an already-running gateway**
+> (e.g. your production box) rather than the dev stack? See
+> [components/music-cli.md § Install](./components/music-cli.md#install-as-a-client-against-a-running-gateway)
+> — it covers `cargo install`, the prod-cert vs mkcert TLS split, the
+> device-login flow, and a convenience alias.
+
 You should see your Navidrome's albums. If you get a TLS error,
 either `mkcert -install` didn't take effect, or `gateway.local` isn't
 in your hosts file. As an alternative to installing the CA
