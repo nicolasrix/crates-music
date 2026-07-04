@@ -19,23 +19,28 @@ use crate::format::{album_header, albums_table, artist_header, artists_table, tr
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
 
+    // Bare invocation (main.rs only routes it here on a TTY) and the hidden
+    // `tui` subcommand both open the interactive UI, which owns its own
+    // client/cache lifecycle (and the terminal).
+    let Some(command) = cli.command else {
+        return crate::tui::run(config).await;
+    };
+    if let Command::Tui = &command {
+        return crate::tui::run(config).await;
+    }
+
     // `auth` is special: `login` bootstraps the token store and the others
     // manage it, so they run before we try to construct an authed client
     // (which, in gateway mode, would require a token we may not have yet).
-    if let Command::Auth { action } = &cli.command {
+    if let Command::Auth { action } = &command {
         return crate::auth::run_auth(&config, action).await;
-    }
-
-    // The TUI owns its own client/cache lifecycle (and the terminal).
-    if let Command::Tui = &cli.command {
-        return crate::tui::run(config).await;
     }
 
     let client = build_client(&config)
         .await
         .context("constructing Subsonic client")?;
 
-    match cli.command {
+    match command {
         Command::Ping => {
             client.ping().await.context("ping failed")?;
             println!("ok");

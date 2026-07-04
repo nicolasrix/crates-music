@@ -14,7 +14,7 @@ name = "music_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "music"
+name = "crates-cli"
 path = "src/main.rs"
 
 [dependencies]

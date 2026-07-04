@@ -8,7 +8,7 @@ pub struct Config {
     pub server: ServerConfig,
     /// When set, the CLI talks to a `music-gateway` instead of Navidrome
     /// directly. Auth is the OAuth 2.1 Device Authorization Grant — run
-    /// `music auth login` once; tokens are kept in a sibling
+    /// `crates-cli auth login` once; tokens are kept in a sibling
     /// `cli-tokens.json`. The `[server]` credentials are unused in this
     /// mode but kept for clean fallback to direct mode without rewriting
     /// the config.

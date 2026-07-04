@@ -45,7 +45,7 @@ crates/
   music-recommend/   # SERVER-ONLY: CLaMP 3 embedder client, ANN index, whitening
                      #   (track2vec / behavioural index deferred — P6.8)
   music-gateway/     # the gateway binary
-  music-cli/         # the CLI binary
+  music-cli/         # the CLI binary (`crates-cli`: subcommands + interactive TUI)
 
 apps/
   web/               # TS + React SPA (also the installable PWA = mobile)
@@ -235,7 +235,7 @@ Vitest/Playwright suites for the web app.
 
 **P5 done.** WebSocket sync — `crates/music-sync` is the pure state
 machine; gateway hosts `/v1/sync/snapshot` (HTTP), `/v1/sync/ops`
-(POST), and `/v1/sync` (WS fan-out). CLI has `music sync state|push|watch`;
+(POST), and `/v1/sync` (WS fan-out). CLI has `crates-cli sync state|push|watch`;
 web has the optimistic-update sync provider. Single-linearizer model
 (no CRDTs) — gateway sequences all ops and broadcasts.
 
@@ -660,8 +660,8 @@ url = "https://gateway.local:8443"
 # 5. Authenticate (Device Authorization Grant, RFC 8628). There is no
 #    static bearer token — run this once; tokens persist to a sibling
 #    cli-tokens.json (0600) and refresh automatically:
-#    music auth login   → prints a code + URL; approve in a logged-in browser
-#    music auth status  → show token state;  music auth logout → revoke + clear
+#    crates-cli auth login   → prints a code + URL; approve in a logged-in browser
+#    crates-cli auth status  → show token state;  crates-cli auth logout → revoke + clear
 ```
 
 `[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.
@@ -744,9 +744,9 @@ regular_budget_bytes = 10737418240          # 10 GB — LRU-evicted
 pinned_budget_bytes  = 5368709120           # 5 GB  — never LRU-evicted
 ```
 
-Inspect with `music cache stats`. Force a fit-to-budget eviction with
-`music cache evict`. Pin tracks with `music pin <id>` (auto-fetches if
-not yet cached); see them with `music pinned`.
+Inspect with `crates-cli cache stats`. Force a fit-to-budget eviction with
+`crates-cli cache evict`. Pin tracks with `crates-cli pin <id>` (auto-fetches if
+not yet cached); see them with `crates-cli pinned`.
 
 ### Microbenchmarks (`cargo bench`)
 

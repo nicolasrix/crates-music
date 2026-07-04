@@ -1,12 +1,17 @@
 # music-cli
 
 **Path:** `crates/music-cli/`
-**Type:** binary `music`, with library crate for tests
-**Test count:** 31
+**Type:** binary `crates-cli`, with library crate for tests
 
-The `music` CLI. Talks to either the gateway (default) or directly
+The `crates-cli` binary. Talks to either the gateway (default) or directly
 to Navidrome (diagnostic mode). Manages local audio cache, plays
-tracks, syncs queue across devices.
+tracks, syncs queue across devices. Two faces:
+
+- **Subcommands** (`crates-cli albums`, `crates-cli play <id>`, …) —
+  flat, pipeable, script/agent-friendly. Plain text on a pipe.
+- **Interactive TUI** — run `crates-cli` with no subcommand on a
+  terminal. Full-screen browse/search/queue/stations with local
+  playback and transport controls. See "Interactive mode" below.
 
 ## Install (as a client against a running gateway)
 
@@ -20,16 +25,16 @@ up the whole dev stack from scratch see
 ```bash
 cargo build -p music-cli               # debug build — fine for everyday use
 # …or an optimized copy on your PATH that survives `cargo clean`:
-cargo install --path crates/music-cli  # installs `music` into ~/.cargo/bin
+cargo install --path crates/music-cli  # installs `crates-cli` into ~/.cargo/bin
 ```
 
-`cargo build` drops the binary at `<target>/debug/music`. `<target>` is
-usually `target/`, but this workspace can redirect it via
-`.cargo/config.toml` (`build.target-dir`) — if `./target/debug/music`
+`cargo build` drops the binary at `<target>/debug/crates-cli`. `<target>`
+is usually `target/`, but this workspace can redirect it via
+`.cargo/config.toml` (`build.target-dir`) — if `./target/debug/crates-cli`
 isn't there, find it with:
 
 ```bash
-echo "$(cargo metadata --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/debug/music"
+echo "$(cargo metadata --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/debug/crates-cli"
 ```
 
 **2. Point it at a gateway.** Create `~/.config/crates-music/config.toml`:
@@ -58,34 +63,25 @@ TLS trust depends on the gateway's certificate:
 **3. Log in (once).**
 
 ```bash
-music auth login
+crates-cli auth login
 ```
 
 Prints a short code and a URL (`…/oauth/device`). Open the URL in a
 browser already signed into the gateway, enter the code, approve. The CLI
 stores rotating tokens in `cli-tokens.json` next to the config (`0600`)
-and refreshes the access token on its own. `music auth status` shows the
-state; `music auth logout` revokes + clears it.
+and refreshes the access token on its own. `crates-cli auth status` shows
+the state; `crates-cli auth logout` revokes + clears it.
 
-**4. (Optional) Add a shorter alias.** The binary path can be long:
-
-```fish
-# fish:
-alias crates-cli '<path-to>/music'
-funcsave crates-cli
-```
-
-```bash
-# bash / zsh — add to ~/.bashrc or ~/.zshrc:
-alias crates-cli='<path-to>/music'
-```
+**4. Start it.** `crates-cli` (bare, on a terminal) opens the interactive
+UI; `crates-cli <subcommand>` runs the classic one-shot commands.
 
 ### Install gotchas
 
 - **The token store format can change across versions.** If a command
   errors with `missing field … at cli-tokens.json`, the stored tokens
   predate a schema change — delete
-  `~/.config/crates-music/cli-tokens.json` and `music auth login` again.
+  `~/.config/crates-music/cli-tokens.json` and `crates-cli auth login`
+  again.
 - **`recommend next <seed>` needs the *seed* track embedded.** Only tracks
   the ingest pipeline has processed are in the content index; a
   not-yet-embedded seed returns *"the seed track isn't embedded yet."*
@@ -93,26 +89,64 @@ alias crates-cli='<path-to>/music'
   `station` result) — those are guaranteed embedded. Free-text
   `station "…"` prompts have no such constraint.
 
-## Usage
+## Interactive mode (TUI)
+
+Running `crates-cli` with **no subcommand on a terminal** opens a
+full-screen interactive player (ratatui). On a pipe the same invocation
+prints help and exits 2, so scripts and agents never hang on it.
+
+Five sections (sidebar, keys `1`–`5` or `Tab`): **Library** (albums with
+a kind switcher, drill into an album), **Search** (the gateway's
+typo-tolerant `/v1/search`), **Queue** (the local play queue),
+**Stations** (natural-language prompts) and **Liked** (your ratings).
+Playback is local (rodio) through the same L3 audio cache as
+`crates-cli play`, with the next track prefetched for near-gapless
+handoff.
+
+| Key | Action |
+|---|---|
+| `q` / `ctrl-c` | quit · `?` help overlay |
+| `1..5`, `Tab` / `Shift-Tab` | switch section |
+| `j` `k` / `↓` `↑`, `g` / `G`, `ctrl-d` / `ctrl-u` | list navigation |
+| `h` / `l` | album-list kind (Library) · result bucket (Search) |
+| `Enter` | open album · play from here · jump (context) |
+| `e` | enqueue track / album |
+| `/` | search · `i` edit station prompt · `Esc` back/unfocus |
+| `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume |
+| `L` / `D` / `u` | like / dislike / unrate selection |
+| `r` | recommend from now playing → enqueue |
+| `x` / `c` | queue: remove / clear |
+
+Notes:
+
+- **No audio device** (headless box, no PipeWire/ALSA): the TUI still
+  runs in browse-only mode with a visible notice.
+- **Recommender down/degraded**: Stations shows a friendly "warming up /
+  embedder offline" panel instead of an error.
+- **Logs**: the TUI silences stderr logging (it would corrupt the
+  screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
+- `NO_COLOR=1` switches the TUI to a monochrome theme.
+
+## Usage (subcommands)
 
 ```bash
-music ping                                      # smoke-test the connection
-music albums [--size 20] [--kind newest|...]    # list albums
-music album <album_id>                          # show one album with its tracks
+crates-cli ping                                      # smoke-test the connection
+crates-cli albums [--size 20] [--kind newest|...]    # list albums
+crates-cli album <album_id>                          # show one album with its tracks
 
-music play <track_id> [<track_id>...]           # stream + play; multiple IDs play gaplessly
-music play <track_id> --offline                 # play only if every track is in L3
+crates-cli play <track_id> [<track_id>...]           # stream + play; multiple IDs play gaplessly
+crates-cli play <track_id> --offline                 # play only if every track is in L3
 
-music pin <track_id>                            # never-evict; auto-fetches if not cached
-music unpin <track_id>
-music pinned                                    # list pinned tracks
+crates-cli pin <track_id>                            # never-evict; auto-fetches if not cached
+crates-cli unpin <track_id>
+crates-cli pinned                                    # list pinned tracks
 
-music cache stats                               # bytes used vs budgets
-music cache evict                               # force fit-to-budget
+crates-cli cache stats                               # bytes used vs budgets
+crates-cli cache evict                               # force fit-to-budget
 
-music sync state                                # GET /v1/sync/snapshot, print as JSON
-music sync push <track_id> [<track_id>...]      # append to the synced queue
-music sync watch                                # WebSocket sub; print every frame as JSON
+crates-cli sync state                                # GET /v1/sync/snapshot, print as JSON
+crates-cli sync push <track_id> [<track_id>...]      # append to the synced queue
+crates-cli sync watch                                # WebSocket sub; print every frame as JSON
 ```
 
 Subcommands are added via `clap` with `#[derive(Parser)]`. The
@@ -123,32 +157,33 @@ canonical definition is in `src/cli.rs`.
 ```
 crates/music-cli/
 ├── src/
-│   ├── main.rs       # 5-line wrapper that calls app::run
+│   ├── main.rs       # entry: bare-TTY → TUI, else subcommands; tracing routing
 │   ├── lib.rs        # re-exports for tests
-│   ├── app.rs        # the actual entrypoint: dispatches subcommands
+│   ├── app.rs        # subcommand dispatcher; client/cache constructors
 │   ├── cli.rs        # clap definitions
+│   ├── api.rs        # typed /v1 fetchers (ratings, recommend, search) shared
+│   │                 #   by classic commands and the TUI
 │   ├── config.rs     # ~/.config/crates-music/config.toml loader
-│   ├── format.rs     # output formatters (table, JSON, plain)
-│   └── sync.rs       # WebSocket sync client
-└── tests/
-    ├── config.rs
-    ├── format.rs
-    └── …             # 3 files
+│   ├── format.rs     # plain-text table formatters
+│   ├── gateway.rs    # gateway HTTP plumbing (TLS, endpoints, ws URLs)
+│   ├── ratings.rs / recommend.rs / sync.rs   # printing wrappers per command
+│   ├── auth/         # OAuth device flow + token store
+│   └── tui/          # interactive mode (see "Interactive mode")
+│       ├── mod.rs        # event loop (crossterm EventStream + tokio select)
+│       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
+│       ├── update.rs     # pure reducer: (App, Msg) → Vec<Effect>
+│       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
+│       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
+│       ├── views/        # library · search · queue · stations · liked · help
+│       └── widgets/      # now-playing bar, sidebar, input field
+└── tests/            # clap parsing, config, formatters
 ```
 
 ## Why a thin binary + library
 
-`main.rs` is just:
-
-```rust
-fn main() -> anyhow::Result<()> {
-    music_cli::app::run()
-}
-```
-
-Everything else lives in the library crate so integration tests can
-drive the same code path without spawning a subprocess. Tests
-construct args programmatically and call `app::run_with_args(args)`.
+`main.rs` only decides entry mode (TUI vs subcommand) and where tracing
+goes; everything else lives in the library crate so tests can drive the
+same code paths without spawning a subprocess.
 
 ## Config
 
@@ -168,11 +203,11 @@ url = "https://gateway.local:8443"
 ```
 
 There is **no** `bearer_token` field. Gateway auth is the OAuth 2.1
-Device Authorization Grant (RFC 8628): run `music auth login` once — it
-prints a short code + URL, you approve it in a logged-in browser, and the
-CLI stores rotating tokens in `cli-tokens.json` next to the config
-(`0600`), refreshing them automatically. `music auth status` /
-`music auth logout` inspect and clear that store.
+Device Authorization Grant (RFC 8628): run `crates-cli auth login` once —
+it prints a short code + URL, you approve it in a logged-in browser, and
+the CLI stores rotating tokens in `cli-tokens.json` next to the config
+(`0600`), refreshing them automatically. `crates-cli auth status` /
+`crates-cli auth logout` inspect and clear that store.
 
 If both sections are present, `[gateway]` wins. To force direct
 mode, pass `--no-gateway`.
@@ -193,63 +228,61 @@ The cache directory is similarly XDG: `~/.cache/crates-music/`.
 
 ## Output formatting
 
-`format.rs` exposes three formatters:
-
-- `format::table` — `tabled`-backed pretty tables. Default.
-- `format::json` — for scripts (`music albums list -o json | jq ...`).
-- `format::plain` — line-oriented, one record per line, tab-separated
-  fields.
-
-Selected via `-o {table,json,plain}` (or via the implicit "is stdout
-a TTY" check if you don't pass `-o`).
+`format.rs` builds hand-padded plain-text tables (`albums_table`,
+`tracks_table`, `artists_table`, plus one-line headers). No colour, no
+extra deps — pipe-friendly first, and the string-in/string-out functions
+are trivially testable. (The interactive TUI has its own ratatui
+rendering and does not go through `format.rs`.)
 
 ## Sync subcommand
 
-Three subcommands under `music sync`:
+`crates-cli sync` mirrors the gateway's shared queue + playback state:
 
-- `music sync state` — `GET /v1/sync/snapshot`, prints the current
-  snapshot as JSON. Quick "what does the gateway think the state is"
-  check.
-- `music sync push <ids...>` — appends tracks to the shared queue.
-  Useful from a CLI on one device when you want playback to start
-  from another.
-- `music sync watch` — opens a WebSocket to `/v1/sync` and prints
-  every server message as JSON, one frame per line. Useful for
-  debugging sync issues from another device, or piping into `jq`.
+- `sync state` — `GET /v1/sync/snapshot`, printed as JSON.
+- `sync queue` — the synced queue as a table (position, now-playing
+  marker, item id, resolved title).
+- `sync push <ids...>` — append tracks to the shared queue.
+- `sync remove <item_id>` / `sync move <item_id> <idx>` (alias
+  `reorder`) — edit by item id.
+- `sync jump <index>` — move the shared now-playing cursor.
+- `sync clear` — empty the queue and reset shared playback.
+- `sync watch` — WebSocket subscription; prints every server frame as
+  JSON, one per line.
 
 Implementation in `sync.rs` uses `tokio-tungstenite`.
 
 ## Auth: OAuth Device Authorization Grant (RFC 8628)
 
 The CLI authenticates to the gateway with the **Device Authorization
-Grant**. `music auth login` prints a short code + URL; the user approves
-it in a logged-in browser; the CLI receives a per-device refresh token
-and stores rotating tokens in `cli-tokens.json` next to the config
-(`0600`). The access token refreshes automatically; `music auth status`
-shows token state and `music auth logout` revokes + clears them.
+Grant**. `crates-cli auth login` prints a short code + URL; the user
+approves it in a logged-in browser; the CLI receives a per-device refresh
+token and stores rotating tokens in `cli-tokens.json` next to the config
+(`0600`). The access token refreshes automatically; `crates-cli auth
+status` shows token state and `crates-cli auth logout` revokes + clears
+them.
 
 The old static `[gateway].bearer_token` shared secret has been
 **removed** — each device now holds its own revocable refresh token.
 
 ## Tests
 
-31 tests, all in `tests/`:
+- `tests/cli_parser.rs` — clap parsing, including bare invocation
+  parsing to "no subcommand".
+- `tests/config.rs` — config file parsing edge cases and defaults.
+- `tests/format.rs` — table formatter output.
+- Inline unit tests — `api.rs` DTO parsing, `gateway.rs` URL helpers,
+  and the whole TUI core: reducer state transitions (stale-generation
+  drops, prefetch handoff, rating rollback), keymap dispatch
+  (input-focus swallowing), the input field, and a `TestBackend`
+  render smoke test.
 
-- `config.rs` — config file parsing edge cases, defaults, env-var
-  overrides.
-- `format.rs` — formatter output for each format flag.
-- `app.rs`-style tests — drive `app::run_with_args(["music",
-  "albums", "list"])` against a `wiremock`-stubbed gateway, assert
-  on stdout.
-
-Notable: tests don't actually play audio. Player tests live in
-`music-player`'s suite; CLI tests stop at "the right gateway calls
-were made" or "the formatter produced the right string."
+Notable: tests don't actually play audio or open a real terminal.
+Transport-queue logic lives in `music-player::PlayQueue` (tested
+there); the audio thread and real rendering stay manual.
 
 ## Known gaps
 
-- **No interactive UI.** `music play` is fire-and-forget. There's no
-  TUI for browsing-while-playing. A `ratatui`-based mode is plausible
-  future work.
 - **No completions yet.** `clap` supports `clap_complete` for shell
   completions; we just haven't wired it.
+- **TUI has no artist view** — Enter on a search-result artist just
+  points you at their albums.

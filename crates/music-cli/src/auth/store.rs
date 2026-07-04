@@ -1,6 +1,6 @@
 //! On-disk token store for the gateway Device Authorization Grant.
 //!
-//! Holds the OAuth tokens obtained via `music auth login`, in a
+//! Holds the OAuth tokens obtained via `crates-cli auth login`, in a
 //! `cli-tokens.json` file next to the config. The file is the CLI's only
 //! gateway credential (there is no static bearer anymore), so it's written
 //! `0600` on Unix.
