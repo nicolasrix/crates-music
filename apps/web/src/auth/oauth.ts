@@ -125,31 +125,71 @@ export async function joinAsGuest(
   return { hostUserId: json.host_user_id };
 }
 
-export async function refreshTokens(refreshToken: string): Promise<void> {
+/** The three distinguishable results of a refresh attempt.
+ *
+ * The critical distinction is `rejected` vs `unavailable`: only a
+ * definitive server rejection proves the session is dead. A network
+ * failure means we simply couldn't ask — throwing the credentials away
+ * for that would sign a mobile user out the moment they step off the
+ * home network (the gateway becomes unreachable), which is exactly the
+ * behaviour we're fixing. See `docs/plans/auth-offline-resilience.md`. */
+export type RefreshOutcome =
+  /** New token pair written to storage. */
+  | "ok"
+  /** The gateway positively rejected the refresh token (400/401
+   *  `invalid_grant`) — revoked, rotated away, or unknown. The session is
+   *  genuinely over; tokens are cleared. */
+  | "rejected"
+  /** We couldn't reach a healthy gateway — `fetch` rejected (offline,
+   *  DNS/TLS failure) or the server answered 5xx (up-but-unhealthy /
+   *  restarting / behind a proxy error). Indeterminate: tokens are
+   *  **kept** so an installed PWA stays usable offline and can retry once
+   *  connectivity returns. */
+  | "unavailable";
+
+export async function refreshTokens(refreshToken: string): Promise<RefreshOutcome> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: CLIENT_ID,
     refresh_token: refreshToken,
   });
-  const res = await fetch("/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  if (!res.ok) {
-    clearTokens();
-    throw new Error(`refresh failed: HTTP ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch("/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+  } catch {
+    // The gateway never answered — offline, DNS, TLS, connection reset.
+    // We cannot conclude the refresh token is bad, so keep it.
+    return "unavailable";
   }
-  const json = (await res.json()) as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  };
-  writeTokens({
-    accessToken: json.access_token,
-    refreshToken: json.refresh_token,
-    expiresAt: Date.now() + json.expires_in * 1000,
-  });
+  if (res.ok) {
+    const json = (await res.json()) as {
+      access_token: string;
+      refresh_token: string;
+      expires_in: number;
+    };
+    writeTokens({
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresAt: Date.now() + json.expires_in * 1000,
+    });
+    return "ok";
+  }
+  // A 400/401 from the token endpoint is the OAuth server telling us the
+  // grant is invalid (RFC 6749 §5.2 `invalid_grant`). That is the only
+  // signal that definitively ends the session — clear the tokens so the
+  // app falls back to the sign-in screen.
+  if (res.status === 400 || res.status === 401) {
+    clearTokens();
+    return "rejected";
+  }
+  // 5xx and anything else: the endpoint is reachable but unhealthy
+  // (restart, proxy 502/503/504). Transient — keep the tokens and let the
+  // caller retry on the next tick / reconnect.
+  return "unavailable";
 }
 
 export async function logout(refreshToken: string | null) {

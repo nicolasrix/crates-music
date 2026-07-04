@@ -16,7 +16,15 @@ import {
   Track,
 } from "./types";
 
+/** Session is definitively over (server rejected the credentials).
+ *  Callers may route to the sign-in screen. */
 class AuthError extends Error {}
+
+/** The gateway couldn't be reached to (re)authorize — offline or
+ *  up-but-unhealthy. Distinct from {@link AuthError}: the session is NOT
+ *  known to be over, so callers should surface a retryable/offline state
+ *  rather than bouncing the user to login. */
+class OfflineError extends Error {}
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const tokens = readTokens();
@@ -36,11 +44,17 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
       clearTokens();
       throw new AuthError("guest session expired");
     }
-    try {
-      await refreshTokens(tokens.refreshToken);
-    } catch {
-      clearTokens();
+    const outcome = await refreshTokens(tokens.refreshToken);
+    if (outcome === "rejected") {
+      // The gateway rejected the refresh token — a genuine sign-out.
+      // (refreshTokens already cleared storage on this path.)
       throw new AuthError("session expired");
+    }
+    if (outcome === "unavailable") {
+      // Couldn't reach the gateway to refresh — transient, not a
+      // sign-out. Keep the credentials and let the caller retry rather
+      // than dumping the user at the login screen while off-network.
+      throw new OfflineError("gateway unreachable");
     }
     const refreshed = readTokens();
     if (!refreshed) throw new AuthError("session expired");
@@ -425,4 +439,4 @@ export async function revokeGuestCode(id: number): Promise<void> {
   if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
 }
 
-export { AuthError };
+export { AuthError, OfflineError };

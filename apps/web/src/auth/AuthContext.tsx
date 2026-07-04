@@ -39,9 +39,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setLoading(true);
     refreshTokens(t.refreshToken)
-      .then(() => setTokens(readTokens()))
-      .catch(() => setTokens(null))
+      .then((outcome) => {
+        if (outcome === "rejected") {
+          // The gateway positively rejected the refresh token — a real
+          // sign-out. Fall back to the login screen.
+          setTokens(null);
+        } else {
+          // "ok"          → fresh tokens in storage.
+          // "unavailable" → offline / gateway unreachable. Keep the
+          //   (expired) tokens so the installed PWA still boots into
+          //   offline mode and can play pinned tracks; the reconnect
+          //   effect below (or an API 401→refresh) re-establishes a live
+          //   session once the gateway is reachable again.
+          setTokens(readTokens() ?? t);
+        }
+      })
       .finally(() => setLoading(false));
+  }, []);
+
+  // When connectivity returns (wifi/cellular handoff, back on the home
+  // network), silently re-establish a live session if the access token
+  // has lapsed. Without this, a user who was kept signed-in offline would
+  // keep hitting 401→refresh on every request until the first one
+  // happens to land; refreshing eagerly on `online` makes recovery
+  // immediate. A `rejected` here still means a genuine sign-out.
+  useEffect(() => {
+    function onOnline() {
+      const t = readTokens();
+      if (!t?.refreshToken) return;
+      if (t.expiresAt > Date.now() + 30_000) return; // still valid
+      void refreshTokens(t.refreshToken).then((outcome) => {
+        if (outcome === "rejected") setTokens(null);
+        else setTokens(readTokens() ?? t);
+      });
+    }
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
   }, []);
 
   const value: AuthState = {
