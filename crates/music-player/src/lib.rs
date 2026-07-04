@@ -1,6 +1,6 @@
 //! Audio playback for native clients (CLI today; mobile uses Media3 directly).
 //!
-//! Two layers:
+//! Three layers:
 //!   - [`resolve_source`] — pure I/O glue between [`AudioCache`] and a
 //!     caller-supplied fetcher closure. Cache hit returns the on-disk blob
 //!     and bumps `last_accessed_at`; cache miss invokes the fetcher and
@@ -8,11 +8,18 @@
 //!   - [`play_blocking`] — rodio + symphonia decode + playback.
 //!     Must be invoked from a `spawn_blocking` context, not the async
 //!     runtime. Untested in CI (no audio device).
+//!   - [`Player`] + [`PlayQueue`] — interactive playback for the TUI: a
+//!     handle to a dedicated audio thread (pause/seek/volume/position) plus
+//!     a pure, device-free transport-queue state machine.
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+mod player;
+mod queue;
 mod source;
 
+pub use player::{PlaybackSnapshot, Player, PlayerEvent, clamp_seek};
+pub use queue::{PlayQueue, QueuedTrack};
 pub use source::{ResolveError, read_cached, resolve_source};
 
 use std::io::Cursor;
@@ -27,6 +34,8 @@ pub enum PlayError {
     Sink(#[from] rodio::PlayError),
     #[error("decoder rejected stream: {0}")]
     Decode(#[from] rodio::decoder::DecoderError),
+    #[error("audio thread failed: {0}")]
+    Thread(String),
 }
 
 /// Decode `bytes` and play to the default audio output, blocking until the
