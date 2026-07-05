@@ -8,10 +8,14 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Gauge, Paragraph, Row, Table};
 
-use super::super::state::App;
+use super::super::state::{App, PinnedRow};
 use super::super::theme::{Theme, symbols};
 use super::super::widgets::human_bytes;
 use super::draw_not_ready;
+
+/// Shown both as the empty-`Ready` hint and (harmlessly) as the never-reached
+/// `Idle` hint — a single copy of the "how to pin" prompt.
+const EMPTY_HINT: &str = "no pinned tracks — press d on a track to save it offline";
 
 pub(crate) fn draw(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let [top, table_area] =
@@ -97,14 +101,7 @@ fn budget_gauge(
 /// The pinned-track table (hydrated title/artist when online, id + size when
 /// not).
 fn draw_pinned(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    if draw_not_ready(
-        f,
-        area,
-        theme,
-        &app.downloads.pinned,
-        "no pinned tracks — press d on a track, or W on an album/playlist",
-        app.tick,
-    ) {
+    if draw_not_ready(f, area, theme, &app.downloads.pinned, EMPTY_HINT, app.tick) {
         return;
     }
     let Some(rows) = app.downloads.pinned.ready() else {
@@ -112,32 +109,32 @@ fn draw_pinned(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     };
     if rows.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " no pinned tracks — press d on a track to save it offline",
-                theme.dim,
-            ))),
+            Paragraph::new(Line::from(Span::styled(format!(" {EMPTY_HINT}"), theme.dim))),
             area,
         );
         return;
     }
+    let table = pinned_table(rows, theme);
+    f.render_stateful_widget(table, area, &mut app.downloads.table);
+}
 
+/// Build the pinned-track table: download glyph · title/id · artist · size.
+fn pinned_table<'a>(rows: &'a [PinnedRow], theme: &Theme) -> Table<'a> {
     let body = rows.iter().map(|r| {
-        let (title, artist) = match &r.track {
-            Some(t) => (
-                t.title.clone(),
-                t.artist_name.clone().unwrap_or_else(|| "—".to_owned()),
-            ),
-            None => (r.track_id.clone(), "—".to_owned()),
-        };
+        let artist = r
+            .track
+            .as_ref()
+            .and_then(|t| t.artist_name.clone())
+            .unwrap_or_else(|| "—".to_owned());
         Row::new(vec![
             Cell::from(Span::styled(symbols::DOWNLOAD.to_owned(), theme.accent)),
-            Cell::from(title),
+            Cell::from(r.title_or_id()),
             Cell::from(artist),
             Cell::from(human_bytes(r.bytes)),
         ])
         .style(theme.text)
     });
-    let table = Table::new(
+    Table::new(
         body,
         [
             Constraint::Length(2),
@@ -148,6 +145,5 @@ fn draw_pinned(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     )
     .header(Row::new(vec!["", "title / id", "artist", "size"]).style(theme.dim))
     .row_highlight_style(theme.selected)
-    .column_spacing(1);
-    f.render_stateful_widget(table, area, &mut app.downloads.table);
+    .column_spacing(1)
 }

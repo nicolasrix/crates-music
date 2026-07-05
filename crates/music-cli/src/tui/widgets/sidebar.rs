@@ -31,8 +31,11 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     // Offline badge pinned to the bottom interior row (gateway configured but
     // the sync WS isn't delivering) — a reminder that pinned tracks still
-    // play. Direct/online modes show nothing here.
-    if app.sync.phase == SyncPhase::Offline && area.height > 0 {
+    // play. Only drawn when there's a spare row below the section list, so it
+    // never paints over a section entry on a short terminal (the header's
+    // "⚠ sync offline" still shows the state there). Direct/online: nothing.
+    let sections = u16::try_from(Section::ALL.len()).unwrap_or(u16::MAX);
+    if app.sync.phase == SyncPhase::Offline && area.height > sections {
         let badge = Rect {
             x: area.x,
             y: area.y + area.height - 1,

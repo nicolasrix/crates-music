@@ -28,11 +28,7 @@ fn download_target(app: &App) -> Option<(String, String)> {
     if app.section == Section::Downloads {
         let sel = app.downloads.table.selected()?;
         let row = app.downloads.pinned.ready()?.get(sel)?;
-        let title = row
-            .track
-            .as_ref()
-            .map_or_else(|| row.track_id.clone(), |t| t.title.clone());
-        return Some((row.track_id.clone(), title));
+        return Some((row.track_id.clone(), row.title_or_id()));
     }
     super::browse::add_target(app)
 }
@@ -120,8 +116,29 @@ pub(super) fn activate(app: &mut App) -> Vec<Effect> {
     playback::play_new_queue(app, queued, sel)
 }
 
-/// The selected pinned row's track, when hydrated — powers `e` enqueue and the
-/// rating / add-to-playlist gestures in the Downloads section.
+/// `e` on a pinned row — enqueue it. Offline-capable like `enter`: an
+/// un-hydrated row still queues via its id-only entry (the web/queue keys on
+/// the track id), so `e` never silently no-ops on the offline Downloads page.
+pub(super) fn enqueue_selected(app: &mut App) -> Vec<Effect> {
+    let queued = {
+        let Some(sel) = app.downloads.table.selected() else {
+            return vec![];
+        };
+        let Some(rows) = app.downloads.pinned.ready() else {
+            return vec![];
+        };
+        let Some(row) = rows.get(sel) else {
+            return vec![];
+        };
+        row_to_queued(row)
+    };
+    app.set_status(format!("queued {}", queued.title), false);
+    playback::enqueue_tracks(app, vec![queued], false)
+}
+
+/// The selected pinned row's track, when hydrated — powers the rating /
+/// add-to-playlist gestures in the Downloads section (which need a full
+/// [`Track`]). `enter`/`e` use the offline-capable [`row_to_queued`] instead.
 pub(super) fn selected_track(app: &App) -> Option<music_core::Track> {
     let sel = app.downloads.table.selected()?;
     app.downloads.pinned.ready()?.get(sel)?.track.clone()
@@ -134,7 +151,7 @@ fn row_to_queued(row: &PinnedRow) -> QueuedTrack {
         Some(t) => to_queued(t),
         None => QueuedTrack {
             id: row.track_id.clone(),
-            title: row.track_id.clone(),
+            title: row.title_or_id(),
             artist: None,
             album: None,
             artist_id: None,
@@ -152,10 +169,17 @@ pub(super) fn on_loaded(
 ) -> Vec<Effect> {
     app.downloads.stats = super::loadable_from(stats);
     app.downloads.pinned = super::loadable_from(pinned);
-    super::select_first(
-        &mut app.downloads.table,
-        super::loaded_len(&app.downloads.pinned),
-    );
+    // Preserve the cursor across reloads — a pin/unpin/evict re-fetches the
+    // whole list, and snapping back to row 0 after every op would make
+    // un-saving several rows in a row unusable. Clamp to the new length;
+    // select the first row on the initial (empty-selection) load.
+    let len = super::loaded_len(&app.downloads.pinned);
+    let sel = if len == 0 {
+        None
+    } else {
+        Some(app.downloads.table.selected().unwrap_or(0).min(len - 1))
+    };
+    app.downloads.table.select(sel);
     vec![]
 }
 

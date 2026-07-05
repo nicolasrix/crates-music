@@ -273,6 +273,53 @@ fn activate_plays_pinned_row_offline_capable() {
 }
 
 #[test]
+fn reload_preserves_pinned_selection() {
+    // The reload that follows a pin/unpin/evict must not snap the cursor back
+    // to row 0 — un-saving several rows in a row would be unusable otherwise.
+    let mut a = downloads_app(&["t1", "t2", "t3", "t4"]);
+    a.downloads.table.select(Some(2));
+    update(
+        &mut a,
+        Msg::DownloadsLoaded {
+            stats: Ok(stats()),
+            pinned: Ok(vec![
+                pinned_row("t1", true),
+                pinned_row("t2", true),
+                pinned_row("t4", true),
+            ]),
+        },
+    );
+    assert_eq!(a.downloads.table.selected(), Some(2));
+}
+
+#[test]
+fn reload_clamps_selection_when_last_row_removed() {
+    let mut a = downloads_app(&["t1", "t2"]);
+    a.downloads.table.select(Some(1));
+    update(
+        &mut a,
+        Msg::DownloadsLoaded {
+            stats: Ok(stats()),
+            pinned: Ok(vec![pinned_row("t1", true)]),
+        },
+    );
+    assert_eq!(a.downloads.table.selected(), Some(0));
+}
+
+#[test]
+fn enqueue_offline_pinned_row_queues_by_id() {
+    // `e` on an un-hydrated (offline) pinned row still enqueues — parity with
+    // `enter`, keyed on the id, not a no-op.
+    let mut a = app();
+    a.section = Section::Downloads;
+    a.downloads.pinned = Loadable::Ready(vec![pinned_row("t1", false)]);
+    a.downloads.table.select(Some(0));
+    update(&mut a, Msg::Enqueue);
+    assert_eq!(a.queue.len(), 1);
+    assert_eq!(a.queue.items()[0].id, "t1");
+}
+
+#[test]
 fn nav_moves_pinned_selection() {
     let mut a = downloads_app(&["t1", "t2", "t3"]);
     update(&mut a, Msg::NavDown);

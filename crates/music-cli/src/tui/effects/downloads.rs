@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use music_cache::{AudioCacheStats, AudioEntry, AudioKey, PinOutcome};
 use music_core::TrackId;
+use music_subsonic::Client;
 
 use crate::api;
 use crate::tui::msg::Msg;
@@ -43,7 +44,7 @@ async fn hydrate_pinned(ctx: &Ctx, entries: Vec<AudioEntry>) -> Vec<PinnedRow> {
         .iter()
         .map(|e| TrackId::from(e.key.track_id.clone()))
         .collect();
-    let by_id: HashMap<String, music_core::Track> = match ctx.subsonic().await {
+    let mut by_id: HashMap<String, music_core::Track> = match ctx.subsonic().await {
         Ok(client) => {
             let (tracks, _failed) = api::resolve_tracks(&client, &ids).await;
             tracks
@@ -59,7 +60,9 @@ async fn hydrate_pinned(ctx: &Ctx, entries: Vec<AudioEntry>) -> Vec<PinnedRow> {
     entries
         .into_iter()
         .map(|e| PinnedRow {
-            track: by_id.get(&e.key.track_id).cloned(),
+            // `remove` moves the Track out — ids are unique per entry, and the
+            // map is discarded right after, so there's nothing to clone for.
+            track: by_id.remove(&e.key.track_id),
             track_id: e.key.track_id,
             bytes: e.bytes,
         })
@@ -67,13 +70,18 @@ async fn hydrate_pinned(ctx: &Ctx, entries: Vec<AudioEntry>) -> Vec<PinnedRow> {
 }
 
 /// Fetch a track's bytes into the cache if they aren't there yet (the
-/// pin-if-missing precondition). Idempotent: a hit is a no-op.
-async fn ensure_cached(ctx: &Ctx, tid: &TrackId, key: &AudioKey) -> anyhow::Result<()> {
+/// pin-if-missing precondition). Idempotent: a hit is a no-op. Takes an
+/// already-resolved client so a bulk caller resolves auth once, not per track.
+async fn ensure_cached(
+    ctx: &Ctx,
+    client: &Client,
+    tid: &TrackId,
+    key: &AudioKey,
+) -> anyhow::Result<()> {
     if ctx.cache.get(key).await?.is_some() {
         return Ok(());
     }
-    let client = ctx.subsonic().await?;
-    crate::app::fetch_track_bytes(&client, &ctx.cache, tid).await?;
+    crate::app::fetch_track_bytes(client, &ctx.cache, tid).await?;
     Ok(())
 }
 
@@ -94,7 +102,11 @@ pub(super) async fn pin_toggle(ctx: &Ctx, track_id: &str, title: &str) -> Msg {
         Err(e) => return pin_done(format!("cache error: {e}"), true),
     }
 
-    if let Err(e) = ensure_cached(ctx, &tid, &key).await {
+    let client = match ctx.subsonic().await {
+        Ok(c) => c,
+        Err(e) => return pin_done(format!("save failed: {e}"), true),
+    };
+    if let Err(e) = ensure_cached(ctx, &client, &tid, &key).await {
         return pin_done(format!("save failed: {e}"), true);
     }
     match ctx.cache.pin(&key).await {
@@ -114,12 +126,19 @@ pub(super) async fn pin_toggle(ctx: &Ctx, track_id: &str, title: &str) -> Msg {
 /// `W` on a collection — pin every track (fetch-if-missing), tolerant per
 /// track. One status line tallies saved / already-offline / failed.
 pub(super) async fn pin_bulk(ctx: &Ctx, track_ids: &[String], label: &str) -> Msg {
+    // Resolve the client once — a fresh album is all cache-misses, and
+    // re-resolving auth per track would relock + reread the token store N
+    // times on the heaviest gesture there is.
+    let client = match ctx.subsonic().await {
+        Ok(c) => c,
+        Err(e) => return pin_done(format!("{label} failed: {e}"), true),
+    };
     let (mut saved, mut already, mut failed) = (0usize, 0usize, 0usize);
     let mut budget_hit = false;
     for id in track_ids {
         let tid = TrackId::from(id.clone());
         let key = crate::app::audio_key(&tid);
-        if ensure_cached(ctx, &tid, &key).await.is_err() {
+        if ensure_cached(ctx, &client, &tid, &key).await.is_err() {
             failed += 1;
             continue;
         }

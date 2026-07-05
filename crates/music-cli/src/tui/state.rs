@@ -524,6 +524,16 @@ pub(crate) struct PinnedRow {
     pub track: Option<Track>,
 }
 
+impl PinnedRow {
+    /// Display title: the hydrated track's title, else the raw id (offline).
+    /// The single home of the id-fallback rule (view, queue entry, target).
+    pub(crate) fn title_or_id(&self) -> String {
+        self.track
+            .as_ref()
+            .map_or_else(|| self.track_id.clone(), |t| t.title.clone())
+    }
+}
+
 /// Section 7 — offline downloads. Cache byte totals (the two-budget gauges)
 /// plus the pinned-track table. Both reload on every visit: the underlying
 /// SQLite reads are local and cheap, and pin state changes out from under us

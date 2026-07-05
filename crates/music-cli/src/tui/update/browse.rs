@@ -171,7 +171,7 @@ pub(super) fn enqueue_selected(app: &mut App) -> Vec<Effect> {
             enqueue_track(app, track.cloned())
         }
         Section::Playlists => playlists::enqueue_selected(app),
-        Section::Downloads => enqueue_track(app, downloads::selected_track(app)),
+        Section::Downloads => downloads::enqueue_selected(app),
         Section::Queue => vec![],
     }
 }
