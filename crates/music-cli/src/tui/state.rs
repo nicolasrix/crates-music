@@ -336,6 +336,13 @@ pub(crate) struct LibraryState {
     pub artist_target: Option<String>,
     pub artist_table: TableState,
 
+    /// Where `esc` returns to when leaving a detail pane: the (section, pane)
+    /// captured at the moment the detail was opened. Lets a detail opened
+    /// from Search / Liked / a parent detail pane back out to its origin
+    /// instead of always dumping the user in the Library browse list. Single
+    /// slot (not a stack), so paths deeper than one level fall back to Browse.
+    pub nav_return: Option<(Section, LibraryPane)>,
+
     /// Bumped on every browse-list (re)load; stamped on the load effect so a
     /// stale response for a mode we've since left can't overwrite state.
     pub generation: u64,
@@ -360,6 +367,7 @@ impl Default for LibraryState {
             open_artist: Loadable::Idle,
             artist_target: None,
             artist_table: TableState::default(),
+            nav_return: None,
             generation: 0,
         }
     }

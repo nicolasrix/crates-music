@@ -375,3 +375,72 @@ fn liked_album_and_artist_rows_navigate_to_their_detail() {
         |e| matches!(e, Effect::OpenArtist { id, name } if id == "ar5" && name == "Loved Artist")
     ));
 }
+
+// ── back() / esc navigation (review findings) ────────────────────────────
+
+#[test]
+fn esc_from_a_liked_opened_album_returns_to_liked() {
+    use super::super::state::LikedEntry;
+    let mut a = app();
+    a.section = Section::Liked;
+    a.liked.entries = Loadable::Ready(vec![LikedEntry {
+        kind: "album".to_owned(),
+        id: "al5".to_owned(),
+        rating: Rating::Like,
+        track: None,
+        label: Some("Loved Album".to_owned()),
+    }]);
+    a.liked.table.select(Some(0));
+
+    update(&mut a, Msg::Activate); // → Library / AlbumDetail
+    assert_eq!(a.section, Section::Library);
+    assert_eq!(a.library.pane, LibraryPane::AlbumDetail);
+
+    // esc backs out to where we came from (Liked), not the Library browse list.
+    update(&mut a, Msg::Back);
+    assert_eq!(a.section, Section::Liked);
+}
+
+#[test]
+fn esc_from_nested_artist_album_returns_to_the_artist_then_browse() {
+    let mut a = artist_detail_app(); // Library / ArtistDetail
+    a.library.artist_table.select(Some(0)); // an album row
+    update(&mut a, Msg::Activate); // → AlbumDetail (nested)
+    assert_eq!(a.library.pane, LibraryPane::AlbumDetail);
+
+    // First esc returns to the artist detail we navigated from…
+    update(&mut a, Msg::Back);
+    assert_eq!(a.section, Section::Library);
+    assert_eq!(a.library.pane, LibraryPane::ArtistDetail);
+
+    // …and a second esc falls back to the browse list.
+    update(&mut a, Msg::Back);
+    assert_eq!(a.library.pane, LibraryPane::Browse);
+}
+
+#[test]
+fn a_failed_browse_list_reloads_on_section_reentry() {
+    let mut a = app();
+    a.library.mode = LibraryMode::Tracks;
+    a.library.songs = Loadable::Failed("boom".to_owned());
+    a.section = Section::Queue; // leave Library
+
+    // Returning to Library retries the failed load rather than stranding.
+    let fx = update(&mut a, Msg::GoSection(Section::Library));
+    assert!(matches!(a.library.songs, Loadable::Loading));
+    assert!(fx.iter().any(|e| matches!(e, Effect::LoadSongs { .. })));
+}
+
+#[test]
+fn album_similar_footer_is_kept_when_it_matches_the_open_album() {
+    let mut a = album_app(&["t1"]); // open_album Ready with id "al1"
+    a.library.album_similar = Loadable::Loading;
+    update(
+        &mut a,
+        Msg::AlbumSimilarLoaded {
+            album_id: "al1".to_owned(),
+            result: Ok(vec![similar(SimilarKind::Artist, "ar9", "Neighbour")]),
+        },
+    );
+    assert_eq!(a.library.album_similar.ready().map(Vec::len), Some(1));
+}

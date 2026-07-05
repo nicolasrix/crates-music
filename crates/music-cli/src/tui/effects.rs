@@ -469,8 +469,10 @@ async fn album_similar(
         api::similar_artists(&ctx.config, seeds, &exclude_artists, SIMILAR_N),
     )
     .await;
-    let albums = similar_groups(albums_res)?;
-    let artists = similar_groups(artists_res)?;
+    // Each half degrades to empty on its own error — a 5xx on one must not
+    // discard a successful other half (the footer is best-effort).
+    let albums = similar_groups(albums_res);
+    let artists = similar_groups(artists_res);
 
     let client = ctx.subsonic().await.map_err(|e| e.to_string())?;
     let album_futs = albums.iter().map(|g| async {
@@ -508,16 +510,18 @@ async fn album_similar(
     Ok(out)
 }
 
-/// Map a `similar_*` result to its groups, treating "recommender not ready"
-/// or an all-unindexed seed set as an empty (not failed) footer.
-fn similar_groups(
-    res: Result<api::SimilarList, ApiError>,
-) -> Result<Vec<api::SimilarGroup>, String> {
+/// Map a `similar_*` result to its groups. Best-effort: "recommender not
+/// ready", an all-unindexed seed set, *and* an unexpected error all degrade
+/// to an empty half (logged) rather than failing the whole footer.
+fn similar_groups(res: Result<api::SimilarList, ApiError>) -> Vec<api::SimilarGroup> {
     match res {
-        Ok(list) if list.all_seeds_unindexed => Ok(Vec::new()),
-        Ok(list) => Ok(list.groups),
-        Err(ApiError::RecommenderUnavailable) => Ok(Vec::new()),
-        Err(e) => Err(e.to_string()),
+        Ok(list) if list.all_seeds_unindexed => Vec::new(),
+        Ok(list) => list.groups,
+        Err(ApiError::RecommenderUnavailable) => Vec::new(),
+        Err(e) => {
+            tracing::debug!(error = %e, "similar half failed; degrading to empty");
+            Vec::new()
+        }
     }
 }
 

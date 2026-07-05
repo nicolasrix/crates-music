@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::msg::{InputMsg, Msg};
-use super::state::{App, Overlay, Rating, Section};
+use super::state::{App, LibraryPane, Overlay, Rating, Section};
 
 /// Rendered by the help overlay — keep in sync with `action_for` (it *is*
 /// the documentation of that function).
@@ -17,8 +17,8 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("g / G", "top / bottom"),
     ("ctrl-d / ctrl-u", "half-page down / up"),
     ("[ / ]", "library mode: albums / artists / tracks"),
-    ("h / l", "album list kind (albums mode)"),
-    ("S", "start station from album / artist"),
+    ("h / l", "album kind (albums mode) · result bucket (search)"),
+    ("S", "station from album / artist (in detail pane)"),
     ("enter", "open · play from here · jump"),
     ("e", "enqueue track / album"),
     ("a", "add track to a playlist"),
@@ -137,8 +137,13 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         // [ / ] cycle the library browse mode (albums / artists / tracks).
         KeyCode::Char('[') => Some(Msg::CycleModePrev),
         KeyCode::Char(']') => Some(Msg::CycleModeNext),
-        // S starts a station from the open album/artist detail pane.
-        KeyCode::Char('S') if app.section == Section::Library => Some(Msg::AlbumStation),
+        // S starts a station, but only inside an album/artist detail pane
+        // (in the browse list there's no seed set — it would just dead-end).
+        KeyCode::Char('S')
+            if app.section == Section::Library && app.library.pane != LibraryPane::Browse =>
+        {
+            Some(Msg::AlbumStation)
+        }
         KeyCode::Enter => Some(Msg::Activate),
         KeyCode::Char('e') => Some(Msg::Enqueue),
         // Add-to-playlist works on any track row (queue, lists, detail).
@@ -279,9 +284,13 @@ mod tests {
             action_for(&a, key(KeyCode::Char(']'))),
             Some(Msg::CycleModeNext)
         ));
-        // S only starts a station inside the Library section.
+        // S only starts a station inside a Library *detail* pane — inert on
+        // the browse list and in other sections.
+        assert!(action_for(&a, key(KeyCode::Char('S'))).is_none());
+        let mut det = app();
+        det.library.pane = LibraryPane::AlbumDetail;
         assert!(matches!(
-            action_for(&a, key(KeyCode::Char('S'))),
+            action_for(&det, key(KeyCode::Char('S'))),
             Some(Msg::AlbumStation)
         ));
         let mut b = app();

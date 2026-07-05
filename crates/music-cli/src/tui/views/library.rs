@@ -167,22 +167,39 @@ fn draw_album_detail(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .map(|t| track_row(t, current_id.as_deref(), &app.ratings, theme))
         .collect();
 
-    if let Some(similar) = app.library.album_similar.ready() {
-        for entry in similar {
-            let sub = match entry.kind {
-                SimilarKind::Album => entry.artist.clone().unwrap_or_else(|| "album".to_owned()),
-                SimilarKind::Artist => "artist".to_owned(),
-            };
-            rows.push(
-                Row::new(vec![
-                    Cell::from(Span::styled(symbols::SIMILAR, theme.accent)),
-                    Cell::from(Span::styled(entry.name.clone(), theme.accent)),
-                    Cell::from(Span::styled(sub, theme.dim)),
-                    Cell::from(""),
-                ])
-                .style(theme.text),
-            );
+    match &app.library.album_similar {
+        super::super::state::Loadable::Ready(similar) => {
+            for entry in similar {
+                let sub = match entry.kind {
+                    SimilarKind::Album => {
+                        entry.artist.clone().unwrap_or_else(|| "album".to_owned())
+                    }
+                    SimilarKind::Artist => "artist".to_owned(),
+                };
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(Span::styled(symbols::SIMILAR, theme.accent)),
+                        Cell::from(Span::styled(entry.name.clone(), theme.accent)),
+                        Cell::from(Span::styled(sub, theme.dim)),
+                        Cell::from(""),
+                    ])
+                    .style(theme.text),
+                );
+            }
         }
+        // A genuine failure (not just a warming recommender, which yields an
+        // empty Ready) gets one dim, non-selectable note rather than
+        // vanishing silently.
+        super::super::state::Loadable::Failed(_) => rows.push(
+            Row::new(vec![
+                Cell::from(Span::styled(symbols::SIMILAR, theme.dim)),
+                Cell::from(Span::styled("similar unavailable", theme.dim)),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(theme.dim),
+        ),
+        super::super::state::Loadable::Idle | super::super::state::Loadable::Loading => {}
     }
 
     let table = Table::new(

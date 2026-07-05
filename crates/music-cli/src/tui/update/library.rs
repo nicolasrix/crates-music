@@ -72,13 +72,17 @@ pub(super) fn reload_browse(app: &mut App) -> Vec<Effect> {
     }
 }
 
-/// True when the current mode's browse list hasn't been loaded yet — the
-/// section-entry lazy-load trigger.
-pub(super) fn browse_is_idle(app: &App) -> bool {
+/// True when re-entering the section should (re)load the current mode's
+/// browse list: never loaded (`Idle`) or a previous load that `Failed`
+/// (so returning to Library retries rather than stranding on the error).
+pub(super) fn browse_needs_load(app: &App) -> bool {
+    fn stale<T>(l: &Loadable<Vec<T>>) -> bool {
+        matches!(l, Loadable::Idle | Loadable::Failed(_))
+    }
     match app.library.mode {
-        LibraryMode::Albums => matches!(app.library.albums, Loadable::Idle),
-        LibraryMode::Artists => matches!(app.library.artists, Loadable::Idle),
-        LibraryMode::Tracks => matches!(app.library.songs, Loadable::Idle),
+        LibraryMode::Albums => stale(&app.library.albums),
+        LibraryMode::Artists => stale(&app.library.artists),
+        LibraryMode::Tracks => stale(&app.library.songs),
     }
 }
 
@@ -143,8 +147,10 @@ fn open_selected_artist(app: &mut App) -> Vec<Effect> {
 }
 
 /// Open an album's detail pane (also used by Search-Albums and the similar
-/// footer). Switches to the Library section.
+/// footer). Switches to the Library section, remembering the origin so `esc`
+/// backs out to where the user came from.
 pub(super) fn open_album(app: &mut App, id: music_core::AlbumId) -> Vec<Effect> {
+    app.library.nav_return = Some((app.section, app.library.pane));
     app.section = crate::tui::state::Section::Library;
     app.library.pane = LibraryPane::AlbumDetail;
     app.library.open_album = Loadable::Loading;
@@ -155,8 +161,10 @@ pub(super) fn open_album(app: &mut App, id: music_core::AlbumId) -> Vec<Effect> 
 }
 
 /// Open an artist's detail pane (from the Artists list, Search-Artists, or a
-/// similar-artist footer row). Switches to the Library section.
+/// similar-artist footer row). Switches to the Library section, remembering
+/// the origin for `esc`.
 pub(super) fn open_artist(app: &mut App, id: String, name: String) -> Vec<Effect> {
+    app.library.nav_return = Some((app.section, app.library.pane));
     app.section = crate::tui::state::Section::Library;
     app.library.pane = LibraryPane::ArtistDetail;
     app.library.open_artist = Loadable::Loading;
@@ -507,8 +515,12 @@ pub(super) fn on_album_similar(
     album_id: &str,
     result: Result<Vec<SimilarEntry>, String>,
 ) {
-    // Guard against a stale footer for a since-closed album.
-    if app.library.open_target.as_deref() != Some(album_id) {
+    // Guard against a stale footer for a since-closed album. Match on the
+    // *loaded* album's canonical id (the same id `after_album_opened` seeds
+    // the request with), not the requested `open_target` — the two can differ
+    // if Navidrome canonicalizes the id, which would drop a valid footer.
+    let open_id = app.library.open_album.ready().map(|a| a.album.id.as_str());
+    if open_id != Some(album_id) {
         return;
     }
     app.library.album_similar = super::loadable_from(result);

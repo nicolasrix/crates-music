@@ -499,8 +499,9 @@ pub(super) fn loadable_from<T>(result: Result<T, String>) -> Loadable<T> {
 fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
     app.section = section;
     match section {
-        // First visit lazily loads the current browse mode's list.
-        Section::Library if library::browse_is_idle(app) => library::reload_browse(app),
+        // First visit (or retry after a failed load) lazily loads the
+        // current browse mode's list.
+        Section::Library if library::browse_needs_load(app) => library::reload_browse(app),
         // Liked reloads every visit — it's cheap and ratings change often.
         Section::Liked => {
             app.liked.entries = Loadable::Loading;
@@ -527,7 +528,15 @@ fn back(app: &mut App) -> Vec<Effect> {
             LibraryPane::AlbumDetail | LibraryPane::ArtistDetail
         )
     {
-        app.library.pane = LibraryPane::Browse;
+        // Return to wherever this detail was opened from (Search / Liked / a
+        // parent detail pane), else fall back to the browse list.
+        match app.library.nav_return.take() {
+            Some((section, pane)) => {
+                app.section = section;
+                app.library.pane = pane;
+            }
+            None => app.library.pane = LibraryPane::Browse,
+        }
     } else if app.section == Section::Playlists {
         playlists::back(app);
     }
