@@ -320,14 +320,24 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             Some(msg)
         }
         Effect::PlaylistAddTrack { id, track_id } => {
+            // reopen_id is set to the target on both arms so an add to the
+            // *currently-open* playlist refreshes its detail (on success) or
+            // rolls back an optimistic append (on failure). on_write_done
+            // reopens only when it's still the playlist on screen, so a
+            // picker-add to some other playlist doesn't hijack the view.
             let msg = match api::put_playlist_tracks(&ctx.config, &id, &[track_id], true).await {
                 Ok(()) => Msg::PlaylistWriteDone {
                     note: "added to playlist".to_owned(),
                     is_error: false,
                     reload_list: true,
-                    reopen_id: None,
+                    reopen_id: Some(id),
                 },
-                Err(e) => write_error(&e),
+                Err(e) => Msg::PlaylistWriteDone {
+                    note: format!("add failed: {}", playlist_err(&e)),
+                    is_error: true,
+                    reload_list: false,
+                    reopen_id: Some(id),
+                },
             };
             Some(msg)
         }
@@ -352,6 +362,12 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         Effect::PlaylistSuggest { playlist_id, seeds } => {
             let result = match api::suggest_from_seeds(&ctx.config, &seeds, PLAYLIST_SUGGEST_N).await
             {
+                // Distinguish "not embedded yet" (an ingest gap the user can
+                // wait out) from "nothing new to add" (an empty Ok, which
+                // on_suggestions words differently).
+                Ok(list) if list.all_seeds_unindexed => Err(StationError::Other(
+                    "playlist isn't embedded yet — suggestions improve after ingest".to_owned(),
+                )),
                 Ok(list) => resolve_list(ctx, &list.track_ids).await,
                 Err(e) => Err(station_error(e)),
             };

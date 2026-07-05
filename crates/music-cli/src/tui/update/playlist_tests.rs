@@ -345,6 +345,46 @@ fn write_done_reopens_and_reloads() {
 }
 
 #[test]
+fn detail_scoped_keys_no_op_in_the_list_pane() {
+    // Regression: open A, Esc back to the list (which leaves `open` Ready),
+    // highlight a row — X/R/x/m must NOT act on the stale open playlist.
+    let mut a = detail_app(&["t1", "t2"]);
+    a.playlists.pane = PlaylistsPane::List; // as if Esc'd back
+    for msg in [
+        Msg::PlaylistDelete,
+        Msg::PlaylistRenamePrompt,
+        Msg::PlaylistRemoveTrack,
+        Msg::PlaylistSuggest,
+    ] {
+        let effects = update(&mut a, msg);
+        assert!(effects.is_empty(), "detail key leaked into the list pane");
+    }
+    // Nothing armed, nothing opened a prompt, membership intact.
+    assert!(a.playlists.pending_delete.is_none());
+    assert_eq!(a.overlay, Overlay::None);
+    assert_eq!(a.playlists.open.ready().unwrap().track_ids.len(), 2);
+}
+
+#[test]
+fn write_done_reopen_is_skipped_after_navigating_away() {
+    // A delayed completion for playlist P must not yank the user off Q.
+    let mut a = detail_app(&["t1"]);
+    a.playlists.open_id = Some("q".to_owned()); // user moved to Q
+    let effects = update(
+        &mut a,
+        Msg::PlaylistWriteDone {
+            note: "renamed".to_owned(),
+            is_error: false,
+            reload_list: false,
+            reopen_id: Some("p1".to_owned()),
+        },
+    );
+    // No reopen of p1; Q's detail is left alone.
+    assert!(!effects.iter().any(|e| matches!(e, Effect::OpenPlaylist { .. })));
+    assert_eq!(a.playlists.open_id.as_deref(), Some("q"));
+}
+
+#[test]
 fn back_pops_panes_toward_the_list() {
     let mut a = detail_app(&["t1"]);
     a.playlists.pane = PlaylistsPane::Suggestions;

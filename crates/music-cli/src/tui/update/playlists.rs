@@ -156,6 +156,10 @@ pub(super) fn shuffle_play(app: &mut App) -> Vec<Effect> {
 
 /// `m` — ask the recommender for more tracks like this playlist's.
 pub(super) fn suggest(app: &mut App) -> Vec<Effect> {
+    if app.playlists.pane != PlaylistsPane::Detail {
+        app.set_status("open a playlist first", false);
+        return vec![];
+    }
     let Some(open) = app.playlists.open.ready() else {
         app.set_status("open a playlist first", false);
         return vec![];
@@ -178,6 +182,10 @@ pub(super) fn suggest(app: &mut App) -> Vec<Effect> {
 
 /// `R` — open the rename prompt for the open playlist.
 pub(super) fn rename_prompt(app: &mut App) -> Vec<Effect> {
+    if app.playlists.pane != PlaylistsPane::Detail {
+        app.set_status("open a playlist to rename it", false);
+        return vec![];
+    }
     let Some(open) = app.playlists.open.ready() else {
         app.set_status("open a playlist to rename it", false);
         return vec![];
@@ -201,6 +209,10 @@ pub(super) fn rename_prompt(app: &mut App) -> Vec<Effect> {
 /// `X` — delete the open playlist, two-step (a second `X` within the window
 /// confirms). The list refreshes when the delete completes.
 pub(super) fn delete(app: &mut App) -> Vec<Effect> {
+    if app.playlists.pane != PlaylistsPane::Detail {
+        app.set_status("open a playlist to delete it", false);
+        return vec![];
+    }
     let Some(open) = app.playlists.open.ready() else {
         app.set_status("open a playlist to delete it", false);
         return vec![];
@@ -232,7 +244,17 @@ pub(super) fn delete(app: &mut App) -> Vec<Effect> {
 
 /// `x` — remove the selected track from the open playlist. Optimistic: the
 /// row disappears immediately; a failed write reopens the detail to resync.
+///
+/// NB: this submits the full surviving membership as a `replace` (the gateway
+/// has no per-track remove op). A `replace` computed from an in-memory
+/// snapshot can lose a *concurrent* `append` if the two writes race — the
+/// same client-computed-replace hazard the web client carries. We accept it
+/// rather than serialize playlist writes: single-user edits to one's own
+/// playlist rarely overlap within the network window.
 pub(super) fn remove_track(app: &mut App) -> Vec<Effect> {
+    if app.playlists.pane != PlaylistsPane::Detail {
+        return vec![];
+    }
     let Some(sel) = app.playlists.detail_table.selected() else {
         return vec![];
     };
@@ -502,32 +524,26 @@ pub(super) fn on_write_done(
     app: &mut App,
     note: String,
     is_error: bool,
-    reload_list: bool,
+    should_reload: bool,
     reopen_id: Option<String>,
 ) -> Vec<Effect> {
     app.set_status(note, is_error);
     let mut effects = Vec::new();
-    if reload_list {
-        effects.extend(reload_list_silent(app));
+    if should_reload {
+        effects.extend(reload_list(app));
     }
     if let Some(id) = reopen_id {
         // Reopen the detail to resync (rename changed the name; a failed
-        // optimistic remove needs the server's truth back).
-        app.playlists.open = Loadable::Loading;
-        app.playlists.open_id = Some(id.clone());
-        effects.push(Effect::OpenPlaylist { id });
+        // optimistic edit needs the server's truth back; an add to the open
+        // playlist needs the new row). Guard on the id still being the one on
+        // screen — a delayed completion must never yank the user off a
+        // playlist they've since navigated to.
+        if app.playlists.open_id.as_deref() == Some(id.as_str()) {
+            app.playlists.open = Loadable::Loading;
+            effects.push(Effect::OpenPlaylist { id });
+        }
     }
     effects
-}
-
-/// Reload the list without disturbing the current pane/status (used as a
-/// side effect of a write completion).
-fn reload_list_silent(app: &mut App) -> Vec<Effect> {
-    app.playlists.generation += 1;
-    app.playlists.list = Loadable::Loading;
-    vec![Effect::LoadPlaylists {
-        generation: app.playlists.generation,
-    }]
 }
 
 pub(super) fn on_suggestions(
@@ -540,8 +556,11 @@ pub(super) fn on_suggestions(
         return vec![];
     }
     app.playlists.suggestions = match result {
+        // Empty-but-embedded is a distinct case from unindexed (which the
+        // effect maps to an `Other` error): the recommender just has nothing
+        // new to add.
         Ok(tracks) if tracks.is_empty() => {
-            Loadable::Failed("no suggestions — the playlist may not be embedded yet".to_owned())
+            Loadable::Failed("no more suggestions for this playlist".to_owned())
         }
         Ok(tracks) => Loadable::Ready(tracks),
         Err(StationError::Unavailable) => Loadable::Failed(
