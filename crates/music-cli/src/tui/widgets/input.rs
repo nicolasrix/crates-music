@@ -18,6 +18,13 @@ impl InputField {
         &self.value
     }
 
+    /// Replace the contents and park the cursor at the end — used to
+    /// pre-fill a prompt (e.g. the current name when renaming).
+    pub(crate) fn set_value(&mut self, value: &str) {
+        value.clone_into(&mut self.value);
+        self.cursor = self.char_count();
+    }
+
     #[cfg(test)]
     pub(crate) fn cursor(&self) -> usize {
         self.cursor

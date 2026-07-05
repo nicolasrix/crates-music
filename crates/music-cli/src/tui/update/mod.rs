@@ -10,9 +10,13 @@
 //! Every queue gesture funnels through a `playback` entry point, which
 //! forks to `room` while the sync connection is online.
 
+mod browse;
 mod playback;
+mod playlists;
 mod room;
 
+#[cfg(test)]
+mod playlist_tests;
 #[cfg(test)]
 mod room_tests;
 #[cfg(test)]
@@ -72,8 +76,8 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::NavHalfPageUp => nav(app, -10),
         Msg::CycleKindPrev => cycle_kind(app, -1),
         Msg::CycleKindNext => cycle_kind(app, 1),
-        Msg::Activate => activate(app),
-        Msg::Enqueue => enqueue_selected(app),
+        Msg::Activate => browse::activate(app),
+        Msg::Enqueue => browse::enqueue_selected(app),
         Msg::FocusSearch => {
             app.section = Section::Search;
             app.search.focused = true;
@@ -118,10 +122,25 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::QueueMoveDown => playback::queue_move(app, MoveKind::Down),
         Msg::QueueMoveUp => playback::queue_move(app, MoveKind::Up),
         Msg::QueueMoveTop => playback::queue_move(app, MoveKind::Top),
-        Msg::PlayNext => play_next_selected(app),
+        Msg::PlayNext => browse::play_next_selected(app),
         Msg::ToggleOutput => room::toggle_output(app),
         Msg::Player(ev) => playback::player_event(app, ev),
         Msg::Sync(ev) => room::handle(app, ev),
+
+        // ── playlists (gestures + overlays) ───────────────────────────
+        Msg::AddToPlaylist => playlists::open_picker(app),
+        Msg::NewPlaylist => playlists::new_playlist_prompt(app),
+        Msg::PlaylistShufflePlay => playlists::shuffle_play(app),
+        Msg::PlaylistRenamePrompt => playlists::rename_prompt(app),
+        Msg::PlaylistDelete => playlists::delete(app),
+        Msg::PlaylistRemoveTrack => playlists::remove_track(app),
+        Msg::PlaylistSuggest => playlists::suggest(app),
+        Msg::PickerMove(d) => playlists::picker_move(app, d),
+        Msg::PickerActivate => playlists::picker_activate(app),
+        Msg::PickerClose => playlists::picker_close(app),
+        Msg::PromptInput(im) => playlists::prompt_input(app, &im),
+        Msg::PromptSubmit => playlists::prompt_submit(app),
+        Msg::PromptClose => playlists::prompt_close(app),
 
         // ── effect completions ────────────────────────────────────────
         Msg::AlbumsLoaded { generation, result } => {
@@ -353,6 +372,20 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::PlaylistsLoaded { generation, result } => {
+            playlists::on_loaded(app, generation, result)
+        }
+        Msg::PlaylistOpened { id, result } => playlists::on_opened(app, &id, result),
+        Msg::PlaylistWriteDone {
+            note,
+            is_error,
+            reload_list,
+            reopen_id,
+        } => playlists::on_write_done(app, note, is_error, reload_list, reopen_id),
+        Msg::PlaylistSuggestionsDone {
+            playlist_id,
+            result,
+        } => playlists::on_suggestions(app, &playlist_id, result),
     }
 }
 
@@ -383,6 +416,7 @@ fn focused_list(app: &mut App) -> (usize, &mut ratatui::widgets::TableState) {
             (lens[idx], &mut app.search.tables[idx])
         }
         Section::Queue => (app.queue.len(), &mut app.queue_table),
+        Section::Playlists => playlists::focused_list(app),
         Section::Stations => (
             loaded_len(&app.stations.results),
             &mut app.stations.table,
@@ -397,7 +431,7 @@ fn search_bucket_lens(app: &App) -> [usize; 3] {
     })
 }
 
-fn loaded_len<T>(l: &Loadable<Vec<T>>) -> usize {
+pub(super) fn loaded_len<T>(l: &Loadable<Vec<T>>) -> usize {
     l.ready().map_or(0, Vec::len)
 }
 
@@ -427,11 +461,11 @@ fn nav_to(app: &mut App, target: NavTarget) -> Vec<Effect> {
     vec![]
 }
 
-fn select_first(table: &mut ratatui::widgets::TableState, len: usize) {
+pub(super) fn select_first(table: &mut ratatui::widgets::TableState, len: usize) {
     table.select(if len == 0 { None } else { Some(0) });
 }
 
-fn loadable_from<T>(result: Result<T, String>) -> Loadable<T> {
+pub(super) fn loadable_from<T>(result: Result<T, String>) -> Loadable<T> {
     match result {
         Ok(v) => Loadable::Ready(v),
         Err(e) => Loadable::Failed(e),
@@ -452,6 +486,10 @@ fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
             app.liked.entries = Loadable::Loading;
             vec![Effect::LoadLiked]
         }
+        // First visit lazily loads the playlist list.
+        Section::Playlists if matches!(app.playlists.list, Loadable::Idle) => {
+            playlists::reload_list(app)
+        }
         _ => vec![],
     }
 }
@@ -465,6 +503,8 @@ fn back(app: &mut App) -> Vec<Effect> {
         app.stations.focused = false;
     } else if app.section == Section::Library && app.library.pane == LibraryPane::AlbumDetail {
         app.library.pane = LibraryPane::Albums;
+    } else if app.section == Section::Playlists {
+        playlists::back(app);
     }
     vec![]
 }
@@ -530,259 +570,6 @@ fn submit_input(app: &mut App) -> Vec<Effect> {
     }
 }
 
-// ── activate / enqueue / rate ──────────────────────────────────────────
-
-fn activate(app: &mut App) -> Vec<Effect> {
-    match app.section {
-        Section::Library => match app.library.pane {
-            LibraryPane::Albums => open_selected_album(app),
-            LibraryPane::AlbumDetail => {
-                let Some(sel) = app.library.tracks_table.selected() else {
-                    return vec![];
-                };
-                let Some(album) = app.library.open_album.ready() else {
-                    return vec![];
-                };
-                let queued = album.tracks.iter().map(to_queued).collect();
-                playback::play_new_queue(app, queued, sel)
-            }
-        },
-        Section::Search => activate_search(app),
-        Section::Queue => {
-            let Some(sel) = app.queue_table.selected() else {
-                return vec![];
-            };
-            if app.sync.online() {
-                return room::jump_selected(app, sel);
-            }
-            let next_id = app.queue.items().get(sel).map(|t| t.id.clone());
-            playback::note_abandonment(app, next_id.as_deref());
-            if app.queue.jump(sel).is_some() {
-                playback::start_current(app)
-            } else {
-                vec![]
-            }
-        }
-        Section::Stations => {
-            let Some(sel) = app.stations.table.selected() else {
-                return vec![];
-            };
-            let Some(tracks) = app.stations.results.ready() else {
-                return vec![];
-            };
-            let queued = tracks.iter().map(to_queued).collect();
-            playback::play_new_queue(app, queued, sel)
-        }
-        Section::Liked => {
-            let Some(sel) = app.liked.table.selected() else {
-                return vec![];
-            };
-            let Some(entries) = app.liked.entries.ready() else {
-                return vec![];
-            };
-            // Play the liked *tracks* (with metadata) starting from the
-            // selected one; album/artist rows aren't directly playable.
-            let tracks: Vec<_> = entries
-                .iter()
-                .filter_map(|e| e.track.as_ref())
-                .map(to_queued)
-                .collect();
-            let Some(entry) = entries.get(sel) else {
-                return vec![];
-            };
-            let Some(track) = entry.track.as_ref() else {
-                app.set_status("only tracks are playable from here", false);
-                return vec![];
-            };
-            let start = tracks
-                .iter()
-                .position(|t| t.id == track.id.as_str())
-                .unwrap_or(0);
-            playback::play_new_queue(app, tracks, start)
-        }
-    }
-}
-
-fn open_selected_album(app: &mut App) -> Vec<Effect> {
-    let Some(sel) = app.library.albums_table.selected() else {
-        return vec![];
-    };
-    let Some(albums) = app.library.albums.ready() else {
-        return vec![];
-    };
-    let Some(album) = albums.get(sel) else {
-        return vec![];
-    };
-    let id = album.id.clone();
-    app.library.pane = LibraryPane::AlbumDetail;
-    app.library.open_album = Loadable::Loading;
-    app.library.open_target = Some(id.as_str().to_owned());
-    app.library.tracks_table.select(None);
-    vec![Effect::OpenAlbum { id }]
-}
-
-fn activate_search(app: &mut App) -> Vec<Effect> {
-    let bucket = app.search.bucket();
-    let idx = app.search.bucket % 3;
-    let Some(sel) = app.search.tables[idx].selected() else {
-        return vec![];
-    };
-    let Some(results) = app.search.results.ready() else {
-        return vec![];
-    };
-    match bucket {
-        SearchBucket::Tracks => {
-            if results.tracks.is_empty() {
-                return vec![];
-            }
-            let queued = results.tracks.iter().map(to_queued).collect();
-            playback::play_new_queue(app, queued, sel)
-        }
-        SearchBucket::Albums => {
-            let Some(album) = results.albums.get(sel) else {
-                return vec![];
-            };
-            let id = album.id.clone();
-            app.section = Section::Library;
-            app.library.pane = LibraryPane::AlbumDetail;
-            app.library.open_album = Loadable::Loading;
-            app.library.open_target = Some(id.as_str().to_owned());
-            app.library.tracks_table.select(None);
-            vec![Effect::OpenAlbum { id }]
-        }
-        SearchBucket::Artists => {
-            app.set_status("artist view isn't in the TUI yet — try their albums", false);
-            vec![]
-        }
-    }
-}
-
-fn enqueue_selected(app: &mut App) -> Vec<Effect> {
-    match app.section {
-        Section::Library => match app.library.pane {
-            LibraryPane::Albums => {
-                let Some(sel) = app.library.albums_table.selected() else {
-                    return vec![];
-                };
-                let Some((id, name)) = app
-                    .library
-                    .albums
-                    .ready()
-                    .and_then(|a| a.get(sel))
-                    .map(|a| (a.id.clone(), a.name.clone()))
-                else {
-                    return vec![];
-                };
-                app.set_status(format!("fetching {name}…"), false);
-                vec![Effect::EnqueueAlbum { id }]
-            }
-            LibraryPane::AlbumDetail => {
-                let track = app.library.tracks_table.selected().and_then(|sel| {
-                    app.library
-                        .open_album
-                        .ready()
-                        .and_then(|a| a.tracks.get(sel))
-                });
-                enqueue_track(app, track.cloned())
-            }
-        },
-        Section::Search => {
-            let idx = app.search.bucket % 3;
-            let sel = app.search.tables[idx].selected();
-            match app.search.bucket() {
-                SearchBucket::Tracks => {
-                    let track = sel.and_then(|s| {
-                        app.search.results.ready().and_then(|r| r.tracks.get(s))
-                    });
-                    enqueue_track(app, track.cloned())
-                }
-                SearchBucket::Albums => {
-                    let Some((id, name)) = sel
-                        .and_then(|s| app.search.results.ready().and_then(|r| r.albums.get(s)))
-                        .map(|a| (a.id.clone(), a.name.clone()))
-                    else {
-                        return vec![];
-                    };
-                    app.set_status(format!("fetching {name}…"), false);
-                    vec![Effect::EnqueueAlbum { id }]
-                }
-                SearchBucket::Artists => vec![],
-            }
-        }
-        Section::Stations => {
-            let track = app.stations.table.selected().and_then(|sel| {
-                app.stations.results.ready().and_then(|r| r.get(sel))
-            });
-            enqueue_track(app, track.cloned())
-        }
-        Section::Liked => {
-            let track = app.liked.table.selected().and_then(|sel| {
-                app.liked
-                    .entries
-                    .ready()
-                    .and_then(|e| e.get(sel))
-                    .and_then(|e| e.track.as_ref())
-            });
-            enqueue_track(app, track.cloned())
-        }
-        Section::Queue => vec![],
-    }
-}
-
-fn enqueue_track(app: &mut App, track: Option<music_core::Track>) -> Vec<Effect> {
-    let Some(track) = track else {
-        return vec![];
-    };
-    app.set_status(format!("queued {}", track.title), false);
-    let queued = to_queued(&track);
-    playback::enqueue_tracks(app, vec![queued], false)
-}
-
-/// `P` — in the queue view, move the selected row to right after the
-/// cursor; in track lists, enqueue the selected track there.
-fn play_next_selected(app: &mut App) -> Vec<Effect> {
-    if app.section == Section::Queue {
-        return playback::queue_move(app, MoveKind::AfterCursor);
-    }
-    let Some(track) = selected_track(app) else {
-        app.set_status("play-next works on track rows", false);
-        return vec![];
-    };
-    app.set_status(format!("playing {} next", track.title), false);
-    let queued = to_queued(&track);
-    playback::enqueue_tracks(app, vec![queued], true)
-}
-
-/// The selected row's track, in sections that list tracks.
-fn selected_track(app: &App) -> Option<music_core::Track> {
-    match app.section {
-        Section::Library => match app.library.pane {
-            LibraryPane::AlbumDetail => {
-                let sel = app.library.tracks_table.selected()?;
-                app.library.open_album.ready()?.tracks.get(sel).cloned()
-            }
-            LibraryPane::Albums => None,
-        },
-        Section::Search => {
-            let idx = app.search.bucket % 3;
-            let sel = app.search.tables[idx].selected()?;
-            match app.search.bucket() {
-                SearchBucket::Tracks => app.search.results.ready()?.tracks.get(sel).cloned(),
-                _ => None,
-            }
-        }
-        Section::Stations => {
-            let sel = app.stations.table.selected()?;
-            app.stations.results.ready()?.get(sel).cloned()
-        }
-        Section::Liked => {
-            let sel = app.liked.table.selected()?;
-            app.liked.entries.ready()?.get(sel)?.track.clone()
-        }
-        Section::Queue => None,
-    }
-}
-
 /// The (kind, id, label) a rating key applies to in the current context;
 /// falls back to the now-playing track.
 fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
@@ -836,6 +623,7 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
             let item = app.queue.items().get(sel)?;
             Some(("track", item.id.clone(), item.title.clone()))
         }
+        Section::Playlists => Some(track_target(&playlists::selected_track(app)?)),
     }
     .or_else(|| {
         // Fallback: whatever is playing right now.

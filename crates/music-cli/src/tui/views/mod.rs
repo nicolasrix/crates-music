@@ -1,6 +1,7 @@
 pub(crate) mod help;
 pub(crate) mod library;
 pub(crate) mod liked;
+pub(crate) mod playlists;
 pub(crate) mod queue;
 pub(crate) mod search;
 pub(crate) mod stations;

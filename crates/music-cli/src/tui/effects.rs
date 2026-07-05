@@ -16,7 +16,7 @@ use music_cache::AudioCache;
 use music_subsonic::Client;
 
 use super::msg::{Effect, Msg, StationError, SyncEvent};
-use super::state::{LikedEntry, Rating};
+use super::state::{LikedEntry, PlaylistDetailState, Rating};
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
 #[derive(Clone)]
@@ -273,6 +273,165 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             .map_err(|e| e.to_string());
             Some(Msg::TracksHydrated { ids, result })
         }
+
+        // ── playlists ─────────────────────────────────────────────────
+        Effect::LoadPlaylists { generation } => {
+            let result = api::list_playlists(&ctx.config)
+                .await
+                .map_err(|e| e.to_string());
+            Some(Msg::PlaylistsLoaded { generation, result })
+        }
+        Effect::OpenPlaylist { id } => {
+            let result = open_playlist(ctx, &id).await;
+            Some(Msg::PlaylistOpened { id, result })
+        }
+        Effect::PlaylistCreate { name, then_add } => {
+            Some(playlist_create(ctx, &name, then_add.as_deref()).await)
+        }
+        Effect::PlaylistRename { id, name } => {
+            let msg = match api::rename_playlist(&ctx.config, &id, &name).await {
+                Ok(()) => Msg::PlaylistWriteDone {
+                    note: format!("renamed to {name}"),
+                    is_error: false,
+                    reload_list: true,
+                    reopen_id: Some(id),
+                },
+                Err(e) => write_error(&e),
+            };
+            Some(msg)
+        }
+        Effect::PlaylistDelete { id } => {
+            let msg = match api::delete_playlist(&ctx.config, &id).await {
+                Ok(()) => Msg::PlaylistWriteDone {
+                    note: "deleted playlist".to_owned(),
+                    is_error: false,
+                    reload_list: true,
+                    reopen_id: None,
+                },
+                // Refresh the list either way so a failed delete's playlist
+                // reappears rather than lingering half-removed.
+                Err(e) => Msg::PlaylistWriteDone {
+                    note: format!("delete failed: {}", playlist_err(&e)),
+                    is_error: true,
+                    reload_list: true,
+                    reopen_id: None,
+                },
+            };
+            Some(msg)
+        }
+        Effect::PlaylistAddTrack { id, track_id } => {
+            let msg = match api::put_playlist_tracks(&ctx.config, &id, &[track_id], true).await {
+                Ok(()) => Msg::PlaylistWriteDone {
+                    note: "added to playlist".to_owned(),
+                    is_error: false,
+                    reload_list: true,
+                    reopen_id: None,
+                },
+                Err(e) => write_error(&e),
+            };
+            Some(msg)
+        }
+        Effect::PlaylistSetTracks { id, track_ids } => {
+            let msg = match api::put_playlist_tracks(&ctx.config, &id, &track_ids, false).await {
+                Ok(()) => Msg::PlaylistWriteDone {
+                    note: "playlist updated".to_owned(),
+                    is_error: false,
+                    reload_list: true,
+                    reopen_id: None,
+                },
+                // Reopen to resync the optimistic edit against the server.
+                Err(e) => Msg::PlaylistWriteDone {
+                    note: format!("playlist edit failed: {}", playlist_err(&e)),
+                    is_error: true,
+                    reload_list: false,
+                    reopen_id: Some(id),
+                },
+            };
+            Some(msg)
+        }
+        Effect::PlaylistSuggest { playlist_id, seeds } => {
+            let result = match api::suggest_from_seeds(&ctx.config, &seeds, PLAYLIST_SUGGEST_N).await
+            {
+                Ok(list) => resolve_list(ctx, &list.track_ids).await,
+                Err(e) => Err(station_error(e)),
+            };
+            Some(Msg::PlaylistSuggestionsDone {
+                playlist_id,
+                result,
+            })
+        }
+    }
+}
+
+/// Suggestion count for the playlist "suggest more" (`from-seeds`) path.
+const PLAYLIST_SUGGEST_N: usize = 20;
+
+/// Fetch a playlist's ids and hydrate them to tracks for the detail pane.
+async fn open_playlist(ctx: &Ctx, id: &str) -> Result<PlaylistDetailState, String> {
+    let detail = api::get_playlist(&ctx.config, id)
+        .await
+        .map_err(|e| playlist_err(&e))?;
+    let client = ctx.subsonic().await.map_err(|e| e.to_string())?;
+    let track_ids: Vec<TrackId> = detail
+        .track_ids
+        .iter()
+        .map(|s| TrackId::from(s.clone()))
+        .collect();
+    let (tracks, _failed) = api::resolve_tracks(&client, &track_ids).await;
+    Ok(PlaylistDetailState {
+        summary: detail.summary,
+        tracks,
+        track_ids: detail.track_ids,
+    })
+}
+
+/// Create a playlist and, when `then_add` is set, append that track in the
+/// same task (the picker's "new playlist…" path).
+async fn playlist_create(ctx: &Ctx, name: &str, then_add: Option<&str>) -> Msg {
+    let created = match api::create_playlist(&ctx.config, name).await {
+        Ok(summary) => summary,
+        Err(e) => return write_error(&e),
+    };
+    if let Some(track_id) = then_add {
+        match api::put_playlist_tracks(&ctx.config, &created.id, &[track_id.to_owned()], true).await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                return Msg::PlaylistWriteDone {
+                    note: format!(
+                        "created {name}, but adding the track failed: {}",
+                        playlist_err(&e)
+                    ),
+                    is_error: true,
+                    reload_list: true,
+                    reopen_id: None,
+                };
+            }
+        }
+    }
+    Msg::PlaylistWriteDone {
+        note: format!("created {name}"),
+        is_error: false,
+        reload_list: true,
+        reopen_id: None,
+    }
+}
+
+/// A generic failed-write completion (no reopen, no list reload).
+fn write_error(e: &ApiError) -> Msg {
+    Msg::PlaylistWriteDone {
+        note: format!("playlist write failed: {}", playlist_err(e)),
+        is_error: true,
+        reload_list: false,
+        reopen_id: None,
+    }
+}
+
+/// Human-readable text for a playlist `ApiError` — names the guest case.
+fn playlist_err(e: &ApiError) -> String {
+    match e {
+        ApiError::Forbidden => "not permitted (guests can't modify playlists)".to_owned(),
+        other => other.to_string(),
     }
 }
 

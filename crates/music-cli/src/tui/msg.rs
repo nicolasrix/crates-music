@@ -15,10 +15,10 @@ use music_player::PlayerEvent;
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::{ServerMessage, SyncOp};
 
-use crate::api::WhoamiInfo;
+use crate::api::{PlaylistSummary, WhoamiInfo};
 
 use super::signal::PendingEvent;
-use super::state::{LikedEntry, Rating, Section};
+use super::state::{LikedEntry, PlaylistDetailState, Rating, Section};
 
 /// Single-line text-field edits, produced by the keymap only while an input
 /// is focused (so plain chars never trigger global bindings mid-typing).
@@ -116,6 +116,31 @@ pub(crate) enum Msg {
     /// o — toggle "play audio on this device" (sync rooms only).
     ToggleOutput,
 
+    // ── playlists ─────────────────────────────────────────────────────
+    /// a — open the add-to-playlist picker for the contextual track (any
+    /// section that lists tracks, including the queue).
+    AddToPlaylist,
+    /// N — create a new (empty) playlist from the Playlists list pane.
+    NewPlaylist,
+    /// s — shuffle-play the open playlist (Playlists detail pane).
+    PlaylistShufflePlay,
+    /// R — rename the open playlist (opens the text prompt).
+    PlaylistRenamePrompt,
+    /// X — delete the open playlist; two-step (a second `X` confirms).
+    PlaylistDelete,
+    /// x — remove the selected track from the open playlist (optimistic).
+    PlaylistRemoveTrack,
+    /// m — suggest more tracks for the open playlist (recommender).
+    PlaylistSuggest,
+    /// Picker overlay: move selection, activate a row, or dismiss.
+    PickerMove(i8),
+    PickerActivate,
+    PickerClose,
+    /// Text-prompt overlay: edit, submit, or dismiss.
+    PromptInput(InputMsg),
+    PromptSubmit,
+    PromptClose,
+
     // ── effect completions ────────────────────────────────────────────
     AlbumsLoaded {
         generation: u64,
@@ -172,6 +197,28 @@ pub(crate) enum Msg {
     },
     /// A sync WS frame or connection-state change (see [`SyncEvent`]).
     Sync(SyncEvent),
+    PlaylistsLoaded {
+        generation: u64,
+        result: Result<Vec<PlaylistSummary>, String>,
+    },
+    PlaylistOpened {
+        id: String,
+        result: Result<PlaylistDetailState, String>,
+    },
+    /// A playlist write (create/rename/delete/add/set-tracks) finished.
+    /// `reopen_id` reloads that playlist's detail (rename, or a failed
+    /// optimistic remove that needs resyncing); `reload_list` refreshes the
+    /// list pane (counts/membership changed).
+    PlaylistWriteDone {
+        note: String,
+        is_error: bool,
+        reload_list: bool,
+        reopen_id: Option<String>,
+    },
+    PlaylistSuggestionsDone {
+        playlist_id: String,
+        result: Result<Vec<Track>, StationError>,
+    },
     /// `GET /v1/whoami` completed (boot-time identity fetch).
     WhoamiLoaded {
         result: Result<WhoamiInfo, String>,
@@ -256,5 +303,47 @@ pub(crate) enum Effect {
     /// ourselves; completes as [`Msg::TracksHydrated`].
     HydrateTracks {
         ids: Vec<String>,
+    },
+
+    // ── playlists ─────────────────────────────────────────────────────
+    /// `GET /v1/playlists`; completes as [`Msg::PlaylistsLoaded`].
+    LoadPlaylists {
+        generation: u64,
+    },
+    /// `GET /v1/playlists/:id` + hydrate; completes as [`Msg::PlaylistOpened`].
+    OpenPlaylist {
+        id: String,
+    },
+    /// `POST /v1/playlists` (+ optional append of `then_add`); completes as
+    /// [`Msg::PlaylistWriteDone`].
+    PlaylistCreate {
+        name: String,
+        then_add: Option<String>,
+    },
+    /// `PATCH /v1/playlists/:id { name }`; completes as [`Msg::PlaylistWriteDone`].
+    PlaylistRename {
+        id: String,
+        name: String,
+    },
+    /// `DELETE /v1/playlists/:id`; completes as [`Msg::PlaylistWriteDone`].
+    PlaylistDelete {
+        id: String,
+    },
+    /// `PUT /v1/playlists/:id/tracks` append; completes as [`Msg::PlaylistWriteDone`].
+    PlaylistAddTrack {
+        id: String,
+        track_id: String,
+    },
+    /// `PUT /v1/playlists/:id/tracks` replace (remove/reorder); completes as
+    /// [`Msg::PlaylistWriteDone`].
+    PlaylistSetTracks {
+        id: String,
+        track_ids: Vec<String>,
+    },
+    /// `POST /v1/recommend/from-seeds`; completes as
+    /// [`Msg::PlaylistSuggestionsDone`].
+    PlaylistSuggest {
+        playlist_id: String,
+        seeds: Vec<String>,
     },
 }

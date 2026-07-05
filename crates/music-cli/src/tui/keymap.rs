@@ -12,13 +12,14 @@ use super::state::{App, Overlay, Rating, Section};
 pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("q / ctrl-c", "quit"),
     ("?", "help"),
-    ("1..5 / tab", "switch section"),
+    ("1..9 / tab", "switch section"),
     ("j k / ↓ ↑", "move cursor"),
     ("g / G", "top / bottom"),
     ("ctrl-d / ctrl-u", "half-page down / up"),
     ("h / l", "album list kind (library)"),
     ("enter", "open album · play from here · jump"),
     ("e", "enqueue track / album"),
+    ("a", "add track to a playlist"),
     ("/", "search"),
     ("i", "edit station prompt"),
     ("esc", "back / unfocus"),
@@ -33,8 +34,15 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("J / K", "queue: move row down / up"),
     ("T", "queue: move row to top"),
     ("o", "toggle audio output on this device (sync)"),
+    ("N", "playlists: new playlist"),
+    ("s / m", "playlist: shuffle-play / suggest more"),
+    ("R / X", "playlist: rename / delete"),
+    ("x", "playlist: remove selected track"),
 ];
 
+// Overlay guards + a flat key table; the length is the keymap's, not the
+// logic's — each arm is a one-liner.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
     // Ctrl-C always quits, even mid-typing.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -45,6 +53,35 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
     if app.overlay == Overlay::Help {
         return match key.code {
             KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter => Some(Msg::Back),
+            _ => None,
+        };
+    }
+
+    // Playlist picker overlay: navigate + activate a row, or dismiss.
+    if app.overlay == Overlay::PlaylistPicker {
+        return match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(Msg::PickerClose),
+            KeyCode::Enter => Some(Msg::PickerActivate),
+            KeyCode::Char('j') | KeyCode::Down => Some(Msg::PickerMove(1)),
+            KeyCode::Char('k') | KeyCode::Up => Some(Msg::PickerMove(-1)),
+            _ => None,
+        };
+    }
+
+    // Text-prompt overlay: keys type into the field (like a focused input).
+    if app.overlay == Overlay::TextPrompt {
+        return match key.code {
+            KeyCode::Esc => Some(Msg::PromptClose),
+            KeyCode::Enter => Some(Msg::PromptSubmit),
+            KeyCode::Backspace => Some(Msg::PromptInput(InputMsg::Backspace)),
+            KeyCode::Delete => Some(Msg::PromptInput(InputMsg::Delete)),
+            KeyCode::Left => Some(Msg::PromptInput(InputMsg::Left)),
+            KeyCode::Right => Some(Msg::PromptInput(InputMsg::Right)),
+            KeyCode::Home => Some(Msg::PromptInput(InputMsg::Home)),
+            KeyCode::End => Some(Msg::PromptInput(InputMsg::End)),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Msg::PromptInput(InputMsg::Char(c)))
+            }
             _ => None,
         };
     }
@@ -83,7 +120,7 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Esc => Some(Msg::Back),
         KeyCode::Tab => Some(Msg::NextSection),
         KeyCode::BackTab => Some(Msg::PrevSection),
-        KeyCode::Char(c @ '1'..='5') => {
+        KeyCode::Char(c @ '1'..='9') => {
             let idx = (c as usize) - ('1' as usize);
             Section::ALL.get(idx).copied().map(Msg::GoSection)
         }
@@ -97,6 +134,8 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('l') | KeyCode::Right => Some(Msg::CycleKindNext),
         KeyCode::Enter => Some(Msg::Activate),
         KeyCode::Char('e') => Some(Msg::Enqueue),
+        // Add-to-playlist works on any track row (queue, lists, detail).
+        KeyCode::Char('a') => Some(Msg::AddToPlaylist),
         KeyCode::Char(' ') => Some(Msg::TransportToggle),
         KeyCode::Char('n') => Some(Msg::TransportNext),
         KeyCode::Char('p') => Some(Msg::TransportPrev),
@@ -120,6 +159,15 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('J') if app.section == Section::Queue => Some(Msg::QueueMoveDown),
         KeyCode::Char('K') if app.section == Section::Queue => Some(Msg::QueueMoveUp),
         KeyCode::Char('T') if app.section == Section::Queue => Some(Msg::QueueMoveTop),
+        // Playlist edits bind only inside the Playlists section (N/s/R/m are
+        // ordinary letters we don't want stealing globally; 'x' removes a
+        // playlist track here rather than a queue row).
+        KeyCode::Char('N') if app.section == Section::Playlists => Some(Msg::NewPlaylist),
+        KeyCode::Char('s') if app.section == Section::Playlists => Some(Msg::PlaylistShufflePlay),
+        KeyCode::Char('R') if app.section == Section::Playlists => Some(Msg::PlaylistRenamePrompt),
+        KeyCode::Char('X') if app.section == Section::Playlists => Some(Msg::PlaylistDelete),
+        KeyCode::Char('m') if app.section == Section::Playlists => Some(Msg::PlaylistSuggest),
+        KeyCode::Char('x') if app.section == Section::Playlists => Some(Msg::PlaylistRemoveTrack),
         _ => None,
     }
 }
@@ -181,8 +229,44 @@ mod tests {
             Some(Msg::GoSection(Section::Queue))
         ));
         assert!(matches!(
-            action_for(&a, key(KeyCode::Char('5'))),
+            action_for(&a, key(KeyCode::Char('4'))),
+            Some(Msg::GoSection(Section::Playlists))
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('6'))),
             Some(Msg::GoSection(Section::Liked))
+        ));
+        // No 7th section yet — the number is inert, not a panic.
+        assert!(action_for(&a, key(KeyCode::Char('7'))).is_none());
+    }
+
+    #[test]
+    fn playlist_edit_keys_only_bind_in_playlists_section() {
+        let mut a = app();
+        assert!(action_for(&a, key(KeyCode::Char('N'))).is_none());
+        assert!(action_for(&a, key(KeyCode::Char('R'))).is_none());
+        a.section = Section::Playlists;
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('N'))),
+            Some(Msg::NewPlaylist)
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('X'))),
+            Some(Msg::PlaylistDelete)
+        ));
+        // 'x' removes a playlist track here, a queue row in the queue.
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('x'))),
+            Some(Msg::PlaylistRemoveTrack)
+        ));
+    }
+
+    #[test]
+    fn add_to_playlist_is_global() {
+        let a = app();
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('a'))),
+            Some(Msg::AddToPlaylist)
         ));
     }
 

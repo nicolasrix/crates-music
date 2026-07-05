@@ -12,26 +12,30 @@ use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::SyncState;
 use ratatui::widgets::TableState;
 
-use crate::api::WhoamiInfo;
+use crate::api::{PlaylistSummary, WhoamiInfo};
 
 use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
 
-/// Sidebar sections, in display order (the `1..5` bindings index this).
+/// Sidebar sections, in display order (the `1..9` number bindings index
+/// this). Playlists sits at slot 4, between Queue and Stations, per the
+/// parity plan's target sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     Library,
     Search,
     Queue,
+    Playlists,
     Stations,
     Liked,
 }
 
 impl Section {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Library,
         Self::Search,
         Self::Queue,
+        Self::Playlists,
         Self::Stations,
         Self::Liked,
     ];
@@ -41,6 +45,7 @@ impl Section {
             Self::Library => "Library",
             Self::Search => "Search",
             Self::Queue => "Queue",
+            Self::Playlists => "Playlists",
             Self::Stations => "Stations",
             Self::Liked => "Liked",
         }
@@ -55,6 +60,12 @@ impl Section {
 pub(crate) enum Overlay {
     None,
     Help,
+    /// Modal list of the caller's playlists (+ a "new playlist" row) for the
+    /// "add this track to a playlist" gesture. State in [`App::picker`].
+    PlaylistPicker,
+    /// Modal single-line text entry (create / rename a playlist). State in
+    /// [`App::text_prompt`].
+    TextPrompt,
 }
 
 /// Where the queue's source of truth lives right now.
@@ -299,6 +310,79 @@ pub(crate) struct LikedState {
     pub table: TableState,
 }
 
+/// Which pane of the Playlists section is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PlaylistsPane {
+    /// The list of playlists.
+    #[default]
+    List,
+    /// One playlist's tracks.
+    Detail,
+    /// Recommender "suggest more" results for the open playlist (`m`).
+    Suggestions,
+}
+
+/// A loaded playlist: its summary, the hydrated tracks (may be fewer than
+/// `track_ids` if some ids didn't resolve), and the **raw ordered ids**.
+/// Membership edits replace against `track_ids`, never the hydrated subset.
+#[derive(Debug, Clone)]
+pub(crate) struct PlaylistDetailState {
+    pub summary: PlaylistSummary,
+    pub tracks: Vec<Track>,
+    pub track_ids: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PlaylistsState {
+    pub list: Loadable<Vec<PlaylistSummary>>,
+    pub list_table: TableState,
+    pub pane: PlaylistsPane,
+    pub open: Loadable<PlaylistDetailState>,
+    /// Playlist id the detail pane is waiting for — a completion for any
+    /// other id is stale and dropped (mirrors `LibraryState::open_target`).
+    pub open_id: Option<String>,
+    pub detail_table: TableState,
+    pub suggestions: Loadable<Vec<Track>>,
+    pub suggest_table: TableState,
+    /// Bumped on every list reload; stamped on the load effect so a stale
+    /// response can't overwrite a newer one.
+    pub generation: u64,
+    /// Two-step delete: the playlist id awaiting a confirming second `X`,
+    /// and the tick after which that confirmation lapses.
+    pub pending_delete: Option<String>,
+    pub delete_deadline: u64,
+}
+
+/// Modal playlist picker (the "add this track to a playlist" gesture, `a`).
+/// The selectable rows are the caller's owned playlists followed by a
+/// synthetic "new playlist…" row.
+#[derive(Debug)]
+pub(crate) struct PickerState {
+    pub track_id: String,
+    pub track_title: String,
+    pub table: TableState,
+}
+
+/// What a [`TextPrompt`] does with its submitted text.
+#[derive(Debug, Clone)]
+pub(crate) enum PromptPurpose {
+    /// Create an empty playlist with the entered name.
+    CreatePlaylist,
+    /// Create a playlist and immediately add a track to it (the picker's
+    /// "new playlist…" path).
+    CreatePlaylistThenAdd { track_id: String },
+    /// Rename an existing playlist.
+    RenamePlaylist { id: String },
+}
+
+/// Modal single-line text entry, reused for create + rename.
+#[derive(Debug)]
+pub(crate) struct TextPrompt {
+    pub purpose: PromptPurpose,
+    pub title: String,
+    pub input: InputField,
+}
+
 /// Root state.
 // The bools are independent facts about the session (device present, quit
 // requested, flush in flight, gateway configured), not an implicit state
@@ -334,6 +418,11 @@ pub(crate) struct App {
     pub search: SearchState,
     pub stations: StationsState,
     pub liked: LikedState,
+    pub playlists: PlaylistsState,
+    /// Active playlist picker (add-to-playlist overlay), when open.
+    pub picker: Option<PickerState>,
+    /// Active text-entry modal (create / rename playlist), when open.
+    pub text_prompt: Option<TextPrompt>,
 
     /// Track/album/artist verdicts, applied optimistically; keyed by entity
     /// id (ids are globally unique across kinds in Navidrome).
@@ -381,6 +470,9 @@ impl App {
             search: SearchState::default(),
             stations: StationsState::default(),
             liked: LikedState::default(),
+            playlists: PlaylistsState::default(),
+            picker: None,
+            text_prompt: None,
             ratings: HashMap::new(),
             signal: None,
             events_outbox: Vec::new(),

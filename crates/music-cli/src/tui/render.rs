@@ -28,14 +28,18 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
         Section::Library => views::library::draw(f, main, app, theme),
         Section::Search => views::search::draw(f, main, app, theme),
         Section::Queue => views::queue::draw(f, main, app, theme),
+        Section::Playlists => views::playlists::draw(f, main, app, theme),
         Section::Stations => views::stations::draw(f, main, app, theme),
         Section::Liked => views::liked::draw(f, main, app, theme),
     }
 
     widgets::now_playing::draw(f, bar, app, theme);
 
-    if app.overlay == Overlay::Help {
-        views::help::draw(f, f.area(), theme);
+    match app.overlay {
+        Overlay::Help => views::help::draw(f, f.area(), theme),
+        Overlay::PlaylistPicker => views::playlists::draw_picker(f, f.area(), app, theme),
+        Overlay::TextPrompt => views::playlists::draw_text_prompt(f, f.area(), app, theme),
+        Overlay::None => {}
     }
 }
 
@@ -79,6 +83,22 @@ fn breadcrumb(app: &App) -> String {
         },
         Section::Search => "search".to_owned(),
         Section::Queue => format!("queue ▸ {} track(s)", app.queue.len()),
+        Section::Playlists => match app.playlists.pane {
+            super::state::PlaylistsPane::List => "playlists".to_owned(),
+            super::state::PlaylistsPane::Detail | super::state::PlaylistsPane::Suggestions => {
+                let name = app
+                    .playlists
+                    .open
+                    .ready()
+                    .map_or("…", |p| p.summary.name.as_str());
+                let tail = if app.playlists.pane == super::state::PlaylistsPane::Suggestions {
+                    " ▸ suggestions"
+                } else {
+                    ""
+                };
+                format!("playlists ▸ {name}{tail}")
+            }
+        },
         Section::Stations => "stations".to_owned(),
         Section::Liked => "liked".to_owned(),
     }
