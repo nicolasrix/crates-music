@@ -680,3 +680,72 @@ fn successful_flush_just_clears_inflight() {
     assert!(!a.events_inflight);
     assert!(a.events_outbox.is_empty());
 }
+
+// ── review fixes: auto-skip coverage gaps + same-track skip guard ──────────
+
+#[test]
+fn removing_playing_track_auto_skips_disliked_slide_in() {
+    let mut a = playing_app(&["t1", "t2", "t3"], 0);
+    a.ratings.insert("t2".to_owned(), Rating::Dislike);
+    a.queue_table.select(Some(0));
+    let effects = update(&mut a, Msg::QueueRemoveSelected);
+    // t2 slid into the cursor slot but is disliked → t3 plays.
+    assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("t3"));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t3"
+    ));
+}
+
+#[test]
+fn idle_restart_skips_disliked_head() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    a.ratings.insert("t1".to_owned(), Rating::Dislike);
+    // Player idle (default snapshot) → space starts the queue.
+    let effects = update(&mut a, Msg::TransportToggle);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t2"
+    ));
+}
+
+#[test]
+fn reactivating_playing_row_restarts_without_skip_event() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 60);
+    a.section = Section::Queue;
+    a.queue_table.select(Some(0));
+    let effects = update(&mut a, Msg::Activate);
+    assert!(
+        a.events_outbox.is_empty(),
+        "restarting the same track is not a skip"
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t1"
+    ));
+}
+
+#[test]
+fn replaying_same_track_from_list_is_not_a_skip() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 60);
+    a.section = Section::Library;
+    a.library.pane = LibraryPane::AlbumDetail;
+    a.library.open_album = Loadable::Ready(album_with_songs("al1", &["t1", "t2"]));
+    a.library.tracks_table.select(Some(0));
+    update(&mut a, Msg::Activate);
+    assert!(a.events_outbox.is_empty());
+}
+
+#[test]
+fn prev_at_start_reloads_an_idle_sink() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    // Player idle (e.g. after AudioFailed): prev must re-resolve, not
+    // seek a dead sink.
+    let effects = update(&mut a, Msg::TransportPrev);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t1"
+    ));
+}

@@ -40,6 +40,10 @@ use self::theme::Theme;
 /// to be invisible in `top`.
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Budget for the best-effort event flush on quit — long enough for one
+/// LAN round-trip, short enough that a dead gateway can't hold the shell.
+const FINAL_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let config = Arc::new(config);
 
@@ -119,15 +123,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // Best-effort tail flush of whatever the tick cadence hadn't sent yet.
     // Quitting mid-track is not a skip (mirrors the web: closing the tab
-    // doesn't emit one), so only already-noted events are at stake.
+    // doesn't emit one). Known accepted gap: a batch already in flight at
+    // quit is not retried if its POST fails — retrying would risk
+    // double-sending on success, and the events are advisory.
     if !leftover_events.is_empty() {
         let outgoing: Vec<_> = leftover_events
             .iter()
             .map(signal::PendingEvent::to_outgoing)
             .collect();
         let flush = crate::api::post_events(&config, &outgoing);
-        if let Ok(Err(e)) = tokio::time::timeout(std::time::Duration::from_secs(3), flush).await {
-            tracing::debug!(error = %e, "final event flush failed");
+        match tokio::time::timeout(FINAL_FLUSH_TIMEOUT, flush).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::debug!(error = %e, "final event flush failed"),
+            Err(_) => tracing::debug!("final event flush timed out"),
         }
     }
     Ok(())

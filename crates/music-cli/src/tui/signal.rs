@@ -59,6 +59,12 @@ pub(crate) fn evaluate_scrobble(
     position: Duration,
     sig: &TrackSignal,
 ) -> ScrobbleDecision {
+    // An abandoned load is one the user already left — the snapshot only
+    // still reports it because the player thread lags a tick. Never
+    // now-playing-hint a track that was simultaneously reported as a skip.
+    if sig.abandoned {
+        return ScrobbleDecision::None;
+    }
     let Some(duration) = duration else {
         return ScrobbleDecision::None;
     };
@@ -112,7 +118,9 @@ impl PendingEvent {
         Self {
             event_type: "skip",
             track_id,
-            occurred_at: now_ms(),
+            // The one impurity the reducer allows itself — events must
+            // carry the moment they happened, not the moment they flushed.
+            occurred_at: crate::auth::store::now_ms(),
             played_ms: Some(played_ms),
             attempts: 0,
         }
@@ -128,18 +136,6 @@ impl PendingEvent {
                 .map(|ms| serde_json::json!({ "played_ms": ms })),
         }
     }
-}
-
-/// Unix milliseconds. The one impurity the reducer allows itself — events
-/// must carry the moment they happened, not the moment they flushed.
-pub(crate) fn now_ms() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(i64::MAX)
 }
 
 /// Whether a queue entry is excluded from play by a dislike at any level —
@@ -209,6 +205,18 @@ mod tests {
         assert_eq!(
             evaluate_scrobble(Some(secs(1200)), secs(240), &sig),
             ScrobbleDecision::Submission
+        );
+    }
+
+    #[test]
+    fn scrobble_suppressed_after_abandonment() {
+        // A skipped load must not now-playing-hint on the lag tick, even
+        // though its flags were never set.
+        let mut sig = TrackSignal::new("t".into());
+        sig.abandoned = true;
+        assert_eq!(
+            evaluate_scrobble(Some(secs(180)), secs(1), &sig),
+            ScrobbleDecision::None
         );
     }
 

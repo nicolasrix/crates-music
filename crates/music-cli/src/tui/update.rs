@@ -115,7 +115,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::RecommendFromNowPlaying => recommend_from_now_playing(app),
         Msg::QueueRemoveSelected => queue_remove_selected(app),
         Msg::QueueClear => {
-            note_abandonment(app);
+            note_abandonment(app, None);
             app.queue.clear();
             app.prefetched = None;
             app.pending_load = None;
@@ -331,13 +331,19 @@ fn signal_tick(app: &mut App) -> Vec<Effect> {
 /// another track, removing or clearing it). Record at most one skip verdict
 /// per load — the gate itself (too short / never started) lives in
 /// [`signal::evaluate_skip`]. Natural end-of-track never comes through here.
-fn note_abandonment(app: &mut App) {
+///
+/// `next_id` is the track about to start, when known: restarting the same
+/// track is not a skip (mirrors the web player's guard).
+fn note_abandonment(app: &mut App, next_id: Option<&str>) {
     if !app.events_enabled {
         return;
     }
     let Some(id) = app.playback.track_id.clone() else {
         return;
     };
+    if next_id == Some(id.as_str()) {
+        return;
+    }
     if app
         .signal
         .as_ref()
@@ -596,7 +602,8 @@ fn transport_toggle(app: &mut App) -> Vec<Effect> {
             app.queue.jump(0);
         }
         if app.queue.current().is_some() {
-            return start_current(app);
+            // Idle restart is not a direct pick — honor dislikes.
+            return start_current_playable(app);
         }
         return vec![];
     }
@@ -608,7 +615,7 @@ fn transport_toggle(app: &mut App) -> Vec<Effect> {
 
 fn next_track(app: &mut App, cause: Advance) -> Vec<Effect> {
     if cause == Advance::Manual {
-        note_abandonment(app);
+        note_abandonment(app, None);
     }
     if app.queue.advance().is_none() {
         // Ran off the end: playback stops naturally; clear transients.
@@ -616,12 +623,19 @@ fn next_track(app: &mut App, cause: Advance) -> Vec<Effect> {
         app.player_stop();
         return vec![];
     }
+    start_current_playable(app)
+}
+
+/// [`start_current`] honoring dislike auto-skip — for every path where the
+/// queue lands on a track *by itself* (advance, removal slide-in, idle
+/// restart) rather than by a direct pick. Walking off the end because all
+/// that remains is disliked is the same terminal state as running off
+/// naturally.
+fn start_current_playable(app: &mut App) -> Vec<Effect> {
     auto_skip_forward(app);
     if app.queue.current().is_some() {
         start_current(app)
     } else {
-        // The auto-skip walked off the end — every remaining track was
-        // disliked. Same terminal state as running off naturally.
         app.pending_load = None;
         app.player_stop();
         vec![]
@@ -667,14 +681,26 @@ fn prev_track(app: &mut App) -> Vec<Effect> {
         None => (0..app.queue.len()).rev().find(not_disliked),
     };
     let Some(target) = target else {
-        // Nothing playable behind: restart the current track in place (the
-        // standard prev-at-start behavior).
-        if let Some(p) = &app.player {
-            p.seek_to(std::time::Duration::ZERO);
+        // Nothing playable behind: restart the current track (the standard
+        // prev-at-start behavior). A live sink just seeks; an idle or
+        // failed one needs the full reload to recover.
+        let current_loaded = app
+            .queue
+            .current()
+            .is_some_and(|t| app.playback.track_id.as_deref() == Some(t.id.as_str()));
+        if current_loaded {
+            if let Some(p) = &app.player {
+                p.seek_to(std::time::Duration::ZERO);
+            }
+            return vec![];
         }
-        return vec![];
+        return if app.queue.current().is_some() {
+            start_current(app)
+        } else {
+            vec![]
+        };
     };
-    note_abandonment(app);
+    note_abandonment(app, None);
     if app.queue.jump(target).is_some() {
         sync_queue_cursor(app);
         start_current(app)
@@ -699,7 +725,7 @@ fn queue_remove_selected(app: &mut App) -> Vec<Effect> {
     };
     let was_current = app.queue.current_index() == Some(sel);
     if was_current {
-        note_abandonment(app);
+        note_abandonment(app, None);
     }
     app.queue.remove(sel);
     let len = app.queue.len();
@@ -713,8 +739,9 @@ fn queue_remove_selected(app: &mut App) -> Vec<Effect> {
     }
     app.queue_table.select(Some(sel.min(len - 1)));
     if was_current {
-        // The next track slid into the cursor slot — play it.
-        return start_current(app);
+        // The next track slid into the cursor slot — play it (honoring
+        // dislikes: the slide-in was not a direct pick).
+        return start_current_playable(app);
     }
     vec![]
 }
@@ -733,11 +760,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                     return vec![];
                 };
                 let queued = album.tracks.iter().map(to_queued).collect();
-                note_abandonment(app);
-                app.queue.replace(queued, sel);
-                app.prefetched = None;
-                sync_queue_cursor(app);
-                start_current(app)
+                play_new_queue(app, queued, sel)
             }
         },
         Section::Search => activate_search(app),
@@ -745,7 +768,8 @@ fn activate(app: &mut App) -> Vec<Effect> {
             let Some(sel) = app.queue_table.selected() else {
                 return vec![];
             };
-            note_abandonment(app);
+            let next_id = app.queue.items().get(sel).map(|t| t.id.clone());
+            note_abandonment(app, next_id.as_deref());
             if app.queue.jump(sel).is_some() {
                 start_current(app)
             } else {
@@ -760,11 +784,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                 return vec![];
             };
             let queued = tracks.iter().map(to_queued).collect();
-            note_abandonment(app);
-            app.queue.replace(queued, sel);
-            app.prefetched = None;
-            sync_queue_cursor(app);
-            start_current(app)
+            play_new_queue(app, queued, sel)
         }
         Section::Liked => {
             let Some(sel) = app.liked.table.selected() else {
@@ -791,11 +811,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                 .iter()
                 .position(|t| t.id == track.id.as_str())
                 .unwrap_or(0);
-            note_abandonment(app);
-            app.queue.replace(tracks, start);
-            app.prefetched = None;
-            sync_queue_cursor(app);
-            start_current(app)
+            play_new_queue(app, tracks, start)
         }
     }
 }
@@ -833,11 +849,7 @@ fn activate_search(app: &mut App) -> Vec<Effect> {
                 return vec![];
             }
             let queued = results.tracks.iter().map(to_queued).collect();
-            note_abandonment(app);
-            app.queue.replace(queued, sel);
-            app.prefetched = None;
-            sync_queue_cursor(app);
-            start_current(app)
+            play_new_queue(app, queued, sel)
         }
         SearchBucket::Albums => {
             let Some(album) = results.albums.get(sel) else {
@@ -861,6 +873,23 @@ fn activate_search(app: &mut App) -> Vec<Effect> {
 /// Keep the queue view's cursor on the playing track after a replace/jump.
 fn sync_queue_cursor(app: &mut App) {
     app.queue_table.select(app.queue.current_index());
+}
+
+/// Replace the queue and play from `start` — the shared tail of every
+/// "pick a track from a list" activate arm. A direct pick plays even a
+/// disliked track, and restarting the track that is already playing is
+/// not a skip.
+fn play_new_queue(
+    app: &mut App,
+    queued: Vec<music_player::QueuedTrack>,
+    start: usize,
+) -> Vec<Effect> {
+    let next_id = queued.get(start).map(|t| t.id.clone());
+    note_abandonment(app, next_id.as_deref());
+    app.queue.replace(queued, start);
+    app.prefetched = None;
+    sync_queue_cursor(app);
+    start_current(app)
 }
 
 fn enqueue_selected(app: &mut App) -> Vec<Effect> {
