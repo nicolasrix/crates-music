@@ -18,7 +18,9 @@ use music_sync::{ServerMessage, SyncOp};
 use crate::api::{PlaylistSummary, WhoamiInfo};
 
 use super::signal::PendingEvent;
-use super::state::{LikedEntry, PlaylistDetailState, Rating, Section};
+use super::state::{
+    ArtistDetailState, LikedEntry, PlaylistDetailState, Rating, Section, SimilarEntry,
+};
 
 /// Single-line text-field edits, produced by the keymap only while an input
 /// is focused (so plain chars never trigger global bindings mid-typing).
@@ -80,6 +82,11 @@ pub(crate) enum Msg {
     /// h/l — cycle the library album-list kind.
     CycleKindPrev,
     CycleKindNext,
+    /// [ / ] — cycle the library browse mode (albums / artists / tracks).
+    CycleModePrev,
+    CycleModeNext,
+    /// S — start a station from the open album/artist (replaces the queue).
+    AlbumStation,
     /// Enter — open/play/jump depending on section + selected row.
     Activate,
     /// e — enqueue the selected track (or album's tracks).
@@ -152,6 +159,28 @@ pub(crate) enum Msg {
     },
     AlbumTracksForEnqueue {
         result: Result<AlbumWithSongs, String>,
+    },
+    ArtistsLoaded {
+        generation: u64,
+        result: Result<Vec<music_core::Artist>, String>,
+    },
+    /// Full-library track page (Tracks mode).
+    SongsLoaded {
+        generation: u64,
+        result: Result<Vec<Track>, String>,
+    },
+    ArtistOpened {
+        id: String,
+        result: Result<ArtistDetailState, String>,
+    },
+    /// "You might like" footer resolved for the open album.
+    AlbumSimilarLoaded {
+        album_id: String,
+        result: Result<Vec<SimilarEntry>, String>,
+    },
+    /// Album/artist station tracks resolved — replaces the queue.
+    AlbumStationDone {
+        result: Result<Vec<Track>, StationError>,
     },
     SearchDone {
         generation: u64,
@@ -246,6 +275,33 @@ pub(crate) enum Effect {
     },
     EnqueueAlbum {
         id: AlbumId,
+    },
+    /// `getArtists`; completes as [`Msg::ArtistsLoaded`].
+    LoadArtists {
+        generation: u64,
+    },
+    /// Empty `search3` page over the whole library; completes as
+    /// [`Msg::SongsLoaded`].
+    LoadSongs {
+        generation: u64,
+    },
+    /// `getArtist` + `getTopSongs`; completes as [`Msg::ArtistOpened`].
+    /// `name` is needed because `getTopSongs` keys on artist name, not id.
+    OpenArtist {
+        id: String,
+        name: String,
+    },
+    /// `similar_albums` + `similar_artists`, hydrated to names; completes as
+    /// [`Msg::AlbumSimilarLoaded`].
+    LoadAlbumSimilar {
+        album_id: String,
+        artist_id: Option<String>,
+        seed_track_ids: Vec<String>,
+    },
+    /// `from-any` seeded by the given candidate track ids, resolved to
+    /// tracks; completes as [`Msg::AlbumStationDone`].
+    AlbumStation {
+        candidate_seeds: Vec<String>,
     },
     Search {
         generation: u64,

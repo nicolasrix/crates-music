@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bytes::Bytes;
-use music_core::{Album, Track};
+use music_core::{Album, Artist, Track};
 use music_player::{PlayQueue, PlaybackSnapshot, Player, QueuedTrack};
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::SyncState;
@@ -196,14 +196,18 @@ impl Rating {
     }
 }
 
-/// One row of the Liked view: the rating plus (for tracks) the resolved
-/// metadata. Albums/artists render by id only in v1.
+/// One row of the Liked view: the rating plus resolved metadata. Tracks
+/// carry the full [`Track`] (playable); albums/artists carry a resolved
+/// display `label` (their name) and are navigable to their detail pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LikedEntry {
     pub kind: String,
     pub id: String,
     pub rating: Rating,
     pub track: Option<Track>,
+    /// Resolved name for album/artist rows (via `getAlbum`/`getArtist`);
+    /// `None` for tracks (use `track.title`) or if resolution failed.
+    pub label: Option<String>,
 }
 
 /// Transient one-line message above the now-playing bar.
@@ -215,13 +219,34 @@ pub(crate) struct StatusLine {
     pub expires_at: u64,
 }
 
+/// Which pane of the Library section is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LibraryPane {
-    Albums,
+    /// The mode-dependent browse list (albums / artists / tracks).
+    Browse,
+    /// One album's track list (+ station / similar footer).
     AlbumDetail,
+    /// One artist's albums + top songs.
+    ArtistDetail,
 }
 
-/// Album-list kinds in `h`/`l` cycle order, with their tab labels.
+/// What the [`LibraryPane::Browse`] list shows, cycled with `[`/`]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LibraryMode {
+    #[default]
+    Albums,
+    Artists,
+    Tracks,
+}
+
+/// Browse modes in `[`/`]` cycle order, with their tab labels.
+pub(crate) const LIBRARY_MODES: [(LibraryMode, &str); 3] = [
+    (LibraryMode::Albums, "albums"),
+    (LibraryMode::Artists, "artists"),
+    (LibraryMode::Tracks, "tracks"),
+];
+
+/// Album-list kinds in `h`/`l` cycle order (Albums mode only), with labels.
 pub(crate) const ALBUM_KINDS: [(AlbumListType, &str); 6] = [
     (AlbumListType::Newest, "newest"),
     (AlbumListType::Random, "random"),
@@ -231,30 +256,110 @@ pub(crate) const ALBUM_KINDS: [(AlbumListType, &str); 6] = [
     (AlbumListType::AlphabeticalByArtist, "by artist"),
 ];
 
+/// One row of the artist-detail list: an album (opens the album), or one of
+/// the artist's top songs (plays / enqueues). A flat vector so the cursor
+/// indexes a single table; `albums_len` marks the album/song boundary.
+#[derive(Debug, Clone)]
+pub(crate) enum ArtistRow {
+    Album(Album),
+    Song(Track),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ArtistDetailState {
+    pub artist: Artist,
+    pub rows: Vec<ArtistRow>,
+    /// `rows[..albums_len]` are albums; the remainder are top songs.
+    pub albums_len: usize,
+}
+
+impl ArtistDetailState {
+    /// The artist's top songs (the song rows), in order — the play/enqueue
+    /// unit for the artist.
+    pub(crate) fn top_songs(&self) -> Vec<Track> {
+        self.rows
+            .iter()
+            .filter_map(|r| match r {
+                ArtistRow::Song(t) => Some(t.clone()),
+                ArtistRow::Album(_) => None,
+            })
+            .collect()
+    }
+}
+
+/// Kind of a "you might like" footer entry on the album-detail pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimilarKind {
+    Album,
+    Artist,
+}
+
+/// One hydrated "you might like" row (a similar album or artist), navigable
+/// with `enter`.
+#[derive(Debug, Clone)]
+pub(crate) struct SimilarEntry {
+    pub kind: SimilarKind,
+    pub id: String,
+    pub name: String,
+    /// The album's artist name (for album rows), else `None`.
+    pub artist: Option<String>,
+}
+
 #[derive(Debug)]
 pub(crate) struct LibraryState {
+    pub mode: LibraryMode,
+
+    // ── Albums mode ──
     pub kind_idx: usize,
     pub albums: Loadable<Vec<Album>>,
     pub albums_table: TableState,
+
+    // ── Artists mode ──
+    pub artists: Loadable<Vec<Artist>>,
+    pub artists_table: TableState,
+
+    // ── Tracks mode (full library, first page) ──
+    pub songs: Loadable<Vec<Track>>,
+    pub songs_table: TableState,
+
+    // ── panes ──
     pub pane: LibraryPane,
     pub open_album: Loadable<AlbumWithSongs>,
     /// Album id the detail pane is waiting for — a completion for any other
     /// id is stale and dropped.
     pub open_target: Option<String>,
     pub tracks_table: TableState,
+    /// "You might like" footer for the open album (similar albums + artists).
+    pub album_similar: Loadable<Vec<SimilarEntry>>,
+    pub open_artist: Loadable<ArtistDetailState>,
+    /// Artist id the artist-detail pane is waiting for (same guard idea).
+    pub artist_target: Option<String>,
+    pub artist_table: TableState,
+
+    /// Bumped on every browse-list (re)load; stamped on the load effect so a
+    /// stale response for a mode we've since left can't overwrite state.
     pub generation: u64,
 }
 
 impl Default for LibraryState {
     fn default() -> Self {
         Self {
+            mode: LibraryMode::default(),
             kind_idx: 0,
             albums: Loadable::Idle,
             albums_table: TableState::default(),
-            pane: LibraryPane::Albums,
+            artists: Loadable::Idle,
+            artists_table: TableState::default(),
+            songs: Loadable::Idle,
+            songs_table: TableState::default(),
+            pane: LibraryPane::Browse,
             open_album: Loadable::Idle,
             open_target: None,
             tracks_table: TableState::default(),
+            album_similar: Loadable::Idle,
+            open_artist: Loadable::Idle,
+            artist_target: None,
+            artist_table: TableState::default(),
             generation: 0,
         }
     }

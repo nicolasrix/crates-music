@@ -16,8 +16,10 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("j k / ↓ ↑", "move cursor"),
     ("g / G", "top / bottom"),
     ("ctrl-d / ctrl-u", "half-page down / up"),
-    ("h / l", "album list kind (library)"),
-    ("enter", "open album · play from here · jump"),
+    ("[ / ]", "library mode: albums / artists / tracks"),
+    ("h / l", "album list kind (albums mode)"),
+    ("S", "start station from album / artist"),
+    ("enter", "open · play from here · jump"),
     ("e", "enqueue track / album"),
     ("a", "add track to a playlist"),
     ("/", "search"),
@@ -132,6 +134,11 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('G') => Some(Msg::NavBottom),
         KeyCode::Char('h') | KeyCode::Left => Some(Msg::CycleKindPrev),
         KeyCode::Char('l') | KeyCode::Right => Some(Msg::CycleKindNext),
+        // [ / ] cycle the library browse mode (albums / artists / tracks).
+        KeyCode::Char('[') => Some(Msg::CycleModePrev),
+        KeyCode::Char(']') => Some(Msg::CycleModeNext),
+        // S starts a station from the open album/artist detail pane.
+        KeyCode::Char('S') if app.section == Section::Library => Some(Msg::AlbumStation),
         KeyCode::Enter => Some(Msg::Activate),
         KeyCode::Char('e') => Some(Msg::Enqueue),
         // Add-to-playlist works on any track row (queue, lists, detail).
@@ -259,6 +266,27 @@ mod tests {
             action_for(&a, key(KeyCode::Char('x'))),
             Some(Msg::PlaylistRemoveTrack)
         ));
+    }
+
+    #[test]
+    fn library_mode_and_station_bindings() {
+        let a = app(); // starts in Library
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('['))),
+            Some(Msg::CycleModePrev)
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char(']'))),
+            Some(Msg::CycleModeNext)
+        ));
+        // S only starts a station inside the Library section.
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('S'))),
+            Some(Msg::AlbumStation)
+        ));
+        let mut b = app();
+        b.section = Section::Queue;
+        assert!(action_for(&b, key(KeyCode::Char('S'))).is_none());
     }
 
     #[test]

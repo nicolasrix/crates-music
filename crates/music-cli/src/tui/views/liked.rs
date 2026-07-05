@@ -34,7 +34,8 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                 t.title.clone(),
                 t.artist_name.clone().unwrap_or_else(|| "—".to_owned()),
             ),
-            None => (e.id.clone(), "—".to_owned()),
+            // Album/artist rows: their resolved name, else the raw id.
+            None => (e.label.clone().unwrap_or_else(|| e.id.clone()), "—".to_owned()),
         };
         Row::new(vec![
             Cell::from(ratatui::text::Span::styled(glyph.to_owned(), style)),

@@ -16,7 +16,10 @@ use music_cache::AudioCache;
 use music_subsonic::Client;
 
 use super::msg::{Effect, Msg, StationError, SyncEvent};
-use super::state::{LikedEntry, PlaylistDetailState, Rating};
+use super::state::{
+    ArtistDetailState, ArtistRow, LikedEntry, PlaylistDetailState, Rating, SimilarEntry,
+    SimilarKind,
+};
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
 #[derive(Clone)]
@@ -115,6 +118,42 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         Effect::EnqueueAlbum { id } => {
             let result = fetch_album(ctx, &id).await;
             Some(Msg::AlbumTracksForEnqueue { result })
+        }
+        Effect::LoadArtists { generation } => {
+            let result = async { Ok::<_, anyhow::Error>(ctx.subsonic().await?.get_artists().await?) }
+                .await
+                .map_err(|e| e.to_string());
+            Some(Msg::ArtistsLoaded { generation, result })
+        }
+        Effect::LoadSongs { generation } => {
+            // Empty search3 matches the whole library; first page only.
+            let result = async {
+                Ok::<_, anyhow::Error>(ctx.subsonic().await?.search3("", SONGS_PAGE, 0).await?.tracks)
+            }
+            .await
+            .map_err(|e| e.to_string());
+            Some(Msg::SongsLoaded { generation, result })
+        }
+        Effect::OpenArtist { id, name } => {
+            let result = open_artist(ctx, &id, &name).await;
+            Some(Msg::ArtistOpened { id, result })
+        }
+        Effect::LoadAlbumSimilar {
+            album_id,
+            artist_id,
+            seed_track_ids,
+        } => {
+            let result = album_similar(ctx, &album_id, artist_id.as_deref(), &seed_track_ids).await;
+            Some(Msg::AlbumSimilarLoaded { album_id, result })
+        }
+        Effect::AlbumStation { candidate_seeds } => {
+            let result = match api::recommend_from_any(&ctx.config, &candidate_seeds, ALBUM_STATION_N)
+                .await
+            {
+                Ok(list) => resolve_list(ctx, &list.track_ids).await,
+                Err(e) => Err(station_error(e)),
+            };
+            Some(Msg::AlbumStationDone { result })
         }
         Effect::Search { generation, query } => {
             let result = if ctx.config.gateway.is_some() {
@@ -381,6 +420,106 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
 
 /// Suggestion count for the playlist "suggest more" (`from-seeds`) path.
 const PLAYLIST_SUGGEST_N: usize = 20;
+/// Full-library page size for Tracks mode.
+const SONGS_PAGE: u32 = 250;
+/// How many tracks an album/artist station enqueues.
+const ALBUM_STATION_N: usize = 40;
+/// Similar albums / artists requested for the album footer.
+const SIMILAR_N: usize = 8;
+/// Top songs fetched for the artist-detail pane.
+const ARTIST_TOP_SONGS: u32 = 20;
+
+/// `getArtist` + `getTopSongs` → the artist-detail pane's flat row list
+/// (albums first, then top songs). Top songs are best-effort — an artist
+/// with no play data still opens with just their albums.
+async fn open_artist(ctx: &Ctx, id: &str, name: &str) -> Result<ArtistDetailState, String> {
+    let client = ctx.subsonic().await.map_err(|e| e.to_string())?;
+    let awa = client
+        .get_artist(&music_core::ArtistId::from(id.to_owned()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let top = client
+        .get_top_songs(name, ARTIST_TOP_SONGS)
+        .await
+        .unwrap_or_default();
+    let albums_len = awa.albums.len();
+    let mut rows: Vec<ArtistRow> = awa.albums.into_iter().map(ArtistRow::Album).collect();
+    rows.extend(top.into_iter().map(ArtistRow::Song));
+    Ok(ArtistDetailState {
+        artist: awa.artist,
+        rows,
+        albums_len,
+    })
+}
+
+/// The album-detail "you might like" footer: `similar_albums` +
+/// `similar_artists`, hydrated to names. A degraded/warming recommender
+/// yields an empty footer (not an error) — the album view still works.
+async fn album_similar(
+    ctx: &Ctx,
+    album_id: &str,
+    artist_id: Option<&str>,
+    seeds: &[String],
+) -> Result<Vec<SimilarEntry>, String> {
+    let exclude_albums = vec![album_id.to_owned()];
+    let exclude_artists: Vec<String> = artist_id.map(|a| vec![a.to_owned()]).unwrap_or_default();
+
+    let (albums_res, artists_res) = futures_util::future::join(
+        api::similar_albums(&ctx.config, seeds, &exclude_albums, SIMILAR_N),
+        api::similar_artists(&ctx.config, seeds, &exclude_artists, SIMILAR_N),
+    )
+    .await;
+    let albums = similar_groups(albums_res)?;
+    let artists = similar_groups(artists_res)?;
+
+    let client = ctx.subsonic().await.map_err(|e| e.to_string())?;
+    let album_futs = albums.iter().map(|g| async {
+        client
+            .get_album(&music_core::AlbumId::from(g.id.clone()))
+            .await
+            .ok()
+            .map(|aws| SimilarEntry {
+                kind: SimilarKind::Album,
+                id: g.id.clone(),
+                name: aws.album.name,
+                artist: aws.album.artist_name,
+            })
+    });
+    let artist_futs = artists.iter().map(|g| async {
+        client
+            .get_artist(&music_core::ArtistId::from(g.id.clone()))
+            .await
+            .ok()
+            .map(|awa| SimilarEntry {
+                kind: SimilarKind::Artist,
+                id: g.id.clone(),
+                name: awa.artist.name,
+                artist: None,
+            })
+    });
+    let (album_entries, artist_entries) = futures_util::future::join(
+        futures_util::future::join_all(album_futs),
+        futures_util::future::join_all(artist_futs),
+    )
+    .await;
+
+    let mut out: Vec<SimilarEntry> = album_entries.into_iter().flatten().collect();
+    out.extend(artist_entries.into_iter().flatten());
+    Ok(out)
+}
+
+/// Map a `similar_*` result to its groups, treating "recommender not ready"
+/// or an all-unindexed seed set as an empty (not failed) footer.
+fn similar_groups(
+    res: Result<api::SimilarList, ApiError>,
+) -> Result<Vec<api::SimilarGroup>, String> {
+    match res {
+        Ok(list) if list.all_seeds_unindexed => Ok(Vec::new()),
+        Ok(list) => Ok(list.groups),
+        Err(ApiError::RecommenderUnavailable) => Ok(Vec::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
 
 /// Fetch a playlist's ids and hydrate them to tracks for the detail pane.
 async fn open_playlist(ctx: &Ctx, id: &str) -> Result<PlaylistDetailState, String> {
@@ -507,6 +646,10 @@ async fn load_liked(ctx: &Ctx) -> Result<Vec<LikedEntry>, String> {
     let by_id: std::collections::HashMap<&str, &music_core::Track> =
         tracks.iter().map(|t| (t.id.as_str(), t)).collect();
 
+    // Resolve album + artist display names concurrently (best-effort — a
+    // failed lookup just falls back to the id in the UI).
+    let labels = resolve_entity_labels(&client, &ratings).await;
+
     for item in &ratings {
         let rating = match item.rating.as_deref() {
             Some("like") => Rating::Like,
@@ -518,9 +661,43 @@ async fn load_liked(ctx: &Ctx) -> Result<Vec<LikedEntry>, String> {
             id: item.id.clone(),
             rating,
             track: by_id.get(item.id.as_str()).map(|t| (*t).clone()),
+            label: labels.get(item.id.as_str()).cloned(),
         });
     }
     // Likes first, then dislikes — matches the classic `liked` sections.
     entries.sort_by_key(|e| matches!(e.rating, Rating::Dislike));
     Ok(entries)
+}
+
+/// Resolve `album`/`artist` rating rows to their display names, keyed by id.
+/// Best-effort and concurrent — a missing/failed entity is simply absent
+/// from the map (the UI falls back to the id).
+async fn resolve_entity_labels(
+    client: &Client,
+    ratings: &[api::RatingItem],
+) -> std::collections::HashMap<String, String> {
+    let album_futs = ratings.iter().filter(|r| r.kind == "album").map(|r| async {
+        client
+            .get_album(&music_core::AlbumId::from(r.id.clone()))
+            .await
+            .ok()
+            .map(|aws| (r.id.clone(), aws.album.name))
+    });
+    let artist_futs = ratings.iter().filter(|r| r.kind == "artist").map(|r| async {
+        client
+            .get_artist(&music_core::ArtistId::from(r.id.clone()))
+            .await
+            .ok()
+            .map(|awa| (r.id.clone(), awa.artist.name))
+    });
+    let (albums, artists) = futures_util::future::join(
+        futures_util::future::join_all(album_futs),
+        futures_util::future::join_all(artist_futs),
+    )
+    .await;
+    albums
+        .into_iter()
+        .flatten()
+        .chain(artists.into_iter().flatten())
+        .collect()
 }

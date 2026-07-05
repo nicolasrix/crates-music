@@ -70,5 +70,9 @@ pub(crate) mod symbols {
     pub(crate) const DISLIKE: &str = "✖";
     pub(crate) const SECTION_MARKER: &str = "▪";
     pub(crate) const FOCUS: &str = "▸";
+    /// A "you might like" (similar album/artist) footer row.
+    pub(crate) const SIMILAR: &str = "≈";
+    /// An album row in the artist-detail list.
+    pub(crate) const ALBUM: &str = "◉";
     pub(crate) const SPINNER: [&str; 4] = ["⣾", "⣽", "⣻", "⢿"];
 }

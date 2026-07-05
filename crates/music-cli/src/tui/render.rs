@@ -66,18 +66,35 @@ fn draw_header(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &Th
 fn breadcrumb(app: &App) -> String {
     match app.section {
         Section::Library => match app.library.pane {
-            LibraryPane::Albums => format!(
-                "library ▸ {}",
-                super::state::ALBUM_KINDS[app.library.kind_idx
-                    % super::state::ALBUM_KINDS.len()]
-                .1
-            ),
+            LibraryPane::Browse => {
+                let mode = super::state::LIBRARY_MODES
+                    .iter()
+                    .find(|(m, _)| *m == app.library.mode)
+                    .map_or("albums", |(_, label)| label);
+                // Albums mode also shows the album-list kind.
+                if app.library.mode == super::state::LibraryMode::Albums {
+                    let kind = super::state::ALBUM_KINDS
+                        [app.library.kind_idx % super::state::ALBUM_KINDS.len()]
+                    .1;
+                    format!("library ▸ {mode} ▸ {kind}")
+                } else {
+                    format!("library ▸ {mode}")
+                }
+            }
             LibraryPane::AlbumDetail => {
                 let name = app
                     .library
                     .open_album
                     .ready()
                     .map_or("…", |a| a.album.name.as_str());
+                format!("library ▸ {name}")
+            }
+            LibraryPane::ArtistDetail => {
+                let name = app
+                    .library
+                    .open_artist
+                    .ready()
+                    .map_or("…", |a| a.artist.name.as_str());
                 format!("library ▸ {name}")
             }
         },

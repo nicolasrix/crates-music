@@ -11,10 +11,13 @@
 //! forks to `room` while the sync connection is online.
 
 mod browse;
+mod library;
 mod playback;
 mod playlists;
 mod room;
 
+#[cfg(test)]
+mod library_tests;
 #[cfg(test)]
 mod playlist_tests;
 #[cfg(test)]
@@ -76,6 +79,9 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::NavHalfPageUp => nav(app, -10),
         Msg::CycleKindPrev => cycle_kind(app, -1),
         Msg::CycleKindNext => cycle_kind(app, 1),
+        Msg::CycleModePrev => library::cycle_mode(app, -1),
+        Msg::CycleModeNext => library::cycle_mode(app, 1),
+        Msg::AlbumStation => library::album_station(app),
         Msg::Activate => browse::activate(app),
         Msg::Enqueue => browse::enqueue_selected(app),
         Msg::FocusSearch => {
@@ -153,15 +159,30 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::AlbumOpened { id, result } => {
             if app.library.open_target.as_deref() == Some(id.as_str()) {
                 app.library.open_album = loadable_from(result);
-                let len = app
-                    .library
-                    .open_album
-                    .ready()
-                    .map_or(0, |a| a.tracks.len());
+                let len = library::album_detail_len(app);
                 select_first(&mut app.library.tracks_table, len);
+                // A loaded album kicks off its "you might like" footer.
+                return library::after_album_opened(app);
             }
             vec![]
         }
+        Msg::ArtistsLoaded { generation, result } => {
+            library::on_artists_loaded(app, generation, result);
+            vec![]
+        }
+        Msg::SongsLoaded { generation, result } => {
+            library::on_songs_loaded(app, generation, result);
+            vec![]
+        }
+        Msg::ArtistOpened { id, result } => {
+            library::on_artist_opened(app, &id, result);
+            vec![]
+        }
+        Msg::AlbumSimilarLoaded { album_id, result } => {
+            library::on_album_similar(app, &album_id, result);
+            vec![]
+        }
+        Msg::AlbumStationDone { result } => library::on_album_station(app, result),
         Msg::AlbumTracksForEnqueue { result } => match result {
             Ok(album) => {
                 let n = album.tracks.len();
@@ -401,14 +422,15 @@ enum NavTarget {
 fn focused_list(app: &mut App) -> (usize, &mut ratatui::widgets::TableState) {
     match app.section {
         Section::Library => match app.library.pane {
-            LibraryPane::Albums => (
-                loaded_len(&app.library.albums),
-                &mut app.library.albums_table,
-            ),
-            LibraryPane::AlbumDetail => (
-                app.library.open_album.ready().map_or(0, |a| a.tracks.len()),
-                &mut app.library.tracks_table,
-            ),
+            LibraryPane::Browse => library::browse_list(app),
+            LibraryPane::AlbumDetail => {
+                let len = library::album_detail_len(app);
+                (len, &mut app.library.tracks_table)
+            }
+            LibraryPane::ArtistDetail => {
+                let len = library::artist_detail_len(app);
+                (len, &mut app.library.artist_table)
+            }
         },
         Section::Search => {
             let lens = search_bucket_lens(app);
@@ -477,10 +499,8 @@ pub(super) fn loadable_from<T>(result: Result<T, String>) -> Loadable<T> {
 fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
     app.section = section;
     match section {
-        // First visit lazily loads the library.
-        Section::Library if matches!(app.library.albums, Loadable::Idle) => {
-            reload_albums(app)
-        }
+        // First visit lazily loads the current browse mode's list.
+        Section::Library if library::browse_is_idle(app) => library::reload_browse(app),
         // Liked reloads every visit — it's cheap and ratings change often.
         Section::Liked => {
             app.liked.entries = Loadable::Loading;
@@ -501,8 +521,13 @@ fn back(app: &mut App) -> Vec<Effect> {
         app.search.focused = false;
     } else if app.section == Section::Stations && app.stations.focused {
         app.stations.focused = false;
-    } else if app.section == Section::Library && app.library.pane == LibraryPane::AlbumDetail {
-        app.library.pane = LibraryPane::Albums;
+    } else if app.section == Section::Library
+        && matches!(
+            app.library.pane,
+            LibraryPane::AlbumDetail | LibraryPane::ArtistDetail
+        )
+    {
+        app.library.pane = LibraryPane::Browse;
     } else if app.section == Section::Playlists {
         playlists::back(app);
     }
@@ -510,7 +535,11 @@ fn back(app: &mut App) -> Vec<Effect> {
 }
 
 fn cycle_kind(app: &mut App, delta: i64) -> Vec<Effect> {
-    if app.section != Section::Library || app.library.pane != LibraryPane::Albums {
+    // h/l only cycles the album-list kind in Albums-mode browse.
+    let in_albums_browse = app.section == Section::Library
+        && app.library.pane == LibraryPane::Browse
+        && app.library.mode == crate::tui::state::LibraryMode::Albums;
+    if !in_albums_browse {
         // In the search view h/l could plausibly switch buckets; do that.
         if app.section == Section::Search {
             let n = SearchBucket::ALL.len();
@@ -523,17 +552,7 @@ fn cycle_kind(app: &mut App, delta: i64) -> Vec<Effect> {
     let n = i64::try_from(ALBUM_KINDS.len()).unwrap_or(1);
     let cur = i64::try_from(app.library.kind_idx).unwrap_or(0);
     app.library.kind_idx = usize::try_from((cur + delta).rem_euclid(n)).unwrap_or(0);
-    reload_albums(app)
-}
-
-fn reload_albums(app: &mut App) -> Vec<Effect> {
-    app.library.generation += 1;
-    app.library.albums = Loadable::Loading;
-    vec![Effect::LoadAlbums {
-        generation: app.library.generation,
-        kind: app.library.kind(),
-        size: ALBUM_PAGE,
-    }]
+    library::reload_browse(app)
 }
 
 fn submit_input(app: &mut App) -> Vec<Effect> {
@@ -576,17 +595,7 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
     let track_target =
         |t: &music_core::Track| ("track", t.id.as_str().to_owned(), t.title.clone());
     match app.section {
-        Section::Library => match app.library.pane {
-            LibraryPane::Albums => {
-                let sel = app.library.albums_table.selected()?;
-                let album = app.library.albums.ready()?.get(sel)?;
-                Some(("album", album.id.as_str().to_owned(), album.name.clone()))
-            }
-            LibraryPane::AlbumDetail => {
-                let sel = app.library.tracks_table.selected()?;
-                Some(track_target(app.library.open_album.ready()?.tracks.get(sel)?))
-            }
-        },
+        Section::Library => library::rating_target(app),
         Section::Search => {
             let idx = app.search.bucket % 3;
             let sel = app.search.tables[idx].selected()?;
@@ -615,7 +624,10 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
                 "artist" => "artist",
                 _ => "track",
             };
-            let label = e.track.as_ref().map_or_else(|| e.id.clone(), |t| t.title.clone());
+            let label = e.track.as_ref().map_or_else(
+                || e.label.clone().unwrap_or_else(|| e.id.clone()),
+                |t| t.title.clone(),
+            );
             Some((kind, e.id.clone(), label))
         }
         Section::Queue => {
