@@ -260,6 +260,7 @@ crates/music-cli/
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
 │       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
+│       │   └── refill.rs # autoplay from-seeds/from-any refill orchestration
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
 │       ├── views/        # library · search · queue · playlists · stations · liked · help
@@ -386,8 +387,14 @@ there); the audio thread and real rendering stay manual.
   only the first `search3` page; deeper paging and the web's
   recent/most-played/random highlight sub-kinds are a follow-up.
 - **Autoplay provenance is by track id**, not the web's per-queue-item
-  id — a track that is both user-queued and autoplay-added is treated as
-  a pick (thumbs enabled, excluded from seeds). Negligible in practice;
-  the terminal client doesn't carry stable item ids the way the web does.
+  id (the terminal client doesn't carry stable item ids). The set is
+  pruned to what's still in the queue on each refill, so a track only
+  counts as an autoplay pick while it (and no user-queued copy) sits in
+  the queue — a small fidelity gap versus item-id keying.
+- **Autoplay tops up a *playing* queue.** If the queue fully drains in
+  local (WS-offline) mode — e.g. during a sustained recommender outage —
+  there's no cursor to seed from and refills pause; press play to
+  resume and autoplay resumes with it. Online (sync-room) the cursor
+  stays on the last track, so this doesn't arise.
 - **Autoplay drift params are config-only** until Phase 7 adds the
   Settings view; runtime `A` toggling isn't persisted back to disk.

@@ -149,14 +149,14 @@ impl RoomState {
         }
     }
 
-    /// The room's session anchor, but only while genuinely online — offline
-    /// there is no live session to seed autoplay / scope feedback against.
+    /// The room's session anchor. Read from playback state directly (not
+    /// gated on `online()`) so it survives a transient WS drop — autoplay's
+    /// weight-3 seed and the feedback session id stay stable across a blip,
+    /// matching the web, which reads `session_anchor` regardless of
+    /// connection state. `None` only when no session was ever started (direct
+    /// mode, or before the first play).
     pub(crate) fn session_anchor(&self) -> Option<&music_core::SessionAnchor> {
-        if self.online() {
-            self.room.playback.session_anchor.as_ref()
-        } else {
-            None
-        }
+        self.room.playback.session_anchor.as_ref()
     }
 
     /// Track id under the room's now-playing cursor, if any.
@@ -244,16 +244,25 @@ impl FeedbackVote {
 #[derive(Debug)]
 pub(crate) struct AutoplayState {
     pub enabled: bool,
-    /// Autoplay parameters snapshot (from `[tui.autoplay]`); the reducer reads
-    /// `min_upcoming`, the effect layer reads the drift knobs off the same
-    /// config. Runtime editing lands in Phase 7.
-    pub cfg: crate::config::AutoplayConfig,
+    /// Refill threshold from `[tui.autoplay]`. The drift knobs (leash/frontier/
+    /// mmr) aren't mirrored here — the effect reads those off the config so
+    /// there's a single source of truth. Runtime editing lands in Phase 7.
+    pub min_upcoming: usize,
     /// Track ids autoplay pushed. The seed builder's "skip algo-added" and the
-    /// feedback-thumb gate both key on this; grows monotonically per session
-    /// (a bounded, point-in-time-correct leak, mirroring the web).
+    /// feedback-thumb gate both key on this; pruned to what's still in the
+    /// queue on each refill so a track the user later re-queues by hand isn't
+    /// mistaken for an autoplay pick.
     pub recommended: HashSet<String>,
+    /// Track ids pushed by a refill but not yet reflected in the queue
+    /// projection (the sync echo is in flight). Counted toward "upcoming" so a
+    /// slow echo can't trigger a second, duplicate refill.
+    pub pending_push: HashSet<String>,
     /// Optimistic thumb per track id (the server persists one per session).
     pub votes: HashMap<String, FeedbackVote>,
+    /// Track ids with a feedback write in flight — a second thumb for the same
+    /// track is refused until it lands, so votes serialize (like the web's
+    /// `pending` guard) and a failed-write rollback can't clobber a newer vote.
+    pub feedback_inflight: HashSet<String>,
     /// A refill effect is in flight — the sole re-entrancy guard.
     pub inflight: bool,
     /// Tick before which no refill fires (post-refill / underdelivery cooldown).
@@ -261,8 +270,10 @@ pub(crate) struct AutoplayState {
     /// Bumped on every toggle; a refill completion whose generation no longer
     /// matches is dropped (the "turned off mid-flight" guard).
     pub generation: u64,
-    /// Per-process feedback session id — the fallback when no room session
-    /// anchor exists (direct/offline mode), mirroring the web's RUM session.
+    /// Per-process feedback session id — the fallback when no session anchor
+    /// exists (direct mode / before first play), mirroring the web's RUM
+    /// session. Used identically by refills and feedback so a downvote and the
+    /// refill that could exclude it share one `(track, session)` bucket.
     pub feedback_session: String,
 }
 
@@ -270,9 +281,11 @@ impl AutoplayState {
     fn new() -> Self {
         Self {
             enabled: false,
-            cfg: crate::config::AutoplayConfig::default(),
+            min_upcoming: crate::config::AutoplayConfig::default().min_upcoming,
             recommended: HashSet::new(),
+            pending_push: HashSet::new(),
             votes: HashMap::new(),
+            feedback_inflight: HashSet::new(),
             inflight: false,
             cooldown_until: 0,
             generation: 0,
@@ -676,7 +689,7 @@ impl App {
     /// drift params and the initial on/off state (runtime toggling isn't
     /// persisted — that's Phase 7).
     pub(crate) fn configure_autoplay(&mut self, cfg: &crate::config::AutoplayConfig) {
-        self.autoplay.cfg = cfg.clone();
+        self.autoplay.min_upcoming = cfg.min_upcoming;
         self.autoplay.enabled = cfg.enabled;
     }
 

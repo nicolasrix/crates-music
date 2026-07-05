@@ -79,17 +79,29 @@ async fn recommend_get(
 
 /// `POST /v1/recommend/from-any` — pick the best-indexed seed from a set of
 /// candidate track ids (e.g. an album's tracks) and return acoustically
-/// similar tracks in rank order. Drives "start a station from this album".
+/// similar tracks in rank order. Drives "start a station from this album" and
+/// the autoplay from-seeds fallback. When `queue_track_ids` is non-empty a
+/// `queue_context` is attached so the gateway excludes tracks already queued
+/// and applies the diversity cap (autoplay passes the live queue; album
+/// stations, which replace the queue, pass an empty slice).
 /// 404/503 → [`ApiError::RecommenderUnavailable`].
 pub async fn recommend_from_any(
     config: &Config,
     candidate_seeds: &[String],
     n: usize,
+    queue_track_ids: &[String],
+    now_playing_track_id: Option<&str>,
 ) -> Result<RecommendList, ApiError> {
     let gw = require_gateway(config)?;
     let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, "/v1/recommend/from-any");
-    let body = serde_json::json!({ "candidate_seeds": candidate_seeds, "n": n });
+    let mut body = serde_json::json!({ "candidate_seeds": candidate_seeds, "n": n });
+    if !queue_track_ids.is_empty() {
+        body["queue_context"] = serde_json::json!({
+            "queue_track_ids": queue_track_ids,
+            "now_playing_track_id": now_playing_track_id,
+        });
+    }
     let resp = http_client(gw)?
         .post(&url)
         .bearer_auth(&token)

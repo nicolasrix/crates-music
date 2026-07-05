@@ -10,17 +10,18 @@ use music_core::TrackId;
 use music_sync::SyncOp;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
-use crate::api::{self, ApiError, WeightedStation};
+use crate::api::{self, ApiError};
 use crate::config::Config;
 use music_cache::AudioCache;
 use music_subsonic::Client;
 
-use super::autoplay::Frontier;
 use super::msg::{Effect, Msg, StationError, SyncEvent};
 use super::state::{
     ArtistDetailState, ArtistRow, FeedbackVote, LikedEntry, PlaylistDetailState, Rating,
     SimilarEntry, SimilarKind,
 };
+
+mod refill;
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
 #[derive(Clone)]
@@ -148,12 +149,14 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             Some(Msg::AlbumSimilarLoaded { album_id, result })
         }
         Effect::AlbumStation { candidate_seeds } => {
-            let result = match api::recommend_from_any(&ctx.config, &candidate_seeds, ALBUM_STATION_N)
-                .await
-            {
-                Ok(list) => resolve_list(ctx, &list.track_ids).await,
-                Err(e) => Err(station_error(e)),
-            };
+            // An album station replaces the queue, so no queue_context dedup.
+            let result =
+                match api::recommend_from_any(&ctx.config, &candidate_seeds, ALBUM_STATION_N, &[], None)
+                    .await
+                {
+                    Ok(list) => resolve_list(ctx, &list.track_ids).await,
+                    Err(e) => Err(station_error(e)),
+                };
             Some(Msg::AlbumStationDone { result })
         }
         Effect::Search { generation, query } => {
@@ -310,9 +313,16 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             need,
             generation,
         } => {
-            let result =
-                autoplay_refill(ctx, &queue_track_ids, now_playing_index, &recommended,
-                    anchor_track_id.as_deref(), session_id.as_deref(), need).await;
+            let result = refill::run(
+                ctx,
+                &queue_track_ids,
+                now_playing_index,
+                &recommended,
+                anchor_track_id.as_deref(),
+                &session_id,
+                need,
+            )
+            .await;
             Some(Msg::AutoplayRefilled {
                 generation,
                 need,
@@ -470,60 +480,6 @@ const ALBUM_STATION_N: usize = 40;
 const SIMILAR_N: usize = 8;
 /// Top songs fetched for the artist-detail pane.
 const ARTIST_TOP_SONGS: u32 = 20;
-
-/// Build the weighted seeds (via the pure builder + `[tui.autoplay]` drift
-/// config) and run one autoplay refill: `from-seeds` when there are weighted
-/// seeds, else `from-any` over the reversed queue (newest-first). Resolves the
-/// ranked ids to tracks. An unindexed/degraded recommender surfaces as an
-/// empty `Ok` or `StationError::Unavailable`, which the reducer reads as
-/// under-delivery.
-async fn autoplay_refill(
-    ctx: &Ctx,
-    queue_track_ids: &[String],
-    now_playing_index: usize,
-    recommended: &[String],
-    anchor_track_id: Option<&str>,
-    session_id: Option<&str>,
-    need: usize,
-) -> Result<Vec<music_core::Track>, StationError> {
-    let ap = &ctx.config.tui.autoplay;
-    let recommended_set: std::collections::HashSet<String> = recommended.iter().cloned().collect();
-    let seeds = super::autoplay::build_seeds(
-        queue_track_ids,
-        now_playing_index,
-        &recommended_set,
-        anchor_track_id,
-        Frontier::from(ap),
-    );
-
-    let list = if seeds.seeds.is_empty() {
-        // No user / anchor / frontier seeds — fall back to from-any over the
-        // queue, newest first (mirrors the web fallback).
-        let candidates: Vec<String> = queue_track_ids.iter().rev().cloned().collect();
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        api::recommend_from_any(&ctx.config, &candidates, need).await
-    } else {
-        let req = WeightedStation {
-            seeds: &seeds.seeds,
-            anchor_track_ids: &seeds.anchor_ids,
-            queue_track_ids,
-            now_playing_track_id: queue_track_ids.get(now_playing_index).map(String::as_str),
-            session_id,
-            n: need,
-            leash_tau: ap.leash_tau,
-            leash_lambda: ap.leash_lambda,
-            mmr_lambda: ap.mmr_lambda,
-        };
-        api::recommend_weighted_station(&ctx.config, &req).await
-    };
-
-    match list {
-        Ok(list) => resolve_list(ctx, &list.track_ids).await,
-        Err(e) => Err(station_error(e)),
-    }
-}
 
 /// `getArtist` + `getTopSongs` → the artist-detail pane's flat row list
 /// (albums first, then top songs). Top songs are best-effort — an artist

@@ -362,7 +362,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             track_id,
             previous,
             result,
-        } => autoplay::on_feedback_done(app, track_id, previous, result),
+        } => autoplay::on_feedback_done(app, &track_id, previous, result),
         Msg::TracksHydrated { ids, result } => {
             for id in &ids {
                 app.sync.hydrating.remove(id);

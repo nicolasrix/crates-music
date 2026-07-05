@@ -389,12 +389,15 @@ pub(crate) enum Effect {
     AutoplayRefill {
         queue_track_ids: Vec<String>,
         now_playing_index: usize,
-        /// Autoplay-added track ids (provenance) to exclude from seeds.
-        recommended: Vec<String>,
-        /// The session anchor track (weight-3 seed), when a room session exists.
+        /// Autoplay-added track ids (provenance) to exclude from seeds. A
+        /// `HashSet` (order-independent, still `Eq`) so the effect uses it
+        /// directly without a sort + rebuild.
+        recommended: std::collections::HashSet<String>,
+        /// The session anchor track (weight-3 seed), when a session exists.
         anchor_track_id: Option<String>,
-        /// Recommend-session id for downvote scoping, when known.
-        session_id: Option<String>,
+        /// Session id for downvote scoping — the room anchor's, else the
+        /// per-process feedback session (so it's always present).
+        session_id: String,
         need: usize,
         generation: u64,
     },

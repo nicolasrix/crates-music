@@ -4,9 +4,10 @@
 //! needed; the online path shares the same `maybe_refill` / `on_refilled`
 //! logic (only the push target differs).
 
-use music_core::{Track, TrackId};
+use music_core::{PlaybackState, Queue, QueueItem, QueueItemId, Track, TrackId};
+use music_sync::{ServerMessage, SyncState};
 
-use super::super::msg::{Effect, Msg, StationError};
+use super::super::msg::{Effect, Msg, StationError, SyncEvent};
 use super::super::state::{App, FeedbackVote, to_queued};
 use super::{autoplay, update};
 
@@ -219,7 +220,119 @@ fn toggle_on_kicks_an_immediate_refill() {
     assert!(find_refill(&effects).is_some(), "toggling on refills at once");
 }
 
+// ── online: pending-push echo guard ──────────────────────────────────────
+
+/// Take `app` online with a room queue of `ids`, cursor at `cursor`.
+fn go_online(a: &mut App, ids: &[&str], cursor: usize) {
+    let state = SyncState {
+        playback: PlaybackState {
+            queue: Queue {
+                items: ids
+                    .iter()
+                    .map(|id| QueueItem {
+                        item_id: QueueItemId::from(format!("it-{id}")),
+                        track_id: TrackId::from((*id).to_owned()),
+                    })
+                    .collect(),
+            },
+            now_playing_index: Some(cursor),
+            position_ms: 0,
+            is_playing: true,
+            session_anchor: None,
+        },
+        version: 1,
+    };
+    update(a, Msg::Sync(SyncEvent::Frame(ServerMessage::Snapshot { state })));
+}
+
+#[test]
+fn pending_pushes_count_toward_upcoming_so_a_slow_echo_doesnt_double_fire() {
+    let mut a = app();
+    go_online(&mut a, &["cur"], 0); // online, 1-track queue, upcoming 0
+    assert!(a.sync.online());
+    a.autoplay.enabled = true;
+    a.autoplay.inflight = true;
+    let gen0 = a.autoplay.generation;
+
+    // A refill delivers 5 tracks; online they're pushed as sync ops and don't
+    // hit app.queue until the echo — but they land in pending_push.
+    let tracks: Vec<_> = (0..5).map(|i| track(&format!("r{i}"))).collect();
+    autoplay::on_refilled(&mut a, gen0, 5, Ok(tracks));
+    assert_eq!(a.autoplay.pending_push.len(), 5, "pushes tracked pre-echo");
+    a.autoplay.cooldown_until = 0; // pretend the short cooldown elapsed
+
+    // The projection is still the 1-track queue (echo not yet applied), but
+    // pending_push covers the shortfall, so no second refill fires.
+    assert!(find_refill(&autoplay::maybe_refill(&mut a)).is_none());
+}
+
 // ── feedback thumbs ──────────────────────────────────────────────────────
+
+#[test]
+fn on_refilled_dedups_returned_tracks_against_the_queue() {
+    let mut a = app();
+    a.autoplay.enabled = true;
+    load_queue(&mut a, &["a", "b", "c"], 0); // b, c already queued
+    a.autoplay.inflight = true;
+    let gen0 = a.autoplay.generation;
+
+    // Recommender returns a dup ("b", already queued) plus a fresh track.
+    autoplay::on_refilled(&mut a, gen0, 5, Ok(vec![track("b"), track("r1")]));
+    // Only the fresh one is added; "b" is skipped.
+    assert_eq!(a.queue.len(), 4);
+    assert!(a.autoplay.recommended.contains("r1"));
+    assert!(!a.autoplay.recommended.contains("b"), "dup not recorded");
+}
+
+#[test]
+fn on_refilled_caps_to_the_live_shortfall() {
+    let mut a = app();
+    a.autoplay.enabled = true;
+    // upcoming = 4 (cursor at 0, 4 after it) → live_need = 5 - 4 = 1.
+    load_queue(&mut a, &["cur", "u1", "u2", "u3", "u4"], 0);
+    a.autoplay.inflight = true;
+    let gen0 = a.autoplay.generation;
+
+    autoplay::on_refilled(&mut a, gen0, 5, Ok(vec![track("r1"), track("r2"), track("r3")]));
+    // Only one slot was actually short, so only one track is added.
+    assert_eq!(a.queue.len(), 6);
+}
+
+#[test]
+fn provenance_is_pruned_to_the_current_queue() {
+    let mut a = app();
+    a.autoplay.enabled = true;
+    load_queue(&mut a, &["a", "b"], 0);
+    // "gone" was an autoplay pick earlier but is no longer in the queue.
+    a.autoplay.recommended.insert("gone".to_owned());
+    a.autoplay.recommended.insert("a".to_owned());
+
+    autoplay::maybe_refill(&mut a); // runs reconcile()
+    assert!(!a.autoplay.recommended.contains("gone"), "stale id pruned");
+    assert!(a.autoplay.recommended.contains("a"), "queued id kept");
+}
+
+#[test]
+fn feedback_is_refused_while_a_write_is_in_flight() {
+    let mut a = app();
+    load_queue(&mut a, &["a"], 0);
+    a.autoplay.recommended.insert("a".to_owned());
+
+    let first = autoplay::feedback(&mut a, FeedbackVote::Up);
+    assert!(!first.is_empty(), "first vote submits");
+    assert!(a.autoplay.feedback_inflight.contains("a"));
+
+    // A second thumb before the first lands is refused — no new effect, and
+    // the optimistic vote is untouched.
+    let second = autoplay::feedback(&mut a, FeedbackVote::Down);
+    assert!(second.is_empty(), "second vote refused");
+    assert_eq!(a.autoplay.votes.get("a"), Some(&FeedbackVote::Up));
+
+    // Once the write completes, another vote is allowed again.
+    autoplay::on_feedback_done(&mut a, "a", None, Ok(()));
+    assert!(!a.autoplay.feedback_inflight.contains("a"));
+    assert!(!autoplay::feedback(&mut a, FeedbackVote::Down).is_empty());
+}
 
 #[test]
 fn feedback_is_a_no_op_on_a_user_picked_track() {
@@ -277,7 +390,7 @@ fn feedback_failure_rolls_the_vote_back() {
     // Optimistically voted up; the previous state was neutral (None).
     a.autoplay.votes.insert("a".to_owned(), FeedbackVote::Up);
 
-    autoplay::on_feedback_done(&mut a, "a".to_owned(), None, Err("boom".to_owned()));
+    autoplay::on_feedback_done(&mut a, "a", None, Err("boom".to_owned()));
     assert!(!a.autoplay.votes.contains_key("a"), "rolled back to neutral");
 }
 
