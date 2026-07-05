@@ -19,6 +19,10 @@ pub struct Config {
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Streaming / download transcode quality. Per-client, like the web's
+    /// `cacheSettings` — see [`PlaybackConfig`].
+    #[serde(default)]
+    pub playback: PlaybackConfig,
     /// Interactive-TUI settings (autoplay drift params, etc.). Per-client by
     /// design, like the web client's localStorage — see [`TuiConfig`].
     #[serde(default)]
@@ -109,6 +113,85 @@ fn default_regular_budget() -> u64 {
 
 fn default_pinned_budget() -> u64 {
     5 * 1024 * 1024 * 1024 // 5 GB
+}
+
+/// Transcode quality for audio the client fetches. `Original` streams the
+/// verbatim file; the two capped variants ride the `/rest/*` proxy's
+/// `format`/`maxBitRate` (Navidrome transcodes on demand — the same knobs the
+/// web's transcode-to-fit uses). Stream and download qualities are separate so
+/// you can, e.g., stream lossless on the LAN but pin space-efficient copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    /// Verbatim source file, no transcode.
+    #[default]
+    Original,
+    /// Opus at 128 kbps.
+    Opus128,
+    /// MP3 at 128 kbps.
+    Mp3128,
+}
+
+impl Quality {
+    /// The order the Settings view cycles through with `enter` / `←`/`→`.
+    pub const ALL: [Quality; 3] = [Quality::Original, Quality::Opus128, Quality::Mp3128];
+
+    /// `(format, maxBitRate)` for the Subsonic `stream` request, or `None` to
+    /// stream the original untouched.
+    #[must_use]
+    pub fn transcode(self) -> Option<(&'static str, u32)> {
+        match self {
+            Quality::Original => None,
+            Quality::Opus128 => Some(("opus", 128)),
+            Quality::Mp3128 => Some(("mp3", 128)),
+        }
+    }
+
+    /// Codec component of the [`AudioKey`](music_cache::AudioKey). `Original`
+    /// maps to `"stream"` — the value the CLI has always used — so blobs
+    /// cached before quality existed still resolve.
+    #[must_use]
+    pub fn codec(self) -> &'static str {
+        match self {
+            Quality::Original => "stream",
+            Quality::Opus128 => "opus",
+            Quality::Mp3128 => "mp3",
+        }
+    }
+
+    /// Bitrate component of the cache key (`None` for the original).
+    #[must_use]
+    pub fn bitrate(self) -> Option<u32> {
+        self.transcode().map(|(_, kbps)| kbps)
+    }
+
+    /// Human label for the Settings row.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Original => "original",
+            Quality::Opus128 => "opus @128k",
+            Quality::Mp3128 => "mp3 @128k",
+        }
+    }
+
+    /// Next quality in [`Self::ALL`], wrapping — the `enter`/cycle action.
+    #[must_use]
+    pub fn next(self) -> Quality {
+        let i = Self::ALL.iter().position(|q| *q == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+}
+
+/// Streaming and download transcode preferences. Both default to `Original`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlaybackConfig {
+    /// Quality for tracks fetched to play (the stream path).
+    #[serde(default)]
+    pub stream_quality: Quality,
+    /// Quality for tracks fetched to save offline (pin / bulk download).
+    #[serde(default)]
+    pub download_quality: Quality,
 }
 
 /// Interactive-TUI configuration. Currently just the autoplay drift
@@ -207,6 +290,26 @@ impl Config {
         config.source_path = path.to_path_buf();
         Ok(config)
     }
+
+    /// Persist the current config back to the file it was loaded from. Used by
+    /// the TUI Settings view so edits survive a restart (per-client, like the
+    /// web's localStorage). Written atomically (temp sibling + rename) so a
+    /// crash mid-write can't truncate a valid config. The `[server]` password
+    /// round-trips verbatim — it's the same file it came from.
+    pub fn save(&self) -> anyhow::Result<()> {
+        if self.source_path.as_os_str().is_empty() {
+            anyhow::bail!("cannot save config: no source path (not loaded from disk)");
+        }
+        let body =
+            toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
+        let tmp = self.source_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, body)
+            .map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.source_path).map_err(|e| {
+            anyhow::anyhow!("replacing {}: {e}", self.source_path.display())
+        })?;
+        Ok(())
+    }
 }
 
 /// Returns the platform-appropriate default config path:
@@ -244,5 +347,49 @@ mod tests {
         // sensitive and stays visible.
         let gateway_dbg = format!("{gateway:?}");
         assert!(gateway_dbg.contains("rootCA.pem"));
+    }
+
+    #[test]
+    fn quality_cache_key_components() {
+        // Original preserves the historical "stream" codec + no bitrate so
+        // already-cached blobs still resolve; the capped variants are distinct.
+        assert_eq!(Quality::Original.codec(), "stream");
+        assert_eq!(Quality::Original.bitrate(), None);
+        assert_eq!(Quality::Original.transcode(), None);
+        assert_eq!(Quality::Opus128.codec(), "opus");
+        assert_eq!(Quality::Opus128.bitrate(), Some(128));
+        assert_eq!(Quality::Opus128.transcode(), Some(("opus", 128)));
+        assert_eq!(Quality::Mp3128.transcode(), Some(("mp3", 128)));
+    }
+
+    #[test]
+    fn quality_cycles_and_serializes_lowercase() {
+        assert_eq!(Quality::Original.next(), Quality::Opus128);
+        assert_eq!(Quality::Opus128.next(), Quality::Mp3128);
+        assert_eq!(Quality::Mp3128.next(), Quality::Original);
+        // The wire form is lowercase (`opus128`), not the Rust `Opus128`.
+        let pb = PlaybackConfig {
+            stream_quality: Quality::Opus128,
+            download_quality: Quality::Mp3128,
+        };
+        let toml = toml::to_string(&pb).unwrap();
+        assert!(toml.contains("stream_quality = \"opus128\""), "{toml}");
+        assert!(toml.contains("download_quality = \"mp3128\""), "{toml}");
+    }
+
+    #[test]
+    fn playback_quality_parses_from_toml() {
+        let raw = r#"
+            [server]
+            url = "http://nav"
+            username = "a"
+            password = "b"
+            [playback]
+            stream_quality = "original"
+            download_quality = "opus128"
+        "#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(config.playback.stream_quality, Quality::Original);
+        assert_eq!(config.playback.download_quality, Quality::Opus128);
     }
 }

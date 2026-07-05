@@ -285,7 +285,26 @@ impl Client {
     /// performing the GET (potentially with `Range` headers) — this lets
     /// the caller wire bytes directly to a decoder, a cache, or both.
     pub fn stream_url(&self, id: &TrackId) -> Result<Url> {
-        self.build_url("stream", &[("id", id.as_str().to_string())])
+        self.stream_url_with(id, None, None)
+    }
+
+    /// [`Self::stream_url`] with optional transcode hints. `format` +
+    /// `max_bitrate` map to the Subsonic `format`/`maxBitRate` params;
+    /// Navidrome transcodes on demand (`None`/`None` streams the original).
+    pub fn stream_url_with(
+        &self,
+        id: &TrackId,
+        format: Option<&str>,
+        max_bitrate: Option<u32>,
+    ) -> Result<Url> {
+        let mut params = vec![("id", id.as_str().to_string())];
+        if let Some(f) = format {
+            params.push(("format", f.to_string()));
+        }
+        if let Some(b) = max_bitrate {
+            params.push(("maxBitRate", b.to_string()));
+        }
+        self.build_url("stream", &params)
     }
 
     pub fn http(&self) -> &Http {

@@ -10,7 +10,7 @@ use music_player::{play_queue_blocking, read_cached, resolve_source};
 use music_subsonic::{Client, Credentials, SearchResult3};
 
 use crate::cli::{CacheAction, Cli, Command, PlaylistAction, RecommendAction, SyncAction};
-use crate::config::{Config, resolve_cache_root};
+use crate::config::{Config, Quality, resolve_cache_root};
 use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
 // A flat command dispatcher — splitting the match across helpers would
@@ -100,15 +100,26 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;
             let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();
-            play_tracks(&client, &cache, &ids, offline).await?;
+            play_tracks(&client, &cache, &ids, offline, config.playback.stream_quality).await?;
         }
         Command::Pin { track_id } => {
             let cache = open_audio_cache(&config).await?;
-            run_pin(&client, &cache, &TrackId::from(track_id)).await?;
+            run_pin(
+                &client,
+                &cache,
+                &TrackId::from(track_id),
+                config.playback.download_quality,
+            )
+            .await?;
         }
         Command::Unpin { track_id } => {
             let cache = open_audio_cache(&config).await?;
-            run_unpin(&cache, &TrackId::from(track_id)).await?;
+            run_unpin(
+                &cache,
+                &TrackId::from(track_id),
+                config.playback.download_quality,
+            )
+            .await?;
         }
         Command::Pinned => {
             let cache = open_audio_cache(&config).await?;
@@ -138,7 +149,7 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
             PlaylistAction::Play { id, shuffle } => {
                 let cache = open_audio_cache(&config).await?;
                 let ids = crate::playlist::resolve_play_ids(&config, &id, shuffle).await?;
-                play_tracks(&client, &cache, &ids, false).await?;
+                play_tracks(&client, &cache, &ids, false, config.playback.stream_quality).await?;
             }
         },
         Command::Sync { action } => match action {
@@ -193,20 +204,25 @@ fn print_search(result: &SearchResult3) {
     }
 }
 
-pub(crate) fn audio_key(track_id: &TrackId) -> AudioKey {
+pub(crate) fn audio_key(track_id: &TrackId, quality: Quality) -> AudioKey {
     AudioKey {
         track_id: track_id.as_str().to_string(),
-        bitrate: None,
-        codec: "stream".to_string(),
+        bitrate: quality.bitrate(),
+        codec: quality.codec().to_string(),
     }
 }
 
-async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
-    let key = audio_key(track_id);
+async fn run_pin(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+    quality: Quality,
+) -> anyhow::Result<()> {
+    let key = audio_key(track_id, quality);
     // Ensure the bytes are present (fetch if not).
     if cache.get(&key).await?.is_none() {
         tracing::info!(track = track_id.as_str(), "pin: track not cached, fetching");
-        fetch_into_cache(client, cache, track_id).await?;
+        fetch_into_cache(client, cache, track_id, quality).await?;
     }
     match cache.pin(&key).await? {
         PinOutcome::Pinned => println!("pinned {}", track_id.as_str()),
@@ -229,8 +245,12 @@ async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> any
     Ok(())
 }
 
-async fn run_unpin(cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
-    let key = audio_key(track_id);
+async fn run_unpin(
+    cache: &AudioCache,
+    track_id: &TrackId,
+    quality: Quality,
+) -> anyhow::Result<()> {
+    let key = audio_key(track_id, quality);
     match cache.unpin(&key).await? {
         UnpinOutcome::Unpinned => println!("unpinned {}", track_id.as_str()),
         UnpinOutcome::NotPinned => println!("not pinned: {}", track_id.as_str()),
@@ -274,8 +294,9 @@ async fn fetch_into_cache(
     client: &Client,
     cache: &AudioCache,
     track_id: &TrackId,
+    quality: Quality,
 ) -> anyhow::Result<()> {
-    let _ = fetch_track_bytes(client, cache, track_id)
+    let _ = fetch_track_bytes(client, cache, track_id, quality)
         .await
         .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
     Ok(())
@@ -289,9 +310,14 @@ pub(crate) async fn fetch_track_bytes(
     client: &Client,
     cache: &AudioCache,
     track_id: &TrackId,
+    quality: Quality,
 ) -> anyhow::Result<Bytes> {
-    let key = audio_key(track_id);
-    let url = client.stream_url(track_id)?;
+    let key = audio_key(track_id, quality);
+    let (format, max_bitrate) = match quality.transcode() {
+        Some((fmt, kbps)) => (Some(fmt), Some(kbps)),
+        None => (None, None),
+    };
+    let url = client.stream_url_with(track_id, format, max_bitrate)?;
     let http = client.http().clone();
     let bytes = resolve_source(cache, &key, || async move {
         let response = http
@@ -379,6 +405,7 @@ async fn play_tracks(
     cache: &AudioCache,
     track_ids: &[TrackId],
     offline: bool,
+    quality: Quality,
 ) -> anyhow::Result<()> {
     // Resolve every track *before* starting playback. This is the gapless
     // pre-roll: by the time the first track's last sample is consumed,
@@ -386,7 +413,7 @@ async fn play_tracks(
     // queue is fed back-to-back.
     let mut queue: Vec<Bytes> = Vec::with_capacity(track_ids.len());
     for track_id in track_ids {
-        let key = audio_key(track_id);
+        let key = audio_key(track_id, quality);
         let bytes = if offline {
             match read_cached(cache, &key).await? {
                 Some(bytes) => bytes,
@@ -396,7 +423,7 @@ async fn play_tracks(
                 ),
             }
         } else {
-            fetch_track_bytes(client, cache, track_id).await.with_context(|| {
+            fetch_track_bytes(client, cache, track_id, quality).await.with_context(|| {
                 format!(
                     "could not resolve audio for track {}: server unreachable and \
                      not in local cache (try --offline to play only what's cached)",

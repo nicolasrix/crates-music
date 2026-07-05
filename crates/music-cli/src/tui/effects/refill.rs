@@ -34,7 +34,9 @@ pub(super) async fn run(
     session_id: &str,
     need: usize,
 ) -> Result<Vec<music_core::Track>, StationError> {
-    let ap = &ctx.config.tui.autoplay;
+    // Snapshot the live drift params (Settings edits apply mid-session).
+    let ap = ctx.autoplay();
+    let ap = &ap;
     let mut seeds = build_seeds(
         queue_track_ids,
         now_playing_index,

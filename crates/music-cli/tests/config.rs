@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use music_cli::config::{CacheConfig, Config, GatewayConfig, ServerConfig, TuiConfig};
+use music_cli::config::{
+    CacheConfig, Config, GatewayConfig, PlaybackConfig, Quality, ServerConfig, TuiConfig,
+};
 
 #[test]
 fn config_roundtrips_toml() {
@@ -15,12 +17,43 @@ fn config_roundtrips_toml() {
         },
         gateway: None,
         cache: CacheConfig::default(),
+        playback: PlaybackConfig::default(),
         tui: TuiConfig::default(),
         source_path: PathBuf::new(),
     };
     let serialized = toml::to_string(&original).unwrap();
     let back: Config = toml::from_str(&serialized).unwrap();
     assert_eq!(back, original);
+}
+
+#[test]
+fn config_save_round_trips_through_disk() {
+    // The Settings view persists edits with `Config::save`; loading the file
+    // back must reproduce them (and the atomic temp file must be gone).
+    let dir = std::env::temp_dir().join(format!("crates-cfg-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut config = Config {
+        server: ServerConfig {
+            url: "http://nav".into(),
+            username: "alice".into(),
+            password: "sesame".into(),
+        },
+        gateway: None,
+        cache: CacheConfig::default(),
+        playback: PlaybackConfig::default(),
+        tui: TuiConfig::default(),
+        source_path: path.clone(),
+    };
+    config.playback.download_quality = Quality::Opus128;
+    config.cache.regular_budget_bytes = 42;
+    config.save().unwrap();
+
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(loaded.playback.download_quality, Quality::Opus128);
+    assert_eq!(loaded.cache.regular_budget_bytes, 42);
+    assert!(!path.with_extension("toml.tmp").exists());
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -137,6 +170,7 @@ fn config_with_gateway_block_roundtrips() {
             insecure_tls: false,
         }),
         cache: CacheConfig::default(),
+        playback: PlaybackConfig::default(),
         tui: TuiConfig::default(),
         source_path: PathBuf::new(),
     };

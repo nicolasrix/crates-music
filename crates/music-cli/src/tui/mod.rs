@@ -78,11 +78,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .is_some()
         .then(|| sync_ws::spawn(Arc::clone(&config), msg_tx.clone()));
 
+    let live_settings = effects::LiveSettings {
+        stream_quality: config.playback.stream_quality,
+        download_quality: config.playback.download_quality,
+        autoplay: config.tui.autoplay.clone(),
+    };
     let ctx = Ctx::new(
         Arc::clone(&config),
         client,
         bearer,
         cache,
+        live_settings,
         msg_tx.clone(),
         sync_ops,
     );

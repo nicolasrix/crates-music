@@ -11,7 +11,7 @@ use music_sync::SyncOp;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::api::{self, ApiError};
-use crate::config::Config;
+use crate::config::{AutoplayConfig, Config, Quality};
 use music_cache::AudioCache;
 use music_subsonic::Client;
 
@@ -25,6 +25,19 @@ mod downloads;
 
 mod refill;
 
+/// The slice of config the Settings view must apply to *running* effect tasks
+/// without a restart: the transcode qualities (read on every audio fetch) and
+/// the autoplay drift params (read on every refill). Held behind a mutex on
+/// [`Ctx`] and swapped wholesale by the `SaveSettings` effect. Budgets are
+/// *not* here — those live on the `AudioCache` itself (`set_budgets`), and the
+/// App-mirrored knobs (min-upcoming, output device) are reducer state.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveSettings {
+    pub stream_quality: Quality,
+    pub download_quality: Quality,
+    pub autoplay: AutoplayConfig,
+}
+
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
 #[derive(Clone)]
 pub(crate) struct Ctx {
@@ -32,6 +45,10 @@ pub(crate) struct Ctx {
     client: Arc<Mutex<ClientSlot>>,
     pub cache: Arc<AudioCache>,
     pub msg_tx: UnboundedSender<Msg>,
+    /// Live, runtime-editable settings — see [`LiveSettings`]. A `std::Mutex`
+    /// (not tokio's) because it's only ever held for a lock-copy-unlock with
+    /// no `.await` in between.
+    settings: Arc<std::sync::Mutex<LiveSettings>>,
     /// Sink into the sync WS task for outbound ops; `None` in direct mode
     /// (no gateway, so no sync connection was spawned).
     sync_ops: Option<UnboundedSender<SyncOp>>,
@@ -59,6 +76,7 @@ impl Ctx {
         client: Client,
         bearer: Option<String>,
         cache: Arc<AudioCache>,
+        settings: LiveSettings,
         msg_tx: UnboundedSender<Msg>,
         sync_ops: Option<UnboundedSender<SyncOp>>,
     ) -> Self {
@@ -66,9 +84,33 @@ impl Ctx {
             config,
             client: Arc::new(Mutex::new(ClientSlot { bearer, client })),
             cache,
+            settings: Arc::new(std::sync::Mutex::new(settings)),
             msg_tx,
             sync_ops,
         }
+    }
+
+    /// Quality for tracks fetched to play. Read fresh on every fetch so a
+    /// Settings change hits the next stream request.
+    pub(crate) fn stream_quality(&self) -> Quality {
+        self.live().stream_quality
+    }
+
+    /// Quality for tracks fetched to save offline (pin / bulk / warm).
+    pub(crate) fn download_quality(&self) -> Quality {
+        self.live().download_quality
+    }
+
+    /// A snapshot of the autoplay drift params for one refill.
+    pub(crate) fn autoplay(&self) -> AutoplayConfig {
+        self.live().autoplay.clone()
+    }
+
+    fn live(&self) -> LiveSettings {
+        self.settings
+            .lock()
+            .expect("live settings mutex poisoned")
+            .clone()
     }
 
     async fn subsonic(&self) -> anyhow::Result<Client> {
@@ -219,8 +261,13 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         } => {
             let fetched = async {
                 let client = ctx.subsonic().await?;
-                crate::app::fetch_track_bytes(&client, &ctx.cache, &TrackId::from(track_id.clone()))
-                    .await
+                crate::app::fetch_track_bytes(
+                    &client,
+                    &ctx.cache,
+                    &TrackId::from(track_id.clone()),
+                    ctx.stream_quality(),
+                )
+                .await
             }
             .await;
             Some(match fetched {
@@ -239,8 +286,13 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         Effect::PrefetchAudio { track_id } => {
             let fetched = async {
                 let client = ctx.subsonic().await?;
-                crate::app::fetch_track_bytes(&client, &ctx.cache, &TrackId::from(track_id.clone()))
-                    .await
+                crate::app::fetch_track_bytes(
+                    &client,
+                    &ctx.cache,
+                    &TrackId::from(track_id.clone()),
+                    ctx.stream_quality(),
+                )
+                .await
             }
             .await;
             match fetched {

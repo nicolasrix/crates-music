@@ -81,7 +81,7 @@ async fn ensure_cached(
     if ctx.cache.get(key).await?.is_some() {
         return Ok(());
     }
-    crate::app::fetch_track_bytes(client, &ctx.cache, tid).await?;
+    crate::app::fetch_track_bytes(client, &ctx.cache, tid, ctx.download_quality()).await?;
     Ok(())
 }
 
@@ -89,7 +89,7 @@ async fn ensure_cached(
 /// fetch-if-missing then pin. Mirrors the classic `pin`/`unpin` outcomes.
 pub(super) async fn pin_toggle(ctx: &Ctx, track_id: &str, title: &str) -> Msg {
     let tid = TrackId::from(track_id.to_owned());
-    let key = crate::app::audio_key(&tid);
+    let key = crate::app::audio_key(&tid, ctx.download_quality());
 
     match ctx.cache.get(&key).await {
         Ok(Some(entry)) if entry.pinned => {
@@ -133,11 +133,12 @@ pub(super) async fn pin_bulk(ctx: &Ctx, track_ids: &[String], label: &str) -> Ms
         Ok(c) => c,
         Err(e) => return pin_done(format!("{label} failed: {e}"), true),
     };
+    let quality = ctx.download_quality();
     let (mut saved, mut already, mut failed) = (0usize, 0usize, 0usize);
     let mut budget_hit = false;
     for id in track_ids {
         let tid = TrackId::from(id.clone());
-        let key = crate::app::audio_key(&tid);
+        let key = crate::app::audio_key(&tid, quality);
         if ensure_cached(ctx, &client, &tid, &key).await.is_err() {
             failed += 1;
             continue;
