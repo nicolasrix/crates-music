@@ -111,6 +111,125 @@ pub async fn recommend_from_any(
     Ok(parsed.into())
 }
 
+/// The tethered-drift autoplay request: weighted seeds plus the leash / MMR
+/// knobs the gateway applies server-side. Assembled by the effect layer from
+/// the pure seed builder's output + the `[tui.autoplay]` config.
+#[derive(Debug, Clone)]
+pub struct WeightedStation<'a> {
+    /// `(track_id, weight)` pairs, highest weight first (the builder sorts).
+    pub seeds: &'a [(String, f32)],
+    /// The leash anchor set (session anchor + user/scrobble seeds, no
+    /// frontier) — candidates straying past τ from all of these are demoted.
+    pub anchor_track_ids: &'a [String],
+    /// Full queue for the diversity walk's context (artist cap, title dedup).
+    pub queue_track_ids: &'a [String],
+    pub now_playing_track_id: Option<&'a str>,
+    /// Recommend-session id — scopes downvote exclusion to this listen.
+    pub session_id: Option<&'a str>,
+    pub n: usize,
+    pub leash_tau: f32,
+    pub leash_lambda: f32,
+    pub mmr_lambda: f32,
+}
+
+/// `POST /v1/recommend/from-seeds` with the full weighted-drift body (the
+/// autoplay refill call). Unlike the other recommend endpoints, from-seeds
+/// never 404s — an unindexed seed set just yields an empty 200 (surfaced as
+/// an empty `RecommendList`, which the caller reads as under-delivery).
+pub async fn recommend_weighted_station(
+    config: &Config,
+    req: &WeightedStation<'_>,
+) -> Result<RecommendList, ApiError> {
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/recommend/from-seeds");
+    let seeds: Vec<&str> = req.seeds.iter().map(|(id, _)| id.as_str()).collect();
+    let weights: Vec<f32> = req.seeds.iter().map(|(_, w)| *w).collect();
+    let mut body = serde_json::json!({
+        "seeds": seeds,
+        "seed_weights": weights,
+        "top_n": req.n,
+        "anchor_track_ids": req.anchor_track_ids,
+        "leash_tau": req.leash_tau,
+        "leash_lambda": req.leash_lambda,
+        "queue_context": {
+            "queue_track_ids": req.queue_track_ids,
+            "now_playing_track_id": req.now_playing_track_id,
+            "diversity_mode": "mmr",
+            "mmr_lambda": req.mmr_lambda,
+        },
+    });
+    if let Some(sid) = req.session_id {
+        body["session_id"] = serde_json::Value::String(sid.to_owned());
+    }
+    let resp = http_client(gw)?
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .context("requesting autoplay refill")?;
+    if resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::SERVICE_UNAVAILABLE {
+        return Err(ApiError::RecommenderUnavailable);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("autoplay refill failed ({status}): {text}").into());
+    }
+    let parsed: RecommendResponse = resp.json().await.context("parsing autoplay refill")?;
+    Ok(parsed.into())
+}
+
+/// Fresh up/down vote totals for a track after a feedback write.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeedbackTotals {
+    pub up: i64,
+    pub down: i64,
+}
+
+/// `POST /v1/recommend/feedback` — thumbs up/down on an autoplay-recommended
+/// track. `vote = None` clears an existing vote. The gateway upserts one row
+/// per `(track_id, session_id)`, so flipping up↔down never double-counts.
+/// Any-authenticated (a guest's vote is a silent server-side no-op).
+pub async fn submit_feedback(
+    config: &Config,
+    track_id: &str,
+    vote: Option<&str>,
+    session_id: &str,
+    occurred_ms: i64,
+) -> Result<FeedbackTotals, ApiError> {
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/recommend/feedback");
+    // `vote: null` deletes the row — serde renders `None` as JSON null.
+    let body = serde_json::json!({
+        "track_id": track_id,
+        "vote": vote,
+        "session_id": session_id,
+        "occurred_ms": occurred_ms,
+    });
+    let resp = http_client(gw)?
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .context("submitting feedback")?;
+    if resp.status() == StatusCode::FORBIDDEN {
+        return Err(ApiError::Forbidden);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("feedback failed ({status}): {text}").into());
+    }
+    resp.json()
+        .await
+        .context("parsing feedback response")
+        .map_err(Into::into)
+}
+
 /// One "you might like" group from `similar_albums`/`similar_artists`: the
 /// grouped entity id (an album id or artist id) in descending score order.
 /// Names are hydrated by the caller (`getAlbum`/`getArtist`).

@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally not derived: `TuiConfig`'s autoplay drift params are
+// floats (which are only `PartialEq`). Nothing keys a map/set on `Config`, so
+// `PartialEq` is all that's used (test `assert_eq!`s).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     /// When set, the CLI talks to a `music-gateway` instead of Navidrome
@@ -16,6 +19,10 @@ pub struct Config {
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Interactive-TUI settings (autoplay drift params, etc.). Per-client by
+    /// design, like the web client's localStorage — see [`TuiConfig`].
+    #[serde(default)]
+    pub tui: TuiConfig,
     /// Path this config was loaded from. Not part of the on-disk format
     /// (skipped by serde) — `Config::load` stamps it so siblings of the
     /// config file (e.g. the `cli-tokens.json` token store) can be located.
@@ -102,6 +109,85 @@ fn default_regular_budget() -> u64 {
 
 fn default_pinned_budget() -> u64 {
     5 * 1024 * 1024 * 1024 // 5 GB
+}
+
+/// Interactive-TUI configuration. Currently just the autoplay drift
+/// parameters; Phase 7's Settings view will edit these in place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub autoplay: AutoplayConfig,
+}
+
+/// Tethered-drift autoplay parameters. Defaults mirror the web client's
+/// `DEFAULT_AUTOPLAY_SETTINGS` so the TUI and PWA drift identically. The
+/// frontier weights are folded into the seed list client-side; the leash and
+/// MMR params ride the `from-seeds` request body and are applied server-side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoplayConfig {
+    /// Start with autoplay already on. The web persists the last toggle in
+    /// localStorage; the TUI reads the initial state from here (runtime
+    /// toggling isn't persisted yet — that's Phase 7).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Refill the queue whenever fewer than this many tracks sit after the
+    /// now-playing cursor (web `MIN_UPCOMING`).
+    #[serde(default = "default_min_upcoming")]
+    pub min_upcoming: usize,
+    /// Boundary leash radius τ (whitened cosine) and strength λ — how hard a
+    /// candidate is demoted for straying from the anchor set.
+    #[serde(default = "default_leash_tau")]
+    pub leash_tau: f32,
+    #[serde(default = "default_leash_lambda")]
+    pub leash_lambda: f32,
+    /// Travel frontier: base weight β, per-step decay, and how many recently
+    /// played items seed the direction of drift.
+    #[serde(default = "default_frontier_weight")]
+    pub frontier_weight: f32,
+    #[serde(default = "default_frontier_decay")]
+    pub frontier_decay: f32,
+    #[serde(default = "default_frontier_window")]
+    pub frontier_window: usize,
+    /// MMR relevance/novelty tradeoff λ for the server-side diversity walk.
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f32,
+}
+
+impl Default for AutoplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_upcoming: default_min_upcoming(),
+            leash_tau: default_leash_tau(),
+            leash_lambda: default_leash_lambda(),
+            frontier_weight: default_frontier_weight(),
+            frontier_decay: default_frontier_decay(),
+            frontier_window: default_frontier_window(),
+            mmr_lambda: default_mmr_lambda(),
+        }
+    }
+}
+
+fn default_min_upcoming() -> usize {
+    5
+}
+fn default_leash_tau() -> f32 {
+    0.28
+}
+fn default_leash_lambda() -> f32 {
+    16.0
+}
+fn default_frontier_weight() -> f32 {
+    0.15
+}
+fn default_frontier_decay() -> f32 {
+    0.55
+}
+fn default_frontier_window() -> usize {
+    3
+}
+fn default_mmr_lambda() -> f32 {
+    0.8
 }
 
 /// Resolve cache root: explicit path if set, otherwise XDG cache.

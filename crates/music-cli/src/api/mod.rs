@@ -21,8 +21,8 @@ pub use playlists::{
     list_playlists, put_playlist_tracks, rename_playlist, suggest_from_seeds,
 };
 pub use recommend::{
-    SimilarGroup, SimilarList, recommend_from_any, recommend_next, similar_albums, similar_artists,
-    station,
+    FeedbackTotals, SimilarGroup, SimilarList, WeightedStation, recommend_from_any, recommend_next,
+    recommend_weighted_station, similar_albums, similar_artists, station, submit_feedback,
 };
 
 use anyhow::{Context, anyhow};

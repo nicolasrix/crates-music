@@ -7,6 +7,7 @@
 //! detached tokio task whose completion is just another `Msg`. Drawing
 //! never awaits network or disk; slow I/O can never freeze a keypress.
 
+mod autoplay;
 mod effects;
 mod keymap;
 mod msg;
@@ -96,6 +97,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         let theme = Theme::detect();
 
         let mut app = App::new(player, no_audio_device, config.gateway.is_some());
+        app.configure_autoplay(&config.tui.autoplay);
         // Kick off the initial library load.
         for effect in update::update(&mut app, Msg::GoSection(Section::Library)) {
             effects::spawn(effect, &ctx);
