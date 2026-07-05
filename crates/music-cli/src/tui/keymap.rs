@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::msg::{InputMsg, Msg};
-use super::state::{App, LibraryPane, Overlay, Rating, Section};
+use super::state::{App, FeedbackVote, LibraryPane, Overlay, Rating, Section};
 
 /// Rendered by the help overlay — keep in sync with `action_for` (it *is*
 /// the documentation of that function).
@@ -36,6 +36,8 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("J / K", "queue: move row down / up"),
     ("T", "queue: move row to top"),
     ("o", "toggle audio output on this device (sync)"),
+    ("A", "toggle autoplay (keep the queue topped up)"),
+    ("f / F", "autoplay pick: thumbs up / down"),
     ("N", "playlists: new playlist"),
     ("s / m", "playlist: shuffle-play / suggest more"),
     ("R / X", "playlist: rename / delete"),
@@ -164,6 +166,12 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         // Output toggle only matters with a live sync room, but it's
         // harmless (and self-explaining) elsewhere.
         KeyCode::Char('o') => Some(Msg::ToggleOutput),
+        // Autoplay toggle + recommendation feedback are global (the web keeps
+        // them in the player bar). `f`/`F` act on the now-playing track and
+        // no-op with a status line unless it was an autoplay pick.
+        KeyCode::Char('A') => Some(Msg::ToggleAutoplay),
+        KeyCode::Char('f') => Some(Msg::Feedback(FeedbackVote::Up)),
+        KeyCode::Char('F') => Some(Msg::Feedback(FeedbackVote::Down)),
         // Queue edits only bind inside the queue view — 'x'/'c' are too
         // destructive to be global, and J/K/T would shadow navigation.
         KeyCode::Char('x') if app.section == Section::Queue => Some(Msg::QueueRemoveSelected),
@@ -296,6 +304,23 @@ mod tests {
         let mut b = app();
         b.section = Section::Queue;
         assert!(action_for(&b, key(KeyCode::Char('S'))).is_none());
+    }
+
+    #[test]
+    fn autoplay_and_feedback_bindings_are_global() {
+        let a = app();
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('A'))),
+            Some(Msg::ToggleAutoplay)
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('f'))),
+            Some(Msg::Feedback(FeedbackVote::Up))
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('F'))),
+            Some(Msg::Feedback(FeedbackVote::Down))
+        ));
     }
 
     #[test]

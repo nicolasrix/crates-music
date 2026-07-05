@@ -10,12 +10,15 @@
 //! Every queue gesture funnels through a `playback` entry point, which
 //! forks to `room` while the sync connection is online.
 
+mod autoplay;
 mod browse;
 mod library;
 mod playback;
 mod playlists;
 mod room;
 
+#[cfg(test)]
+mod autoplay_tests;
 #[cfg(test)]
 mod library_tests;
 #[cfg(test)]
@@ -46,7 +49,9 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             if app.status.as_ref().is_some_and(|s| app.tick >= s.expires_at) {
                 app.status = None;
             }
-            playback::signal_tick(app)
+            let mut effects = playback::signal_tick(app);
+            effects.extend(autoplay::maybe_refill(app));
+            effects
         }
         Msg::Quit => {
             app.should_quit = true;
@@ -130,6 +135,8 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::QueueMoveTop => playback::queue_move(app, MoveKind::Top),
         Msg::PlayNext => browse::play_next_selected(app),
         Msg::ToggleOutput => room::toggle_output(app),
+        Msg::ToggleAutoplay => autoplay::toggle(app),
+        Msg::Feedback(vote) => autoplay::feedback(app, vote),
         Msg::Player(ev) => playback::player_event(app, ev),
         Msg::Sync(ev) => room::handle(app, ev),
 
@@ -346,6 +353,16 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::AutoplayRefilled {
+            generation,
+            need,
+            result,
+        } => autoplay::on_refilled(app, generation, need, result),
+        Msg::FeedbackDone {
+            track_id,
+            previous,
+            result,
+        } => autoplay::on_feedback_done(app, track_id, previous, result),
         Msg::TracksHydrated { ids, result } => {
             for id in &ids {
                 app.sync.hydrating.remove(id);

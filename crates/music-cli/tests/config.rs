@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use music_cli::config::{CacheConfig, Config, GatewayConfig, ServerConfig};
+use music_cli::config::{CacheConfig, Config, GatewayConfig, ServerConfig, TuiConfig};
 
 #[test]
 fn config_roundtrips_toml() {
@@ -15,6 +15,7 @@ fn config_roundtrips_toml() {
         },
         gateway: None,
         cache: CacheConfig::default(),
+        tui: TuiConfig::default(),
         source_path: PathBuf::new(),
     };
     let serialized = toml::to_string(&original).unwrap();
@@ -136,6 +137,7 @@ fn config_with_gateway_block_roundtrips() {
             insecure_tls: false,
         }),
         cache: CacheConfig::default(),
+        tui: TuiConfig::default(),
         source_path: PathBuf::new(),
     };
     let serialized = toml::to_string(&original).unwrap();

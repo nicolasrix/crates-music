@@ -19,7 +19,7 @@ use crate::api::{PlaylistSummary, WhoamiInfo};
 
 use super::signal::PendingEvent;
 use super::state::{
-    ArtistDetailState, LikedEntry, PlaylistDetailState, Rating, Section, SimilarEntry,
+    ArtistDetailState, FeedbackVote, LikedEntry, PlaylistDetailState, Rating, Section, SimilarEntry,
 };
 
 /// Single-line text-field edits, produced by the keymap only while an input
@@ -122,6 +122,11 @@ pub(crate) enum Msg {
     PlayNext,
     /// o — toggle "play audio on this device" (sync rooms only).
     ToggleOutput,
+    /// A — toggle tethered-drift autoplay (keeps the queue topped up).
+    ToggleAutoplay,
+    /// f / F — thumbs up / down on the now-playing autoplay pick
+    /// (`/v1/recommend/feedback`); a no-op on user-picked tracks.
+    Feedback(FeedbackVote),
 
     // ── playlists ─────────────────────────────────────────────────────
     /// a — open the add-to-playlist picker for the contextual track (any
@@ -252,6 +257,21 @@ pub(crate) enum Msg {
     WhoamiLoaded {
         result: Result<WhoamiInfo, String>,
     },
+    /// An autoplay refill resolved. `need` was the shortfall requested (an
+    /// under-delivery triggers the long cooldown); `generation` is dropped if
+    /// autoplay was toggled since the request went out.
+    AutoplayRefilled {
+        generation: u64,
+        need: usize,
+        result: Result<Vec<Track>, StationError>,
+    },
+    /// A feedback thumb write finished; `previous` is the pre-optimistic vote
+    /// for rollback on failure.
+    FeedbackDone {
+        track_id: String,
+        previous: Option<FeedbackVote>,
+        result: Result<(), String>,
+    },
     /// Track metadata resolved for sync-queue hydration. `ids` echoes the
     /// request so failures can clear the in-flight set (retry happens on
     /// the next queue change, never in a hot loop).
@@ -359,6 +379,32 @@ pub(crate) enum Effect {
     /// ourselves; completes as [`Msg::TracksHydrated`].
     HydrateTracks {
         ids: Vec<String>,
+    },
+    /// Autoplay refill. Carries the Eq-friendly seed *inputs* (the weighting
+    /// itself — floats — is computed in the effect via `tui::autoplay` +
+    /// `[tui.autoplay]` config, so the `Effect` stays `Eq`). The effect builds
+    /// the weighted seeds, falls back to `from-any` over the reversed queue
+    /// when they're empty, and resolves ids to tracks. Completes as
+    /// [`Msg::AutoplayRefilled`].
+    AutoplayRefill {
+        queue_track_ids: Vec<String>,
+        now_playing_index: usize,
+        /// Autoplay-added track ids (provenance) to exclude from seeds.
+        recommended: Vec<String>,
+        /// The session anchor track (weight-3 seed), when a room session exists.
+        anchor_track_id: Option<String>,
+        /// Recommend-session id for downvote scoping, when known.
+        session_id: Option<String>,
+        need: usize,
+        generation: u64,
+    },
+    /// `POST /v1/recommend/feedback` — a thumb write; completes as
+    /// [`Msg::FeedbackDone`]. `vote = None` clears the vote.
+    SubmitFeedback {
+        track_id: String,
+        vote: Option<FeedbackVote>,
+        session_id: String,
+        previous: Option<FeedbackVote>,
     },
 
     // ── playlists ─────────────────────────────────────────────────────

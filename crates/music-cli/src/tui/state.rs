@@ -149,6 +149,16 @@ impl RoomState {
         }
     }
 
+    /// The room's session anchor, but only while genuinely online — offline
+    /// there is no live session to seed autoplay / scope feedback against.
+    pub(crate) fn session_anchor(&self) -> Option<&music_core::SessionAnchor> {
+        if self.online() {
+            self.room.playback.session_anchor.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// Track id under the room's now-playing cursor, if any.
     pub(crate) fn cursor_track_id(&self) -> Option<&str> {
         let i = self.room.playback.now_playing_index?;
@@ -208,6 +218,67 @@ pub(crate) struct LikedEntry {
     /// Resolved name for album/artist rows (via `getAlbum`/`getArtist`);
     /// `None` for tracks (use `track.title`) or if resolution failed.
     pub label: Option<String>,
+}
+
+/// A recommendation-feedback vote — thumbs on an autoplay-picked track.
+/// Distinct from a library [`Rating`]: it's session-scoped taste signal
+/// (`/v1/recommend/feedback`), not a persisted like/dislike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackVote {
+    Up,
+    Down,
+}
+
+impl FeedbackVote {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// Tethered-drift autoplay: the toggle, provenance of autoplay-added tracks,
+/// optimistic thumb votes, and the refill in-flight/cooldown bookkeeping.
+/// All reducer-owned — the refill and feedback I/O ride effects.
+#[derive(Debug)]
+pub(crate) struct AutoplayState {
+    pub enabled: bool,
+    /// Autoplay parameters snapshot (from `[tui.autoplay]`); the reducer reads
+    /// `min_upcoming`, the effect layer reads the drift knobs off the same
+    /// config. Runtime editing lands in Phase 7.
+    pub cfg: crate::config::AutoplayConfig,
+    /// Track ids autoplay pushed. The seed builder's "skip algo-added" and the
+    /// feedback-thumb gate both key on this; grows monotonically per session
+    /// (a bounded, point-in-time-correct leak, mirroring the web).
+    pub recommended: HashSet<String>,
+    /// Optimistic thumb per track id (the server persists one per session).
+    pub votes: HashMap<String, FeedbackVote>,
+    /// A refill effect is in flight — the sole re-entrancy guard.
+    pub inflight: bool,
+    /// Tick before which no refill fires (post-refill / underdelivery cooldown).
+    pub cooldown_until: u64,
+    /// Bumped on every toggle; a refill completion whose generation no longer
+    /// matches is dropped (the "turned off mid-flight" guard).
+    pub generation: u64,
+    /// Per-process feedback session id — the fallback when no room session
+    /// anchor exists (direct/offline mode), mirroring the web's RUM session.
+    pub feedback_session: String,
+}
+
+impl AutoplayState {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            cfg: crate::config::AutoplayConfig::default(),
+            recommended: HashSet::new(),
+            votes: HashMap::new(),
+            inflight: false,
+            cooldown_until: 0,
+            generation: 0,
+            feedback_session: crate::sync::new_session_id(),
+        }
+    }
 }
 
 /// Transient one-line message above the now-playing bar.
@@ -560,6 +631,10 @@ pub(crate) struct App {
     /// Who the gateway says we are (`GET /v1/whoami`); `None` until the
     /// boot fetch lands (or in direct mode).
     pub whoami: Option<WhoamiInfo>,
+
+    // ── autoplay ──────────────────────────────────────────────────────
+    /// Tethered-drift autoplay: toggle, provenance, votes, refill state.
+    pub autoplay: AutoplayState,
 }
 
 impl App {
@@ -593,7 +668,16 @@ impl App {
             events_enabled: gateway,
             sync: RoomState::new(gateway),
             whoami: None,
+            autoplay: AutoplayState::new(),
         }
+    }
+
+    /// Apply the on-disk `[tui.autoplay]` config once at startup: seed the
+    /// drift params and the initial on/off state (runtime toggling isn't
+    /// persisted — that's Phase 7).
+    pub(crate) fn configure_autoplay(&mut self, cfg: &crate::config::AutoplayConfig) {
+        self.autoplay.cfg = cfg.clone();
+        self.autoplay.enabled = cfg.enabled;
     }
 
     /// Is a text input focused (keys should type, not act)?
