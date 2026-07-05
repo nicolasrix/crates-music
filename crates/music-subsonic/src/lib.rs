@@ -244,6 +244,18 @@ impl Client {
         wire::parse_get_artist(&body)
     }
 
+    /// The artist's most-played tracks (`getTopSongs`, keyed by artist
+    /// *name*, not id — that's the Subsonic contract). `count` caps the
+    /// result. Empty when the server has no play data for the artist.
+    pub async fn get_top_songs(&self, artist_name: &str, count: u32) -> Result<Vec<Track>> {
+        let params = vec![
+            ("artist", artist_name.to_string()),
+            ("count", count.to_string()),
+        ];
+        let body = self.fetch_text("getTopSongs", &params).await?;
+        wire::parse_top_songs(&body)
+    }
+
     /// Search across artists, albums and tracks (`search3`, ID3). `count`
     /// caps each bucket; `offset` pages within each bucket (Subsonic applies
     /// the same offset to all three). An empty `query` matches everything on
