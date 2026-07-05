@@ -122,6 +122,8 @@ the next track prefetched for near-gapless handoff.
 | `x` / `c` | queue: remove / clear upcoming |
 | `J` / `K` / `T` | queue: move row down / up / to top |
 | `o` | toggle audio output on this device (sync rooms) |
+| `A` | toggle autoplay (keep the queue topped up with recommendations) |
+| `f` / `F` | thumbs up / down on the now-playing autoplay pick |
 | `N` `s` `m` `R` `X` `x` | playlists: new · shuffle-play · suggest · rename · delete · remove-track |
 
 Notes:
@@ -167,6 +169,22 @@ Notes:
   `N` creates an empty playlist. Guests/non-owners get an honest
   "not permitted" status line on writes; the server is the enforcement
   point.
+- **Autoplay** (`A`, gateway mode — the web's "tethered drift"): when on,
+  the queue never drains. A poll every tick refills whenever fewer than
+  `min_upcoming` (default 5) tracks sit after the cursor, requesting the
+  shortfall from `/v1/recommend/from-seeds`. Seeds are weighted like the
+  web — the session anchor (3×) > user-picked queue items (2×) > earlier
+  scrobbles (1×), plus a decaying "travel frontier" over the last few
+  played tracks — and the leash (τ/λ) + MMR knobs ride the request so the
+  drift stays tethered to what you chose. With no such seeds it falls back
+  to `from-any` over the queue. An empty/degraded recommender arms a 30 s
+  cooldown so it can't hot-loop; a full delivery only pauses ~1.5 s.
+  Autoplay-added tracks are tracked, and `f`/`F` send a thumbs up/down
+  (`/v1/recommend/feedback`, session-scoped) — a no-op with a status line
+  on tracks you queued yourself; pressing the active thumb again clears it.
+  A `✦` badge in the now-playing bar shows autoplay is on, and the pick's
+  current vote shows next to the title. All drift params live in
+  `[tui.autoplay]` (Phase 7's Settings view will edit them in place).
 - **Sync room** (gateway mode): the TUI joins the account's `/v1/sync`
   room on start, so its queue is the *same* queue the web/PWA shows —
   reorder, skip, and play-from-here converge live across devices. Queue
@@ -238,8 +256,9 @@ crates/music-cli/
 │   └── tui/          # interactive mode (see "Interactive mode")
 │       ├── mod.rs        # event loop (crossterm EventStream + tokio select)
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
+│       ├── autoplay.rs   # pure tethered-drift seed weighting (port of autoplaySeeds.ts)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · library · playback · room · playlists
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
@@ -257,7 +276,7 @@ same code paths without spawning a subprocess.
 ## Config
 
 Loads from `~/.config/crates-music/config.toml` (XDG) by default;
-overridable via `--config <path>`. Two sections:
+overridable via `--config <path>`. Sections:
 
 ```toml
 [server]                    # for direct-to-Navidrome mode
@@ -269,6 +288,16 @@ password = "wonderland"
 url = "https://gateway.local:8443"
 # ca_cert_path = "~/.local/share/mkcert/rootCA.pem"  # trust the gateway's CA
 # insecure_tls = false                               # debug-only TLS bypass
+
+[tui.autoplay]              # tethered-drift autoplay (all optional; web defaults)
+# enabled = false          # start with autoplay on
+# min_upcoming = 5         # refill when fewer than this sit after the cursor
+# leash_tau = 0.28         # boundary leash radius τ / strength λ
+# leash_lambda = 16.0
+# frontier_weight = 0.15   # travel frontier base weight / decay / window
+# frontier_decay = 0.55
+# frontier_window = 3
+# mmr_lambda = 0.8         # server-side MMR relevance/novelty tradeoff
 ```
 
 There is **no** `bearer_token` field. Gateway auth is the OAuth 2.1
@@ -356,3 +385,9 @@ there); the audio thread and real rendering stay manual.
 - **Tracks mode is one page** — the library-browse "tracks" mode loads
   only the first `search3` page; deeper paging and the web's
   recent/most-played/random highlight sub-kinds are a follow-up.
+- **Autoplay provenance is by track id**, not the web's per-queue-item
+  id — a track that is both user-queued and autoplay-added is treated as
+  a pick (thumbs enabled, excluded from seeds). Negligible in practice;
+  the terminal client doesn't carry stable item ids the way the web does.
+- **Autoplay drift params are config-only** until Phase 7 adds the
+  Settings view; runtime `A` toggling isn't persisted back to disk.
