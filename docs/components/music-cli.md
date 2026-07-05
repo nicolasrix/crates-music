@@ -95,22 +95,25 @@ Running `crates-cli` with **no subcommand on a terminal** opens a
 full-screen interactive player (ratatui). On a pipe the same invocation
 prints help and exits 2, so scripts and agents never hang on it.
 
-Six sections (sidebar, keys `1`–`6` or `Tab`): **Library** (albums with
-a kind switcher, drill into an album), **Search** (the gateway's
-typo-tolerant `/v1/search`), **Queue** (the play queue), **Playlists**
-(gateway-owned playlist CRUD), **Stations** (natural-language prompts)
-and **Liked** (your ratings). Playback is local (rodio) through the same
-L3 audio cache as `crates-cli play`, with the next track prefetched for
-near-gapless handoff.
+Six sections (sidebar, keys `1`–`6` or `Tab`): **Library** (a browse
+list with three modes — albums / artists / tracks, cycled with `[`/`]`
+— that drills into album and artist detail panes), **Search** (the
+gateway's typo-tolerant `/v1/search`), **Queue** (the play queue),
+**Playlists** (gateway-owned playlist CRUD), **Stations**
+(natural-language prompts) and **Liked** (your ratings). Playback is
+local (rodio) through the same L3 audio cache as `crates-cli play`, with
+the next track prefetched for near-gapless handoff.
 
 | Key | Action |
 |---|---|
 | `q` / `ctrl-c` | quit · `?` help overlay |
 | `1..9`, `Tab` / `Shift-Tab` | switch section |
 | `j` `k` / `↓` `↑`, `g` / `G`, `ctrl-d` / `ctrl-u` | list navigation |
-| `h` / `l` | album-list kind (Library) · result bucket (Search) |
-| `Enter` | open album/playlist · play from here · jump (context) |
+| `[` / `]` | library browse mode: albums / artists / tracks |
+| `h` / `l` | album-list kind (Library, albums mode) · result bucket (Search) |
+| `Enter` | open album/artist/playlist · play from here · jump (context) |
 | `e` | enqueue track / album · `P` play next |
+| `S` | start a station from the open album / artist (replaces the queue) |
 | `a` | add the selected track to a playlist (picker overlay) |
 | `/` | search · `i` edit station prompt · `Esc` back/unfocus |
 | `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume |
@@ -137,6 +140,21 @@ Notes:
 - **Dislike auto-skip**: when the queue *advances onto* a track that is
   disliked (itself, its album, or its artist), it is skipped
   automatically — but explicitly activating a row always plays it.
+- **Library** modes (`[`/`]`): **albums** (with the `h`/`l` kind
+  switcher — newest / random / frequent / …), **artists** (`getArtists`,
+  `Enter` opens an artist), and **tracks** (the whole library's first
+  page via an empty `search3`; deeper paging is a follow-up). The
+  **artist detail** pane lists the artist's albums then their top songs
+  (`getArtist` + `getTopSongs`) as one selectable list — `Enter` opens
+  an album or plays from a top song, `e` enqueues, `S` starts an artist
+  station, `L`/`D`/`u` rate. The **album detail** pane appends a "you
+  might like" footer (`similar_albums` + `similar_artists`, hydrated to
+  names) as navigable rows, and `S` starts a station from the album
+  (`/v1/recommend/from-any` → replaces the queue). A degraded/warming
+  recommender just yields an empty footer, never an error.
+- **Liked** rows for albums/artists resolve their names
+  (`getAlbum`/`getArtist`) and are activatable — `Enter` opens the
+  album/artist detail pane; track rows play the liked list from there.
 - **Playlists** (gateway mode): the section browses gateway-owned
   playlists (`/v1/playlists/*`, private per-user; shared ones are
   read-only). List → detail → suggestions panes. In detail: `Enter`
@@ -210,8 +228,8 @@ crates/music-cli/
 │   ├── lib.rs        # re-exports for tests
 │   ├── app.rs        # subcommand dispatcher; client/cache constructors
 │   ├── cli.rs        # clap definitions
-│   ├── api.rs        # typed /v1 fetchers (ratings, recommend, search) shared
-│   │                 #   by classic commands and the TUI
+│   ├── api/          # typed /v1 fetchers shared by classic commands + TUI
+│   │                 #   mod (ratings/events/search/whoami/sync) · recommend · playlists
 │   ├── config.rs     # ~/.config/crates-music/config.toml loader
 │   ├── format.rs     # plain-text table formatters
 │   ├── gateway.rs    # gateway HTTP plumbing (TLS, endpoints, ws URLs)
@@ -221,7 +239,7 @@ crates/music-cli/
 │       ├── mod.rs        # event loop (crossterm EventStream + tokio select)
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · playback · room · playlists
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
@@ -321,7 +339,7 @@ The old static `[gateway].bearer_token` shared secret has been
   parsing to "no subcommand".
 - `tests/config.rs` — config file parsing edge cases and defaults.
 - `tests/format.rs` — table formatter output.
-- Inline unit tests — `api.rs` DTO parsing, `gateway.rs` URL helpers,
+- Inline unit tests — `api/` DTO parsing, `gateway.rs` URL helpers,
   and the whole TUI core: reducer state transitions (stale-generation
   drops, prefetch handoff, rating rollback), keymap dispatch
   (input-focus swallowing), the input field, and a `TestBackend`
@@ -335,5 +353,6 @@ there); the audio thread and real rendering stay manual.
 
 - **No completions yet.** `clap` supports `clap_complete` for shell
   completions; we just haven't wired it.
-- **TUI has no artist view** — Enter on a search-result artist just
-  points you at their albums.
+- **Tracks mode is one page** — the library-browse "tracks" mode loads
+  only the first `search3` page; deeper paging and the web's
+  recent/most-played/random highlight sub-kinds are a follow-up.
