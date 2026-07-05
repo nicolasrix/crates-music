@@ -95,22 +95,23 @@ Running `crates-cli` with **no subcommand on a terminal** opens a
 full-screen interactive player (ratatui). On a pipe the same invocation
 prints help and exits 2, so scripts and agents never hang on it.
 
-Five sections (sidebar, keys `1`–`5` or `Tab`): **Library** (albums with
+Six sections (sidebar, keys `1`–`6` or `Tab`): **Library** (albums with
 a kind switcher, drill into an album), **Search** (the gateway's
-typo-tolerant `/v1/search`), **Queue** (the play queue),
-**Stations** (natural-language prompts) and **Liked** (your ratings).
-Playback is local (rodio) through the same L3 audio cache as
-`crates-cli play`, with the next track prefetched for near-gapless
-handoff.
+typo-tolerant `/v1/search`), **Queue** (the play queue), **Playlists**
+(gateway-owned playlist CRUD), **Stations** (natural-language prompts)
+and **Liked** (your ratings). Playback is local (rodio) through the same
+L3 audio cache as `crates-cli play`, with the next track prefetched for
+near-gapless handoff.
 
 | Key | Action |
 |---|---|
 | `q` / `ctrl-c` | quit · `?` help overlay |
-| `1..5`, `Tab` / `Shift-Tab` | switch section |
+| `1..9`, `Tab` / `Shift-Tab` | switch section |
 | `j` `k` / `↓` `↑`, `g` / `G`, `ctrl-d` / `ctrl-u` | list navigation |
 | `h` / `l` | album-list kind (Library) · result bucket (Search) |
-| `Enter` | open album · play from here · jump (context) |
+| `Enter` | open album/playlist · play from here · jump (context) |
 | `e` | enqueue track / album · `P` play next |
+| `a` | add the selected track to a playlist (picker overlay) |
 | `/` | search · `i` edit station prompt · `Esc` back/unfocus |
 | `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume |
 | `L` / `D` / `u` | like / dislike / unrate selection |
@@ -118,6 +119,7 @@ handoff.
 | `x` / `c` | queue: remove / clear upcoming |
 | `J` / `K` / `T` | queue: move row down / up / to top |
 | `o` | toggle audio output on this device (sync rooms) |
+| `N` `s` `m` `R` `X` `x` | playlists: new · shuffle-play · suggest · rename · delete · remove-track |
 
 Notes:
 
@@ -135,6 +137,18 @@ Notes:
 - **Dislike auto-skip**: when the queue *advances onto* a track that is
   disliked (itself, its album, or its artist), it is skipped
   automatically — but explicitly activating a row always plays it.
+- **Playlists** (gateway mode): the section browses gateway-owned
+  playlists (`/v1/playlists/*`, private per-user; shared ones are
+  read-only). List → detail → suggestions panes. In detail: `Enter`
+  plays from the row, `s` shuffle-plays, `e` enqueues, `x` removes the
+  selected track (optimistic; a failed write resyncs), `m` fetches
+  "suggest more" tracks (`/v1/recommend/from-seeds` over the
+  membership), `R` renames, `X` deletes (press twice to confirm). `a`
+  on any track row (in *any* section, including the queue) opens the
+  add-to-playlist picker — choose an owned playlist or create a new one.
+  `N` creates an empty playlist. Guests/non-owners get an honest
+  "not permitted" status line on writes; the server is the enforcement
+  point.
 - **Sync room** (gateway mode): the TUI joins the account's `/v1/sync`
   room on start, so its queue is the *same* queue the web/PWA shows —
   reorder, skip, and play-from-here converge live across devices. Queue
@@ -173,6 +187,15 @@ crates-cli cache evict                               # force fit-to-budget
 crates-cli sync state                                # GET /v1/sync/snapshot, print as JSON
 crates-cli sync push <track_id> [<track_id>...]      # append to the synced queue
 crates-cli sync watch                                # WebSocket sub; print every frame as JSON
+
+crates-cli playlist list                             # your playlists (+ shared), newest first
+crates-cli playlist show <id>                        # playlist tracks (hydrated via getSong)
+crates-cli playlist create <name>                    # create empty; prints the new id
+crates-cli playlist rename <id> <name>               # rename (owner-only)
+crates-cli playlist delete <id>                      # delete (owner-only)
+crates-cli playlist add <id> <track_id>...           # append tracks
+crates-cli playlist remove <id> <track_id>           # drop every occurrence of a track
+crates-cli playlist play <id> [--shuffle]            # stream + play locally, gaplessly
 ```
 
 Subcommands are added via `clap` with `#[derive(Parser)]`. The
@@ -192,15 +215,17 @@ crates/music-cli/
 │   ├── config.rs     # ~/.config/crates-music/config.toml loader
 │   ├── format.rs     # plain-text table formatters
 │   ├── gateway.rs    # gateway HTTP plumbing (TLS, endpoints, ws URLs)
-│   ├── ratings.rs / recommend.rs / sync.rs   # printing wrappers per command
+│   ├── ratings.rs / recommend.rs / playlist.rs / sync.rs  # printing wrappers per command
 │   ├── auth/         # OAuth device flow + token store
 │   └── tui/          # interactive mode (see "Interactive mode")
 │       ├── mod.rs        # event loop (crossterm EventStream + tokio select)
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
-│       ├── update.rs     # pure reducer: (App, Msg) → Vec<Effect>
+│       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
+│       │                 #   mod (dispatch) · browse · playback · room · playlists
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
+│       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
-│       ├── views/        # library · search · queue · stations · liked · help
+│       ├── views/        # library · search · queue · playlists · stations · liked · help
 │       └── widgets/      # now-playing bar, sidebar, input field
 └── tests/            # clap parsing, config, formatters
 ```
