@@ -272,6 +272,68 @@ fn parse_search_body(body: &str) -> Result<SearchResult3, ApiError> {
         .map_err(|e| anyhow!("parsing search response: {e}").into())
 }
 
+/// Identity of the calling principal, from `GET /v1/whoami` — drives
+/// role-gated UI (guests can't write, only admins see diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WhoamiInfo {
+    pub user_id: i64,
+    /// `"admin"` / `"user"` / `"guest"`.
+    pub role: String,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+}
+
+impl WhoamiInfo {
+    /// The name to show in a UI corner: display name, else username,
+    /// else the numeric principal.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.display_name
+            .clone()
+            .or_else(|| self.username.clone())
+            .unwrap_or_else(|| format!("user #{}", self.user_id))
+    }
+}
+
+/// `GET /v1/whoami` — who the gateway thinks we are.
+pub async fn whoami(config: &Config) -> Result<WhoamiInfo, ApiError> {
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/whoami");
+    let info: WhoamiInfo = http_client(gw)?
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .context("requesting whoami")?
+        .error_for_status()
+        .context("whoami returned error status")?
+        .json()
+        .await
+        .context("parsing whoami")?;
+    Ok(info)
+}
+
+/// `GET /v1/sync/snapshot` — the room's full sync state, for converging
+/// after a missed WS frame without tearing the connection down.
+pub async fn sync_snapshot(config: &Config) -> Result<music_sync::SyncState, ApiError> {
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/sync/snapshot");
+    let state: music_sync::SyncState = http_client(gw)?
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .context("requesting sync snapshot")?
+        .error_for_status()
+        .context("sync snapshot returned error status")?
+        .json()
+        .await
+        .context("parsing sync snapshot")?;
+    Ok(state)
+}
+
 /// Resolve `ids` to tracks (concurrently, order preserved). Ids that fail to
 /// resolve come back separately so a recommender ranking is never silently
 /// truncated.

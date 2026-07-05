@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use music_core::TrackId;
+use music_sync::SyncOp;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::api::{self, ApiError};
@@ -14,7 +15,7 @@ use crate::config::Config;
 use music_cache::AudioCache;
 use music_subsonic::Client;
 
-use super::msg::{Effect, Msg, StationError};
+use super::msg::{Effect, Msg, StationError, SyncEvent};
 use super::state::{LikedEntry, Rating};
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
@@ -24,6 +25,9 @@ pub(crate) struct Ctx {
     client: Arc<Mutex<ClientSlot>>,
     pub cache: Arc<AudioCache>,
     pub msg_tx: UnboundedSender<Msg>,
+    /// Sink into the sync WS task for outbound ops; `None` in direct mode
+    /// (no gateway, so no sync connection was spawned).
+    sync_ops: Option<UnboundedSender<SyncOp>>,
 }
 
 impl std::fmt::Debug for Ctx {
@@ -49,12 +53,14 @@ impl Ctx {
         bearer: Option<String>,
         cache: Arc<AudioCache>,
         msg_tx: UnboundedSender<Msg>,
+        sync_ops: Option<UnboundedSender<SyncOp>>,
     ) -> Self {
         Self {
             config,
             client: Arc::new(Mutex::new(ClientSlot { bearer, client })),
             cache,
             msg_tx,
+            sync_ops,
         }
     }
 
@@ -226,6 +232,46 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
                 .await
                 .map_err(|e| e.to_string());
             Some(Msg::EventsFlushed { events, result })
+        }
+        Effect::SyncSubmit { op } => {
+            // Hand the op to the WS task. If the channel is gone (task
+            // exited / direct mode), the op is lost — the reducer already
+            // runs the queue locally when offline, and every outcome
+            // otherwise comes back as a `Sync` frame, so there's no Msg
+            // to emit here (the third silent-effect exception).
+            if let Some(tx) = &ctx.sync_ops {
+                if tx.send(op).is_err() {
+                    tracing::debug!("sync op dropped — WS task gone");
+                }
+            } else {
+                tracing::debug!("sync op with no WS task (direct mode)");
+            }
+            None
+        }
+        Effect::SyncResync => {
+            let ev = match api::sync_snapshot(&ctx.config).await {
+                Ok(state) => SyncEvent::Frame(music_sync::ServerMessage::Snapshot { state }),
+                Err(e) => SyncEvent::Down {
+                    reason: format!("resync failed: {e}"),
+                },
+            };
+            Some(Msg::Sync(ev))
+        }
+        Effect::LoadWhoami => {
+            let result = api::whoami(&ctx.config).await.map_err(|e| e.to_string());
+            Some(Msg::WhoamiLoaded { result })
+        }
+        Effect::HydrateTracks { ids } => {
+            let result = async {
+                let client = ctx.subsonic().await?;
+                let track_ids: Vec<TrackId> =
+                    ids.iter().map(|id| TrackId::from(id.clone())).collect();
+                let (tracks, _failed) = api::resolve_tracks(&client, &track_ids).await;
+                Ok::<_, anyhow::Error>(tracks)
+            }
+            .await
+            .map_err(|e| e.to_string());
+            Some(Msg::TracksHydrated { ids, result })
         }
     }
 }

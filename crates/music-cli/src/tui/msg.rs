@@ -3,8 +3,9 @@
 //! `Effect` is everything the reducer can ask the runtime to do.
 //!
 //! The invariant that keeps the loop simple: **every spawned `Effect`
-//! completes by sending exactly one `Msg`** back over the channel (the two
-//! deliberately-silent exceptions: audio prefetch and scrobble). Racy
+//! completes by sending exactly one `Msg`** back over the channel (the three
+//! deliberately-silent exceptions: audio prefetch, scrobble, and sync-op
+//! submit — see each variant's doc). Racy
 //! fetches (albums / search / station) carry a generation counter stamped by
 //! the reducer so a stale response can never overwrite newer state.
 
@@ -12,6 +13,9 @@ use bytes::Bytes;
 use music_core::{AlbumId, Track};
 use music_player::PlayerEvent;
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
+use music_sync::{ServerMessage, SyncOp};
+
+use crate::api::WhoamiInfo;
 
 use super::signal::PendingEvent;
 use super::state::{LikedEntry, Rating, Section};
@@ -36,6 +40,19 @@ pub(crate) enum InputMsg {
 pub(crate) enum StationError {
     Unavailable,
     Other(String),
+}
+
+/// What the sync WS task (or an HTTP resync) reports back to the reducer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncEvent {
+    /// A server frame arrived (`snapshot` / `applied` / `op_error`). The
+    /// first frame after every (re)connect is a `Snapshot`, which is what
+    /// flips the reducer online.
+    Frame(ServerMessage),
+    /// The connection is down (failed to connect, or dropped). The task
+    /// keeps retrying with backoff; this just tells the reducer to run
+    /// the queue locally in the meantime.
+    Down { reason: String },
 }
 
 #[derive(Debug)]
@@ -84,7 +101,20 @@ pub(crate) enum Msg {
     /// r — recommend-next seeded from the now-playing track, enqueued.
     RecommendFromNowPlaying,
     QueueRemoveSelected,
+    /// c — clear *upcoming* tracks, preserving the now-playing one
+    /// (mirrors the web queue page; a full wipe was never what "clear
+    /// the queue" meant mid-listen).
     QueueClear,
+    /// J / K — move the selected queue row down / up one slot.
+    QueueMoveDown,
+    QueueMoveUp,
+    /// T — move the selected queue row to the top.
+    QueueMoveTop,
+    /// P — play the selection next: in the queue view, moves the row to
+    /// right after the cursor; in track lists, enqueues it there.
+    PlayNext,
+    /// o — toggle "play audio on this device" (sync rooms only).
+    ToggleOutput,
 
     // ── effect completions ────────────────────────────────────────────
     AlbumsLoaded {
@@ -139,6 +169,19 @@ pub(crate) enum Msg {
     EventsFlushed {
         events: Vec<PendingEvent>,
         result: Result<(), String>,
+    },
+    /// A sync WS frame or connection-state change (see [`SyncEvent`]).
+    Sync(SyncEvent),
+    /// `GET /v1/whoami` completed (boot-time identity fetch).
+    WhoamiLoaded {
+        result: Result<WhoamiInfo, String>,
+    },
+    /// Track metadata resolved for sync-queue hydration. `ids` echoes the
+    /// request so failures can clear the in-flight set (retry happens on
+    /// the next queue change, never in a hot loop).
+    TracksHydrated {
+        ids: Vec<String>,
+        result: Result<Vec<Track>, String>,
     },
 }
 
@@ -195,5 +238,23 @@ pub(crate) enum Effect {
     /// Batched `POST /v1/events` upload; completes as [`Msg::EventsFlushed`].
     FlushEvents {
         events: Vec<PendingEvent>,
+    },
+    /// Send one op up the sync WS. The third deliberate exception to the
+    /// one-`Msg`-per-effect invariant: it's a channel send into the WS
+    /// task (like the `Player` command sends), and every outcome already
+    /// comes back through the socket — `Applied`/`OpError` frames, or a
+    /// `SyncEvent::Down` if the connection is gone.
+    SyncSubmit {
+        op: SyncOp,
+    },
+    /// `GET /v1/sync/snapshot` to re-converge after a missed WS frame;
+    /// completes as [`Msg::Sync`] (a `Snapshot` frame, or `Down` on error).
+    SyncResync,
+    /// `GET /v1/whoami`; completes as [`Msg::WhoamiLoaded`].
+    LoadWhoami,
+    /// Resolve track metadata for sync-queue items we didn't push
+    /// ourselves; completes as [`Msg::TracksHydrated`].
+    HydrateTracks {
+        ids: Vec<String>,
     },
 }

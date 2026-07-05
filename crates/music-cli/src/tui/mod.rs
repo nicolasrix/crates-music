@@ -13,6 +13,7 @@ mod msg;
 mod render;
 mod signal;
 mod state;
+mod sync_ws;
 mod terminal;
 mod theme;
 mod update;
@@ -68,7 +69,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         }
     };
 
-    let ctx = Ctx::new(Arc::clone(&config), client, bearer, cache, msg_tx.clone());
+    // The sync-room WS task runs for the whole session when a gateway is
+    // configured: it owns the connection, reconnects on its own, and feeds
+    // frames into the msg channel. In direct mode there's no room to join.
+    let sync_ops = config
+        .gateway
+        .is_some()
+        .then(|| sync_ws::spawn(Arc::clone(&config), msg_tx.clone()));
+
+    let ctx = Ctx::new(
+        Arc::clone(&config),
+        client,
+        bearer,
+        cache,
+        msg_tx.clone(),
+        sync_ops,
+    );
 
     // The terminal session lives in this block so its guard drops (and the
     // terminal is restored) before the final event flush below — a slow
@@ -83,6 +99,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // Kick off the initial library load.
         for effect in update::update(&mut app, Msg::GoSection(Section::Library)) {
             effects::spawn(effect, &ctx);
+        }
+        // Boot-time identity fetch (role-gated UI). Cosmetic; the server
+        // stays the enforcement point. Skipped in direct mode.
+        if config.gateway.is_some() {
+            effects::spawn(msg::Effect::LoadWhoami, &ctx);
         }
 
         let mut events = EventStream::new();

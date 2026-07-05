@@ -42,14 +42,21 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
 fn draw_header(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &Theme) {
     let crumb = breadcrumb(app);
     let left = format!(" {} crates", symbols::SECTION_MARKER);
-    let pad = usize::from(area.width)
-        .saturating_sub(left.chars().count() + crumb.chars().count() + 1);
-    let line = Line::from(vec![
+    // Right side: an optional sync indicator, then the breadcrumb.
+    let sync = app.sync.indicator();
+    let sync_text = sync.map(|(t, _)| format!("{t}   ")).unwrap_or_default();
+    let right_len = sync_text.chars().count() + crumb.chars().count();
+    let pad = usize::from(area.width).saturating_sub(left.chars().count() + right_len + 1);
+    let mut spans = vec![
         Span::styled(left, theme.accent),
         Span::raw(" ".repeat(pad)),
-        Span::styled(crumb, theme.dim),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    if let Some((text, warn)) = sync {
+        let style = if warn { theme.error } else { theme.accent };
+        spans.push(Span::styled(format!("{text}   "), style));
+    }
+    spans.push(Span::styled(crumb, theme.dim));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn breadcrumb(app: &App) -> String {

@@ -2,14 +2,17 @@
 //! lives here — no terminal, no HTTP, so the whole tree is constructible in
 //! unit tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bytes::Bytes;
 use music_core::{Album, Track};
 use music_player::{PlayQueue, PlaybackSnapshot, Player, QueuedTrack};
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
+use music_sync::SyncState;
 use ratatui::widgets::TableState;
+
+use crate::api::WhoamiInfo;
 
 use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
@@ -52,6 +55,94 @@ impl Section {
 pub(crate) enum Overlay {
     None,
     Help,
+}
+
+/// Where the queue's source of truth lives right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncPhase {
+    /// No gateway configured — the queue is local, permanently.
+    Disabled,
+    /// Gateway configured but the sync WS isn't delivering (connecting,
+    /// or dropped). The queue operates locally; a reconnect adopts the
+    /// server snapshot.
+    Offline,
+    /// Live room replica: queue gestures become ops over the WS and the
+    /// local queue is a projection of the last server-confirmed state.
+    Online,
+}
+
+/// The sync-room replica plus the client-side follow bookkeeping. Mirrors
+/// the web's `SyncContext` + `PlayerContext` refs: the room state is what
+/// the server last confirmed (echo-driven — no optimistic queue apply),
+/// and the small `Option<String>` markers reproduce the web's auto-skip /
+/// direct-pick semantics.
+#[derive(Debug)]
+pub(crate) struct RoomState {
+    pub phase: SyncPhase,
+    /// Last server-confirmed state; meaningful while `phase == Online`.
+    pub room: SyncState,
+    /// Track metadata by track id — the room queue stores only ids.
+    pub meta: HashMap<String, QueuedTrack>,
+    /// Metadata fetches in flight (dedups hydration requests).
+    pub hydrating: HashSet<String>,
+    /// "Play audio on this device." Starts off so joining a room that is
+    /// mid-playback doesn't blast audio; picking a track locally enables
+    /// it (that gesture *means* "play here"), `o` toggles it.
+    pub output_on: bool,
+    /// Last cursor track id the auto-skip classifier saw — dislike
+    /// auto-skip fires only when the cursor lands on a *new* track.
+    pub last_classified: Option<String>,
+    /// Track id the user explicitly picked — exempt from auto-skip once.
+    pub direct_play: Option<String>,
+    /// +1 normally, -1 while stepping backward — the direction auto-skip
+    /// walks to find a playable track.
+    pub advance_dir: i8,
+}
+
+impl RoomState {
+    pub(crate) fn new(gateway: bool) -> Self {
+        Self {
+            phase: if gateway {
+                SyncPhase::Offline
+            } else {
+                SyncPhase::Disabled
+            },
+            room: SyncState::new(),
+            meta: HashMap::new(),
+            hydrating: HashSet::new(),
+            output_on: false,
+            last_classified: None,
+            direct_play: None,
+            advance_dir: 1,
+        }
+    }
+
+    pub(crate) fn online(&self) -> bool {
+        self.phase == SyncPhase::Online
+    }
+
+    /// Short header indicator + whether it's a warning, or `None` in
+    /// direct mode (no room to show state for).
+    pub(crate) fn indicator(&self) -> Option<(&'static str, bool)> {
+        match self.phase {
+            SyncPhase::Disabled => None,
+            SyncPhase::Offline => Some(("⚠ sync offline", true)),
+            SyncPhase::Online if self.output_on => Some(("◉ synced", false)),
+            // Online but not this device's audio — a silent remote.
+            SyncPhase::Online => Some(("◉ synced · silent", false)),
+        }
+    }
+
+    /// Track id under the room's now-playing cursor, if any.
+    pub(crate) fn cursor_track_id(&self) -> Option<&str> {
+        let i = self.room.playback.now_playing_index?;
+        self.room
+            .playback
+            .queue
+            .items
+            .get(i)
+            .map(|it| it.track_id.as_str())
+    }
 }
 
 /// Every remote-data slot renders all four of these states.
@@ -253,10 +344,21 @@ pub(crate) struct App {
     /// `/v1/events` is gateway-only; direct-to-Navidrome mode disables the
     /// outbox entirely (scrobbles still go out — they're Subsonic).
     pub events_enabled: bool,
+
+    // ── sync room ─────────────────────────────────────────────────────
+    /// Sync-room replica + follow bookkeeping. When online, `queue` above
+    /// is a *projection* of `sync.room` and every queue gesture becomes a
+    /// submitted op; when offline/disabled, `queue` is the truth.
+    pub sync: RoomState,
+    /// Who the gateway says we are (`GET /v1/whoami`); `None` until the
+    /// boot fetch lands (or in direct mode).
+    pub whoami: Option<WhoamiInfo>,
 }
 
 impl App {
-    pub(crate) fn new(player: Option<Player>, no_audio_device: bool, events_enabled: bool) -> Self {
+    /// `gateway` = a `[gateway]` block is configured — it enables both the
+    /// `/v1/events` outbox and the sync-room integration.
+    pub(crate) fn new(player: Option<Player>, no_audio_device: bool, gateway: bool) -> Self {
         Self {
             section: Section::Library,
             overlay: Overlay::None,
@@ -278,7 +380,9 @@ impl App {
             signal: None,
             events_outbox: Vec::new(),
             events_inflight: false,
-            events_enabled,
+            events_enabled: gateway,
+            sync: RoomState::new(gateway),
+            whoami: None,
         }
     }
 
@@ -310,6 +414,18 @@ impl App {
     pub(crate) fn player_stop(&self) {
         if let Some(p) = &self.player {
             p.stop();
+        }
+    }
+
+    pub(crate) fn player_resume(&self) {
+        if let Some(p) = &self.player {
+            p.resume();
+        }
+    }
+
+    pub(crate) fn player_pause(&self) {
+        if let Some(p) = &self.player {
+            p.pause();
         }
     }
 }

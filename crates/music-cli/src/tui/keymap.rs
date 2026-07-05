@@ -28,7 +28,11 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("- / =", "volume down / up"),
     ("L / D / u", "like / dislike / unrate"),
     ("r", "recommend from now playing → queue"),
-    ("x / c", "queue: remove / clear"),
+    ("P", "play next (queue: move after current)"),
+    ("x / c", "queue: remove / clear upcoming"),
+    ("J / K", "queue: move row down / up"),
+    ("T", "queue: move row to top"),
+    ("o", "toggle audio output on this device (sync)"),
 ];
 
 pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
@@ -104,10 +108,18 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('D') => Some(Msg::Rate(Some(Rating::Dislike))),
         KeyCode::Char('u') => Some(Msg::Rate(None)),
         KeyCode::Char('r') => Some(Msg::RecommendFromNowPlaying),
+        // Play-next works on any track row (moves within the queue view).
+        KeyCode::Char('P') => Some(Msg::PlayNext),
+        // Output toggle only matters with a live sync room, but it's
+        // harmless (and self-explaining) elsewhere.
+        KeyCode::Char('o') => Some(Msg::ToggleOutput),
         // Queue edits only bind inside the queue view — 'x'/'c' are too
-        // destructive to be global.
+        // destructive to be global, and J/K/T would shadow navigation.
         KeyCode::Char('x') if app.section == Section::Queue => Some(Msg::QueueRemoveSelected),
         KeyCode::Char('c') if app.section == Section::Queue => Some(Msg::QueueClear),
+        KeyCode::Char('J') if app.section == Section::Queue => Some(Msg::QueueMoveDown),
+        KeyCode::Char('K') if app.section == Section::Queue => Some(Msg::QueueMoveUp),
+        KeyCode::Char('T') if app.section == Section::Queue => Some(Msg::QueueMoveTop),
         _ => None,
     }
 }

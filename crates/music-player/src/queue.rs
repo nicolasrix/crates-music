@@ -130,6 +130,40 @@ impl PlayQueue {
         }
     }
 
+    /// Overwrite items *and* cursor in one step, with no play-from-here
+    /// implication — the projection writer for callers that mirror an
+    /// external queue (the TUI's sync-room replica) into this local model.
+    /// Unlike [`Self::replace`], `cursor: None` with a non-empty queue is
+    /// representable (a shared queue can have no now-playing). An
+    /// out-of-range cursor is treated as `None`.
+    pub fn set_items(&mut self, items: Vec<QueuedTrack>, cursor: Option<usize>) {
+        self.items = items;
+        self.current = cursor.filter(|i| *i < self.items.len());
+    }
+
+    /// Move the item at `from` so it ends up at index `to` (both into the
+    /// current item list; `to` is clamped, out-of-range `from` is a no-op).
+    /// The cursor follows the *track it was on*, mirroring the sync
+    /// protocol's `Reorder` semantics so local and shared queues reorder
+    /// identically.
+    pub fn move_item(&mut self, from: usize, to: usize) {
+        if from >= self.items.len() {
+            return;
+        }
+        let cursor_before = self.current;
+        let item = self.items.remove(from);
+        let target = to.min(self.items.len());
+        self.items.insert(target, item);
+        self.current = cursor_before.map(|c| {
+            if c == from {
+                target
+            } else {
+                let after_remove = if from < c { c - 1 } else { c };
+                if target <= after_remove { after_remove + 1 } else { after_remove }
+            }
+        });
+    }
+
     /// Point the cursor at `index`. Out-of-range returns `None` and leaves
     /// the cursor unchanged.
     pub fn jump(&mut self, index: usize) -> Option<&QueuedTrack> {
@@ -349,6 +383,59 @@ mod tests {
         assert_eq!(q.next_up().unwrap().id, "b");
         q.advance();
         assert!(q.next_up().is_none());
+    }
+
+    #[test]
+    fn set_items_allows_cursorless_nonempty_queue() {
+        let mut q = PlayQueue::new();
+        q.set_items(tracks(&["a", "b"]), None);
+        assert_eq!(q.len(), 2);
+        assert!(q.current().is_none());
+        // in-range cursor sticks, out-of-range is treated as None
+        q.set_items(tracks(&["a", "b"]), Some(1));
+        assert_eq!(q.current().unwrap().id, "b");
+        q.set_items(tracks(&["a"]), Some(5));
+        assert!(q.current().is_none());
+    }
+
+    #[test]
+    fn move_item_moves_and_cursor_follows_its_track() {
+        let mut q = PlayQueue::new();
+        q.replace(tracks(&["a", "b", "c"]), 1);
+        // moving the cursor's own item carries the cursor along
+        q.move_item(1, 0);
+        let ids: Vec<_> = q.items().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "c"]);
+        assert_eq!(q.current().unwrap().id, "b");
+        assert_eq!(q.current_index(), Some(0));
+    }
+
+    #[test]
+    fn move_item_around_the_cursor_keeps_it_on_its_track() {
+        let mut q = PlayQueue::new();
+        q.replace(tracks(&["a", "b", "c"]), 1);
+        // moving a later item to the front pushes the cursor right
+        q.move_item(2, 0);
+        let ids: Vec<_> = q.items().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["c", "a", "b"]);
+        assert_eq!(q.current().unwrap().id, "b");
+        // moving an earlier item past the cursor pulls it left
+        q.move_item(0, 2);
+        let ids: Vec<_> = q.items().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(q.current().unwrap().id, "b");
+    }
+
+    #[test]
+    fn move_item_clamps_target_and_ignores_bad_from() {
+        let mut q = PlayQueue::new();
+        q.replace(tracks(&["a", "b"]), 0);
+        q.move_item(0, 9); // clamped to the end
+        let ids: Vec<_> = q.items().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a"]);
+        assert_eq!(q.current().unwrap().id, "a");
+        q.move_item(7, 0); // no-op
+        assert_eq!(q.len(), 2);
     }
 
     #[test]

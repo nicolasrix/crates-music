@@ -97,7 +97,7 @@ prints help and exits 2, so scripts and agents never hang on it.
 
 Five sections (sidebar, keys `1`–`5` or `Tab`): **Library** (albums with
 a kind switcher, drill into an album), **Search** (the gateway's
-typo-tolerant `/v1/search`), **Queue** (the local play queue),
+typo-tolerant `/v1/search`), **Queue** (the play queue),
 **Stations** (natural-language prompts) and **Liked** (your ratings).
 Playback is local (rodio) through the same L3 audio cache as
 `crates-cli play`, with the next track prefetched for near-gapless
@@ -110,12 +110,14 @@ handoff.
 | `j` `k` / `↓` `↑`, `g` / `G`, `ctrl-d` / `ctrl-u` | list navigation |
 | `h` / `l` | album-list kind (Library) · result bucket (Search) |
 | `Enter` | open album · play from here · jump (context) |
-| `e` | enqueue track / album |
+| `e` | enqueue track / album · `P` play next |
 | `/` | search · `i` edit station prompt · `Esc` back/unfocus |
 | `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume |
 | `L` / `D` / `u` | like / dislike / unrate selection |
 | `r` | recommend from now playing → enqueue |
-| `x` / `c` | queue: remove / clear |
+| `x` / `c` | queue: remove / clear upcoming |
+| `J` / `K` / `T` | queue: move row down / up / to top |
+| `o` | toggle audio output on this device (sync rooms) |
 
 Notes:
 
@@ -133,6 +135,20 @@ Notes:
 - **Dislike auto-skip**: when the queue *advances onto* a track that is
   disliked (itself, its album, or its artist), it is skipped
   automatically — but explicitly activating a row always plays it.
+- **Sync room** (gateway mode): the TUI joins the account's `/v1/sync`
+  room on start, so its queue is the *same* queue the web/PWA shows —
+  reorder, skip, and play-from-here converge live across devices. Queue
+  gestures submit ops over the WebSocket (echo-driven, mirroring the
+  web); the local queue is a projection of the server-confirmed state.
+  A header badge shows the state: `◉ synced`, `◉ synced · silent` (this
+  device is a remote making no sound — toggle with `o`), or `⚠ sync
+  offline`. **Degraded mode**: if the WS drops, the queue keeps working
+  locally and the task reconnects with backoff (capped at 30 s),
+  adopting the server snapshot on reconnect — better than the web, which
+  has no reconnect. Picking a track on this device turns its audio on;
+  `o` toggles "play audio on this device" so a terminal can drive the
+  room as a silent remote. In direct-Subsonic mode (no `[gateway]`)
+  there's no room and the queue is purely local.
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.

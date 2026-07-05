@@ -316,14 +316,26 @@ fn queue_remove_of_playing_track_starts_next() {
 }
 
 #[test]
-fn queue_clear_resets_transients() {
-    let mut a = playing_app(&["t1", "t2"], 0);
+fn queue_clear_upcoming_keeps_now_playing() {
+    // 'c' is "clear upcoming", not "wipe the queue" — the now-playing
+    // track and its playback survive; the prefetched next-up is dropped.
+    let mut a = playing_app(&["t1", "t2", "t3"], 0);
     a.prefetched = Some(("t2".into(), Bytes::from_static(b"yy")));
-    a.pending_load = Some(0);
+    update(&mut a, Msg::QueueClear);
+    assert_eq!(a.queue.len(), 1);
+    assert_eq!(a.queue.current().unwrap().id, "t1");
+    assert!(a.prefetched.is_none());
+}
+
+#[test]
+fn queue_clear_upcoming_with_no_current_empties() {
+    // Nothing playing (finished queue): clear-upcoming empties it.
+    let mut a = playing_app(&["t1", "t2"], 0);
+    update(&mut a, Msg::Player(PlayerEvent::TrackEnded));
+    update(&mut a, Msg::Player(PlayerEvent::TrackEnded));
+    assert!(a.queue.current().is_none());
     update(&mut a, Msg::QueueClear);
     assert!(a.queue.is_empty());
-    assert!(a.prefetched.is_none());
-    assert!(a.pending_load.is_none());
 }
 
 #[test]
