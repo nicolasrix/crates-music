@@ -9,7 +9,7 @@ use music_core::{AlbumId, ArtistId, TrackId};
 use music_player::{play_queue_blocking, read_cached, resolve_source};
 use music_subsonic::{Client, Credentials, SearchResult3};
 
-use crate::cli::{CacheAction, Cli, Command, RecommendAction, SyncAction};
+use crate::cli::{CacheAction, Cli, Command, PlaylistAction, RecommendAction, SyncAction};
 use crate::config::{Config, resolve_cache_root};
 use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
@@ -121,6 +121,26 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
                 CacheAction::Evict => run_cache_evict(&cache).await?,
             }
         }
+        Command::Playlist { action } => match action {
+            PlaylistAction::List => crate::playlist::run_list(&config).await?,
+            PlaylistAction::Show { id } => crate::playlist::run_show(&config, &client, &id).await?,
+            PlaylistAction::Create { name } => crate::playlist::run_create(&config, &name).await?,
+            PlaylistAction::Rename { id, name } => {
+                crate::playlist::run_rename(&config, &id, &name).await?;
+            }
+            PlaylistAction::Delete { id } => crate::playlist::run_delete(&config, &id).await?,
+            PlaylistAction::Add { id, track_ids } => {
+                crate::playlist::run_add(&config, &id, &track_ids).await?;
+            }
+            PlaylistAction::Remove { id, track_id } => {
+                crate::playlist::run_remove(&config, &id, &track_id).await?;
+            }
+            PlaylistAction::Play { id, shuffle } => {
+                let cache = open_audio_cache(&config).await?;
+                let ids = crate::playlist::resolve_play_ids(&config, &id, shuffle).await?;
+                play_tracks(&client, &cache, &ids, false).await?;
+            }
+        },
         Command::Sync { action } => match action {
             SyncAction::State => crate::sync::run_state(&config).await?,
             SyncAction::Queue => crate::sync::run_queue(&config, &client).await?,

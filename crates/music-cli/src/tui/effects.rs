@@ -290,6 +290,9 @@ async fn fetch_album(
 fn station_error(e: ApiError) -> StationError {
     match e {
         ApiError::RecommenderUnavailable => StationError::Unavailable,
+        // Reads are any-authenticated, so a 403 here isn't expected; surface
+        // it as a plain error rather than inventing a station-specific case.
+        ApiError::Forbidden => StationError::Other(e.to_string()),
         ApiError::Http(e) => StationError::Other(e.to_string()),
     }
 }

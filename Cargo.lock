@@ -1895,6 +1895,7 @@ dependencies = [
  "music-subsonic",
  "music-sync",
  "owo-colors",
+ "rand 0.8.6",
  "ratatui",
  "reqwest",
  "serde",

@@ -24,6 +24,7 @@ pub async fn run_station(config: &Config, client: &Client, prompt: &str, n: usiz
             "station unavailable: the gateway recommender is not ready \
              (embedder unreachable, or no tracks embedded yet)"
         ),
+        Err(e @ ApiError::Forbidden) => return Err(e.into()),
         Err(ApiError::Http(e)) => return Err(e),
     };
     print_resolved(client, &list.track_ids).await;
@@ -39,6 +40,7 @@ pub async fn run_next(config: &Config, client: &Client, seed: &str, n: usize) ->
             "no recommendations for {seed}: the seed track isn't embedded \
              yet, or the recommender is not ready"
         ),
+        Err(e @ ApiError::Forbidden) => return Err(e.into()),
         Err(ApiError::Http(e)) => return Err(e),
     };
 
