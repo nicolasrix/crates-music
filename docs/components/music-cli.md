@@ -95,15 +95,17 @@ Running `crates-cli` with **no subcommand on a terminal** opens a
 full-screen interactive player (ratatui). On a pipe the same invocation
 prints help and exits 2, so scripts and agents never hang on it.
 
-Seven sections (sidebar, keys `1`–`7` or `Tab`): **Library** (a browse
+Eight sections (sidebar, keys `1`–`8` or `Tab`): **Library** (a browse
 list with three modes — albums / artists / tracks, cycled with `[`/`]`
 — that drills into album and artist detail panes), **Search** (the
 gateway's typo-tolerant `/v1/search`), **Queue** (the play queue),
 **Playlists** (gateway-owned playlist CRUD), **Stations**
-(natural-language prompts), **Liked** (your ratings) and **Downloads**
-(the offline audio cache — budgets + pinned tracks). Playback is
-local (rodio) through the same L3 audio cache as `crates-cli play`, with
-the next track prefetched for near-gapless handoff.
+(natural-language prompts), **Liked** (your ratings), **Downloads**
+(the offline audio cache — budgets + pinned tracks) and **Settings**
+(a form for playback quality, cache budgets, autoplay drift, the account
+card + sign-out, and admin cache invalidation). Playback is local
+(rodio) through the same L3 audio cache as `crates-cli play`, with the
+next track prefetched for near-gapless handoff.
 
 | Key | Action |
 |---|---|
@@ -129,6 +131,7 @@ the next track prefetched for near-gapless handoff.
 | `W` | bulk-download the open album/playlist · warm from liked (Downloads) |
 | `E` | Downloads: evict the regular cache down to its budget |
 | `N` `s` `m` `R` `X` `x` | playlists: new · shuffle-play · suggest · rename · delete · remove-track |
+| `Enter` / `h` `l` | Settings: change (cycle enum / flip toggle / trigger) · adjust a number |
 
 Notes:
 
@@ -188,7 +191,7 @@ Notes:
   on tracks you queued yourself; pressing the active thumb again clears it.
   A `✦` badge in the now-playing bar shows autoplay is on, and the pick's
   current vote shows next to the title. All drift params live in
-  `[tui.autoplay]` (Phase 7's Settings view will edit them in place).
+  `[tui.autoplay]` and are editable in the Settings section (below).
 - **Sync room** (gateway mode): the TUI joins the account's `/v1/sync`
   room on start, so its queue is the *same* queue the web/PWA shows —
   reorder, skip, and play-from-here converge live across devices. Queue
@@ -217,6 +220,21 @@ Notes:
   ride the regular budget. When the sync WS is down, a `⚠ offline` badge
   appears at the bottom of the sidebar — a reminder that pinned tracks
   still play with no gateway.
+- **Settings** (section 8): a form grouped into Playback / Storage /
+  Autoplay / Account / Admin. `Enter` cycles an enum, flips a toggle, or
+  triggers an action row; `h`/`l` adjust a number. Every edit persists to
+  the config file (`[playback]`, `[cache]`, `[tui.autoplay]`) *and*
+  applies live — a stream-quality change hits the next fetch, a lowered
+  budget evicts immediately, drift params reach the next refill.
+  Quality is `original` / `opus @128k` / `mp3 @128k`, riding the
+  `/rest/*` proxy's `format`/`maxBitRate` (Navidrome transcodes on
+  demand); stream and download quality are separate (content-addressed
+  into distinct cache entries). The Account card shows the whoami
+  identity + server URL and a two-step **sign out** that revokes the
+  refresh token, clears the token store, and drops back to the shell with
+  a `crates-cli auth login` reminder. Admins additionally get **invalidate
+  gateway cache** (`POST /v1/admin/cache/invalidate`); non-admins never
+  see that row (role from `/v1/whoami`, refreshed on entry).
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.
@@ -276,13 +294,14 @@ crates/music-cli/
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
 │       ├── autoplay.rs   # pure tethered-drift seed weighting (port of autoplaySeeds.ts)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads · settings
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
 │       │   ├── refill.rs # autoplay from-seeds/from-any refill orchestration
-│       │   └── downloads.rs # pin / unpin / bulk / warm / evict cache ops
+│       │   ├── downloads.rs # pin / unpin / bulk / warm / evict cache ops
+│       │   └── settings.rs # persist+apply config edits · sign-out · cache invalidate · LiveSettings cell
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
-│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · help
+│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · settings · help
 │       └── widgets/      # now-playing bar, sidebar (offline badge), input field
 └── tests/            # clap parsing, config, formatters
 ```
@@ -308,6 +327,14 @@ password = "wonderland"
 url = "https://gateway.local:8443"
 # ca_cert_path = "~/.local/share/mkcert/rootCA.pem"  # trust the gateway's CA
 # insecure_tls = false                               # debug-only TLS bypass
+
+[playback]                  # transcode quality (optional; edited by the Settings section)
+# stream_quality = "original"    # original | opus128 | mp3128 — for tracks fetched to play
+# download_quality = "original"  # …and for tracks fetched to save offline
+
+[cache]                     # on-disk audio cache budgets (edited by the Settings section)
+# regular_budget_bytes = 10737418240   # 10 GiB — LRU-evicted
+# pinned_budget_bytes  = 5368709120    # 5 GiB  — never LRU-evicted
 
 [tui.autoplay]              # tethered-drift autoplay (all optional; web defaults)
 # enabled = false          # start with autoplay on
