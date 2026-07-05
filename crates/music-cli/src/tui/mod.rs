@@ -96,7 +96,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // The terminal session lives in this block so its guard drops (and the
     // terminal is restored) before the final event flush below — a slow
     // gateway on exit must not hold the user's shell hostage in raw mode.
-    let leftover_events = {
+    let session = {
         terminal::install_panic_hook();
         let _guard = terminal::TerminalGuard::enter()?;
         let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -104,6 +104,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
         let mut app = App::new(player, no_audio_device, config.gateway.is_some());
         app.configure_autoplay(&config.tui.autoplay);
+        app.configure_settings(&config);
         // Kick off the initial library load.
         for effect in update::update(&mut app, Msg::GoSection(Section::Library)) {
             effects::spawn(effect, &ctx);
@@ -146,9 +147,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 effects::spawn(effect, &ctx);
             }
         }
-        std::mem::take(&mut app.events_outbox)
+        (std::mem::take(&mut app.events_outbox), app.exit_message.take())
         // _guard drops here → terminal restored, even on the `?` paths above.
     };
+    let (leftover_events, exit_message) = session;
 
     // Best-effort tail flush of whatever the tick cadence hadn't sent yet.
     // Quitting mid-track is not a skip (mirrors the web: closing the tab
@@ -166,6 +168,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             Ok(Err(e)) => tracing::debug!(error = %e, "final event flush failed"),
             Err(_) => tracing::debug!("final event flush timed out"),
         }
+    }
+
+    // The sign-out "auth-needed screen": a shell line printed after the
+    // terminal is restored, telling the user how to sign back in.
+    if let Some(msg) = exit_message {
+        println!("{msg}");
     }
     Ok(())
 }

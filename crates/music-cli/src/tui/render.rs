@@ -32,6 +32,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
         Section::Stations => views::stations::draw(f, main, app, theme),
         Section::Liked => views::liked::draw(f, main, app, theme),
         Section::Downloads => views::downloads::draw(f, main, app, theme),
+        Section::Settings => views::settings::draw(f, main, app, theme),
     }
 
     widgets::now_playing::draw(f, bar, app, theme);
@@ -120,6 +121,7 @@ fn breadcrumb(app: &App) -> String {
         Section::Stations => "stations".to_owned(),
         Section::Liked => "liked".to_owned(),
         Section::Downloads => "downloads".to_owned(),
+        Section::Settings => "settings".to_owned(),
     }
 }
 

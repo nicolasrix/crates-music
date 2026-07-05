@@ -8,7 +8,7 @@
 use crate::tui::msg::Effect;
 use crate::tui::state::{App, LibraryPane, SearchBucket, Section, to_queued};
 
-use super::{downloads, library, playback, playlists, room};
+use super::{downloads, library, playback, playlists, room, settings};
 
 pub(super) fn activate(app: &mut App) -> Vec<Effect> {
     match app.section {
@@ -46,6 +46,7 @@ pub(super) fn activate(app: &mut App) -> Vec<Effect> {
         }
         Section::Liked => activate_liked(app),
         Section::Downloads => downloads::activate(app),
+        Section::Settings => settings::activate(app),
     }
 }
 
@@ -172,7 +173,7 @@ pub(super) fn enqueue_selected(app: &mut App) -> Vec<Effect> {
         }
         Section::Playlists => playlists::enqueue_selected(app),
         Section::Downloads => downloads::enqueue_selected(app),
-        Section::Queue => vec![],
+        Section::Queue | Section::Settings => vec![],
     }
 }
 
@@ -240,6 +241,6 @@ pub(super) fn selected_track(app: &App) -> Option<music_core::Track> {
         }
         Section::Playlists => playlists::selected_track(app),
         Section::Downloads => downloads::selected_track(app),
-        Section::Queue => None,
+        Section::Queue | Section::Settings => None,
     }
 }

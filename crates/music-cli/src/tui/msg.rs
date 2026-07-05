@@ -17,6 +17,7 @@ use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::{ServerMessage, SyncOp};
 
 use crate::api::{PlaylistSummary, WhoamiInfo};
+use crate::config::{AutoplayConfig, PlaybackConfig, Quality};
 
 use super::signal::PendingEvent;
 use super::state::{
@@ -306,6 +307,69 @@ pub(crate) enum Msg {
         ids: Vec<String>,
         result: Result<Vec<Track>, String>,
     },
+
+    // ── settings ──────────────────────────────────────────────────────
+    /// A settings write to the config file finished (only surfaced on error —
+    /// a silent success keeps the form quiet).
+    SettingsSaved {
+        result: Result<(), String>,
+    },
+    /// Sign-out finished (token revoked + store cleared). On success the
+    /// reducer sets `exit_message` and quits to the auth-needed shell line.
+    SignedOut {
+        result: Result<(), String>,
+    },
+    /// `POST /v1/admin/cache/invalidate` finished (admin-only Settings action).
+    CacheInvalidated {
+        result: Result<(), String>,
+    },
+}
+
+/// Full settings snapshot for the [`Effect::SaveSettings`] persist. Floats are
+/// carried as `f32::to_bits` so `Effect` stays `Eq` (the no-floats-in-`Effect`
+/// rule from autoplay). The effect rebuilds a `Config` from this plus its boot
+/// base and writes it to disk, then applies quality + drift to the live cell
+/// and the budgets to the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SettingsSave {
+    pub stream_quality: Quality,
+    pub download_quality: Quality,
+    pub regular_budget_bytes: u64,
+    pub pinned_budget_bytes: u64,
+    /// Run an eviction after applying budgets (set when a budget was lowered).
+    pub evict_now: bool,
+    pub autoplay_enabled: bool,
+    pub min_upcoming: usize,
+    pub frontier_window: usize,
+    pub leash_tau_bits: u32,
+    pub leash_lambda_bits: u32,
+    pub frontier_weight_bits: u32,
+    pub frontier_decay_bits: u32,
+    pub mmr_lambda_bits: u32,
+}
+
+impl SettingsSave {
+    /// The playback (transcode) config this snapshot describes.
+    pub(crate) fn playback(&self) -> PlaybackConfig {
+        PlaybackConfig {
+            stream_quality: self.stream_quality,
+            download_quality: self.download_quality,
+        }
+    }
+
+    /// The full autoplay config (drift floats decoded from their bit form).
+    pub(crate) fn autoplay(&self) -> AutoplayConfig {
+        AutoplayConfig {
+            enabled: self.autoplay_enabled,
+            min_upcoming: self.min_upcoming,
+            leash_tau: f32::from_bits(self.leash_tau_bits),
+            leash_lambda: f32::from_bits(self.leash_lambda_bits),
+            frontier_weight: f32::from_bits(self.frontier_weight_bits),
+            frontier_decay: f32::from_bits(self.frontier_decay_bits),
+            frontier_window: self.frontier_window,
+            mmr_lambda: f32::from_bits(self.mmr_lambda_bits),
+        }
+    }
 }
 
 /// Async work the reducer requests; `effects::spawn` runs each on tokio and
@@ -502,4 +566,16 @@ pub(crate) enum Effect {
     /// `evict_lru_to_fit` — fit the regular cache to its budget now.
     /// Completes as [`Msg::PinDone`].
     EvictCache,
+
+    // ── settings ──────────────────────────────────────────────────────
+    /// Persist the settings to the config file and apply them live (transcode
+    /// quality + drift params to the effect cell, budgets to the cache, with
+    /// an eviction when lowered). Completes as [`Msg::SettingsSaved`].
+    SaveSettings(SettingsSave),
+    /// Revoke the refresh token and delete the local token store; completes as
+    /// [`Msg::SignedOut`].
+    SignOut,
+    /// `POST /v1/admin/cache/invalidate` (admin-gated); completes as
+    /// [`Msg::CacheInvalidated`].
+    CacheInvalidate,
 }

@@ -272,6 +272,29 @@ pub async fn whoami(config: &Config) -> Result<WhoamiInfo, ApiError> {
     Ok(info)
 }
 
+/// `POST /v1/admin/cache/invalidate` — drop the gateway's browse-metadata
+/// cache (admin-only; the gateway 403s non-admins, surfaced as `Forbidden`).
+pub async fn invalidate_cache(config: &Config) -> Result<(), ApiError> {
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/admin/cache/invalidate");
+    let resp = http_client(gw)?
+        .post(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .context("sending cache invalidate")?;
+    if resp.status().as_u16() == 403 {
+        return Err(ApiError::Forbidden);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("cache invalidate rejected ({status}): {text}").into());
+    }
+    Ok(())
+}
+
 /// `GET /v1/sync/snapshot` — the room's full sync state, for converging
 /// after a missed WS frame without tearing the connection down.
 pub async fn sync_snapshot(config: &Config) -> Result<music_sync::SyncState, ApiError> {

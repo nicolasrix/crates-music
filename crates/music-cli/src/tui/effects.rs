@@ -11,7 +11,7 @@ use music_sync::SyncOp;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::api::{self, ApiError};
-use crate::config::{AutoplayConfig, Config, Quality};
+use crate::config::Config;
 use music_cache::AudioCache;
 use music_subsonic::Client;
 
@@ -22,21 +22,10 @@ use super::state::{
 };
 
 mod downloads;
-
 mod refill;
+mod settings;
 
-/// The slice of config the Settings view must apply to *running* effect tasks
-/// without a restart: the transcode qualities (read on every audio fetch) and
-/// the autoplay drift params (read on every refill). Held behind a mutex on
-/// [`Ctx`] and swapped wholesale by the `SaveSettings` effect. Budgets are
-/// *not* here — those live on the `AudioCache` itself (`set_budgets`), and the
-/// App-mirrored knobs (min-upcoming, output device) are reducer state.
-#[derive(Debug, Clone)]
-pub(crate) struct LiveSettings {
-    pub stream_quality: Quality,
-    pub download_quality: Quality,
-    pub autoplay: AutoplayConfig,
-}
+pub(crate) use settings::LiveSettings;
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
 #[derive(Clone)]
@@ -88,29 +77,6 @@ impl Ctx {
             msg_tx,
             sync_ops,
         }
-    }
-
-    /// Quality for tracks fetched to play. Read fresh on every fetch so a
-    /// Settings change hits the next stream request.
-    pub(crate) fn stream_quality(&self) -> Quality {
-        self.live().stream_quality
-    }
-
-    /// Quality for tracks fetched to save offline (pin / bulk / warm).
-    pub(crate) fn download_quality(&self) -> Quality {
-        self.live().download_quality
-    }
-
-    /// A snapshot of the autoplay drift params for one refill.
-    pub(crate) fn autoplay(&self) -> AutoplayConfig {
-        self.live().autoplay.clone()
-    }
-
-    fn live(&self) -> LiveSettings {
-        self.settings
-            .lock()
-            .expect("live settings mutex poisoned")
-            .clone()
     }
 
     async fn subsonic(&self) -> anyhow::Result<Client> {
@@ -535,6 +501,11 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         }
         Effect::WarmLiked => Some(downloads::warm_liked(ctx).await),
         Effect::EvictCache => Some(downloads::evict(ctx).await),
+
+        // ── settings ──────────────────────────────────────────────────
+        Effect::SaveSettings(payload) => Some(settings::save(ctx, payload).await),
+        Effect::SignOut => Some(settings::sign_out(ctx).await),
+        Effect::CacheInvalidate => Some(settings::invalidate_cache(ctx).await),
     }
 }
 

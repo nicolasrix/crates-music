@@ -19,9 +19,9 @@ use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
 
 /// Sidebar sections, in display order (the `1..9` number bindings index
-/// this). Playlists sits at slot 4, between Queue and Stations, and Downloads
-/// at slot 7 (Settings + Diagnostics land later), per the parity plan's
-/// target sidebar.
+/// this). Playlists sits at slot 4, between Queue and Stations, Downloads at
+/// slot 7, and Settings at slot 8 (Diagnostics lands later), per the parity
+/// plan's target sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     Library,
@@ -31,10 +31,11 @@ pub(crate) enum Section {
     Stations,
     Liked,
     Downloads,
+    Settings,
 }
 
 impl Section {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Library,
         Self::Search,
         Self::Queue,
@@ -42,6 +43,7 @@ impl Section {
         Self::Stations,
         Self::Liked,
         Self::Downloads,
+        Self::Settings,
     ];
 
     pub(crate) fn title(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Section {
             Self::Stations => "Stations",
             Self::Liked => "Liked",
             Self::Downloads => "Downloads",
+            Self::Settings => "Settings",
         }
     }
 
@@ -557,6 +560,79 @@ impl Default for DownloadsState {
     }
 }
 
+/// One editable row of the Settings section, in display order within its
+/// group. The interactive rows only — the account-card lines aren't selectable.
+/// `InvalidateCache` is appended for admins alone (see `settings::rows`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingRow {
+    // Playback
+    StreamQuality,
+    DownloadQuality,
+    OutputDevice,
+    // Storage
+    RegularBudget,
+    PinnedBudget,
+    // Autoplay
+    AutoplayEnabled,
+    MinUpcoming,
+    LeashTau,
+    LeashLambda,
+    FrontierWeight,
+    FrontierDecay,
+    FrontierWindow,
+    MmrLambda,
+    ResetAutoplay,
+    // Account
+    SignOut,
+    // Admin (admins only)
+    InvalidateCache,
+}
+
+/// Working copy of the settings the view edits. Quality, budgets, and the
+/// autoplay *drift* params live here (they have no other home in `App`);
+/// `enabled` / `min_upcoming` stay authoritative on [`AutoplayState`] and
+/// output-on-device on `RoomState::output_on`, so the rows read/write those
+/// directly. Every edit persists to the config file and applies live — see
+/// `update::settings`. Seeded from disk by [`App::configure_settings`].
+#[derive(Debug)]
+pub(crate) struct SettingsState {
+    pub stream_quality: crate::config::Quality,
+    pub download_quality: crate::config::Quality,
+    pub regular_budget_bytes: u64,
+    pub pinned_budget_bytes: u64,
+    pub leash_tau: f32,
+    pub leash_lambda: f32,
+    pub frontier_weight: f32,
+    pub frontier_decay: f32,
+    pub frontier_window: usize,
+    pub mmr_lambda: f32,
+    pub table: TableState,
+    /// Sign-out is two-step (a stray `enter` shouldn't nuke the session): the
+    /// first `enter` arms this, the second confirms. Any other action disarms.
+    pub confirm_signout: bool,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        let ap = crate::config::AutoplayConfig::default();
+        let cache = crate::config::CacheConfig::default();
+        Self {
+            stream_quality: crate::config::Quality::default(),
+            download_quality: crate::config::Quality::default(),
+            regular_budget_bytes: cache.regular_budget_bytes,
+            pinned_budget_bytes: cache.pinned_budget_bytes,
+            leash_tau: ap.leash_tau,
+            leash_lambda: ap.leash_lambda,
+            frontier_weight: ap.frontier_weight,
+            frontier_decay: ap.frontier_decay,
+            frontier_window: ap.frontier_window,
+            mmr_lambda: ap.mmr_lambda,
+            table: TableState::default(),
+            confirm_signout: false,
+        }
+    }
+}
+
 /// Which pane of the Playlists section is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PlaylistsPane {
@@ -699,6 +775,18 @@ pub(crate) struct App {
     // ── autoplay ──────────────────────────────────────────────────────
     /// Tethered-drift autoplay: toggle, provenance, votes, refill state.
     pub autoplay: AutoplayState,
+
+    // ── settings ──────────────────────────────────────────────────────
+    /// The Settings section's editable working copy (quality / budgets /
+    /// drift params). Seeded from disk by [`App::configure_settings`].
+    pub settings: SettingsState,
+    /// The gateway (or, in direct mode, Navidrome) URL — shown in the
+    /// Settings account card. Seeded by [`App::configure_settings`].
+    pub server_url: Option<String>,
+    /// Set when the user signs out: the event loop exits and prints this on
+    /// the restored terminal (the "auth-needed screen" — a shell line telling
+    /// them to `crates-cli auth login`).
+    pub exit_message: Option<String>,
 }
 
 impl App {
@@ -734,15 +822,72 @@ impl App {
             sync: RoomState::new(gateway),
             whoami: None,
             autoplay: AutoplayState::new(),
+            settings: SettingsState::default(),
+            server_url: None,
+            exit_message: None,
         }
     }
 
     /// Apply the on-disk `[tui.autoplay]` config once at startup: seed the
-    /// drift params and the initial on/off state (runtime toggling isn't
-    /// persisted — that's Phase 7).
+    /// drift params and the initial on/off state.
     pub(crate) fn configure_autoplay(&mut self, cfg: &crate::config::AutoplayConfig) {
         self.autoplay.min_upcoming = cfg.min_upcoming;
         self.autoplay.enabled = cfg.enabled;
+    }
+
+    /// Seed the Settings working copy from the loaded config (quality,
+    /// budgets, drift params) and record the server URL for the account card.
+    pub(crate) fn configure_settings(&mut self, config: &crate::config::Config) {
+        let ap = &config.tui.autoplay;
+        self.settings.stream_quality = config.playback.stream_quality;
+        self.settings.download_quality = config.playback.download_quality;
+        self.settings.regular_budget_bytes = config.cache.regular_budget_bytes;
+        self.settings.pinned_budget_bytes = config.cache.pinned_budget_bytes;
+        self.settings.leash_tau = ap.leash_tau;
+        self.settings.leash_lambda = ap.leash_lambda;
+        self.settings.frontier_weight = ap.frontier_weight;
+        self.settings.frontier_decay = ap.frontier_decay;
+        self.settings.frontier_window = ap.frontier_window;
+        self.settings.mmr_lambda = ap.mmr_lambda;
+        self.server_url = Some(
+            config
+                .gateway
+                .as_ref()
+                .map_or_else(|| config.server.url.clone(), |g| g.url.clone()),
+        );
+    }
+
+    /// Whether the calling principal is an admin (drives admin-only Settings
+    /// rows). Unknown identity (direct mode / pre-fetch) is treated as non-admin.
+    pub(crate) fn is_admin(&self) -> bool {
+        self.whoami.as_ref().is_some_and(|w| w.role == "admin")
+    }
+
+    /// The interactive Settings rows in display order (shared by the reducer
+    /// and the view so the cursor and the rendered list can't drift). The
+    /// admin cache row is appended only for admins.
+    pub(crate) fn settings_rows(&self) -> Vec<SettingRow> {
+        let mut r = vec![
+            SettingRow::StreamQuality,
+            SettingRow::DownloadQuality,
+            SettingRow::OutputDevice,
+            SettingRow::RegularBudget,
+            SettingRow::PinnedBudget,
+            SettingRow::AutoplayEnabled,
+            SettingRow::MinUpcoming,
+            SettingRow::LeashTau,
+            SettingRow::LeashLambda,
+            SettingRow::FrontierWeight,
+            SettingRow::FrontierDecay,
+            SettingRow::FrontierWindow,
+            SettingRow::MmrLambda,
+            SettingRow::ResetAutoplay,
+            SettingRow::SignOut,
+        ];
+        if self.is_admin() {
+            r.push(SettingRow::InvalidateCache);
+        }
+        r
     }
 
     /// Is a text input focused (keys should type, not act)?

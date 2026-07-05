@@ -117,6 +117,24 @@ async fn refresh(
     ))
 }
 
+/// Headless sign-out for the TUI Settings view: best-effort revoke the
+/// refresh token, then delete the local store. Unlike [`device::run_logout`]
+/// it prints nothing (the caller surfaces the outcome in the UI). A revoke
+/// failure (gateway down) is swallowed — the local creds are still cleared, so
+/// the session is effectively over.
+pub async fn sign_out(config: &Config, gw: &GatewayConfig) -> Result<()> {
+    let path = token_store_path(config);
+    if let (Some(tokens), Ok(http)) = (store::load(&path)?, http_client(gw)) {
+        let _ = http
+            .post(endpoint(gw, "/oauth/revoke"))
+            .form(&[("token", tokens.refresh_token.as_str())])
+            .send()
+            .await;
+    }
+    store::delete(&path)?;
+    Ok(())
+}
+
 /// Dispatch `crates-cli auth <action>`. Runs *before* the Subsonic client is
 /// built (login has no token yet), so it only needs the `[gateway]` block.
 pub async fn run_auth(config: &Config, action: &AuthAction) -> Result<()> {

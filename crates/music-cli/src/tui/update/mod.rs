@@ -17,11 +17,14 @@ mod library;
 mod playback;
 mod playlists;
 mod room;
+mod settings;
 
 #[cfg(test)]
 mod autoplay_tests;
 #[cfg(test)]
 mod downloads_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod library_tests;
 #[cfg(test)]
@@ -85,6 +88,10 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::NavBottom => nav_to(app, NavTarget::Bottom),
         Msg::NavHalfPageDown => nav(app, 10),
         Msg::NavHalfPageUp => nav(app, -10),
+        // h / l: adjust the selected settings row when in Settings; otherwise
+        // cycle the library album-list kind / search result bucket.
+        Msg::CycleKindPrev if app.section == Section::Settings => settings::adjust(app, -1),
+        Msg::CycleKindNext if app.section == Section::Settings => settings::adjust(app, 1),
         Msg::CycleKindPrev => cycle_kind(app, -1),
         Msg::CycleKindNext => cycle_kind(app, 1),
         Msg::CycleModePrev => library::cycle_mode(app, -1),
@@ -432,6 +439,11 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             playlist_id,
             result,
         } => playlists::on_suggestions(app, &playlist_id, result),
+
+        // ── settings ──────────────────────────────────────────────────
+        Msg::SettingsSaved { result } => settings::on_saved(app, result),
+        Msg::SignedOut { result } => settings::on_signed_out(app, result),
+        Msg::CacheInvalidated { result } => settings::on_cache_invalidated(app, result),
     }
 }
 
@@ -473,6 +485,10 @@ fn focused_list(app: &mut App) -> (usize, &mut ratatui::widgets::TableState) {
             loaded_len(&app.downloads.pinned),
             &mut app.downloads.table,
         ),
+        Section::Settings => {
+            let len = settings::row_count(app);
+            (len, &mut app.settings.table)
+        }
     }
 }
 
@@ -543,6 +559,8 @@ fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
         // Downloads reloads every visit — cache totals + pin state drift as
         // tracks auto-cache and `d` runs elsewhere; the reads are local.
         Section::Downloads => downloads::reload(app),
+        // Settings refreshes identity (account card + admin gating).
+        Section::Settings => settings::reload(app),
         _ => vec![],
     }
 }
@@ -678,6 +696,8 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
         }
         Section::Playlists => Some(track_target(&playlists::selected_track(app)?)),
         Section::Downloads => Some(track_target(&downloads::selected_track(app)?)),
+        // Settings lists no tracks; rating keys fall through to now-playing.
+        Section::Settings => None,
     }
     .or_else(|| {
         // Fallback: whatever is playing right now.

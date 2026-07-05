@@ -45,6 +45,7 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("s / m", "playlist: shuffle-play / suggest more"),
     ("R / X", "playlist: rename / delete"),
     ("x", "playlist: remove selected track"),
+    ("enter / h l", "settings: change · adjust value"),
 ];
 
 // Overlay guards + a flat key table; the length is the keymap's, not the
@@ -268,8 +269,12 @@ mod tests {
             action_for(&a, key(KeyCode::Char('7'))),
             Some(Msg::GoSection(Section::Downloads))
         ));
-        // No 8th section yet — the number is inert, not a panic.
-        assert!(action_for(&a, key(KeyCode::Char('8'))).is_none());
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('8'))),
+            Some(Msg::GoSection(Section::Settings))
+        ));
+        // No 9th section yet — the number is inert, not a panic.
+        assert!(action_for(&a, key(KeyCode::Char('9'))).is_none());
     }
 
     #[test]
