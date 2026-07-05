@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bytes::Bytes;
+use music_cache::AudioCacheStats;
 use music_core::{Album, Artist, Track};
 use music_player::{PlayQueue, PlaybackSnapshot, Player, QueuedTrack};
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
@@ -18,8 +19,9 @@ use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
 
 /// Sidebar sections, in display order (the `1..9` number bindings index
-/// this). Playlists sits at slot 4, between Queue and Stations, per the
-/// parity plan's target sidebar.
+/// this). Playlists sits at slot 4, between Queue and Stations, and Downloads
+/// at slot 7 (Settings + Diagnostics land later), per the parity plan's
+/// target sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     Library,
@@ -28,16 +30,18 @@ pub(crate) enum Section {
     Playlists,
     Stations,
     Liked,
+    Downloads,
 }
 
 impl Section {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Library,
         Self::Search,
         Self::Queue,
         Self::Playlists,
         Self::Stations,
         Self::Liked,
+        Self::Downloads,
     ];
 
     pub(crate) fn title(self) -> &'static str {
@@ -48,6 +52,7 @@ impl Section {
             Self::Playlists => "Playlists",
             Self::Stations => "Stations",
             Self::Liked => "Liked",
+            Self::Downloads => "Downloads",
         }
     }
 
@@ -507,6 +512,41 @@ pub(crate) struct LikedState {
     pub table: TableState,
 }
 
+/// One row of the Downloads pinned table: a pinned cache entry, with its
+/// track metadata hydrated when the server is reachable. `track` is `None`
+/// offline (or for an unresolvable id) — the row still renders (and plays,
+/// keyed on `track_id`) from the id + byte size alone, which is the whole
+/// point of the offline story.
+#[derive(Debug, Clone)]
+pub(crate) struct PinnedRow {
+    pub track_id: String,
+    pub bytes: u64,
+    pub track: Option<Track>,
+}
+
+/// Section 7 — offline downloads. Cache byte totals (the two-budget gauges)
+/// plus the pinned-track table. Both reload on every visit: the underlying
+/// SQLite reads are local and cheap, and pin state changes out from under us
+/// (a `d` elsewhere, a background auto-cache).
+// Not `#[derive(Default)]`: `Loadable`'s derived `Default` over-bounds with
+// `T: Default`, and `AudioCacheStats` isn't `Default`.
+#[derive(Debug)]
+pub(crate) struct DownloadsState {
+    pub stats: Loadable<AudioCacheStats>,
+    pub pinned: Loadable<Vec<PinnedRow>>,
+    pub table: TableState,
+}
+
+impl Default for DownloadsState {
+    fn default() -> Self {
+        Self {
+            stats: Loadable::Idle,
+            pinned: Loadable::Idle,
+            table: TableState::default(),
+        }
+    }
+}
+
 /// Which pane of the Playlists section is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PlaylistsPane {
@@ -615,6 +655,7 @@ pub(crate) struct App {
     pub search: SearchState,
     pub stations: StationsState,
     pub liked: LikedState,
+    pub downloads: DownloadsState,
     pub playlists: PlaylistsState,
     /// Active playlist picker (add-to-playlist overlay), when open.
     pub picker: Option<PickerState>,
@@ -671,6 +712,7 @@ impl App {
             search: SearchState::default(),
             stations: StationsState::default(),
             liked: LikedState::default(),
+            downloads: DownloadsState::default(),
             playlists: PlaylistsState::default(),
             picker: None,
             text_prompt: None,

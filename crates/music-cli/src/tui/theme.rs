@@ -79,5 +79,9 @@ pub(crate) mod symbols {
     /// Recommendation-feedback thumbs (up / down).
     pub(crate) const THUMB_UP: &str = "▲";
     pub(crate) const THUMB_DOWN: &str = "▽";
+    /// A pinned / saved-offline track (Downloads section).
+    pub(crate) const DOWNLOAD: &str = "⇩";
+    /// Sidebar footer badge when the gateway/sync is unreachable.
+    pub(crate) const OFFLINE: &str = "⚠";
     pub(crate) const SPINNER: [&str; 4] = ["⣾", "⣽", "⣻", "⢿"];
 }

@@ -12,6 +12,7 @@
 
 mod autoplay;
 mod browse;
+mod downloads;
 mod library;
 mod playback;
 mod playlists;
@@ -19,6 +20,8 @@ mod room;
 
 #[cfg(test)]
 mod autoplay_tests;
+#[cfg(test)]
+mod downloads_tests;
 #[cfg(test)]
 mod library_tests;
 #[cfg(test)]
@@ -137,6 +140,9 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::ToggleOutput => room::toggle_output(app),
         Msg::ToggleAutoplay => autoplay::toggle(app),
         Msg::Feedback(vote) => autoplay::feedback(app, vote),
+        Msg::SaveOffline => downloads::save_offline(app),
+        Msg::BulkDownload => downloads::bulk_download(app),
+        Msg::EvictCache => downloads::evict(app),
         Msg::Player(ev) => playback::player_event(app, ev),
         Msg::Sync(ev) => room::handle(app, ev),
 
@@ -353,6 +359,8 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::DownloadsLoaded { stats, pinned } => downloads::on_loaded(app, stats, pinned),
+        Msg::PinDone { note, is_error } => downloads::on_pin_done(app, note, is_error),
         Msg::AutoplayRefilled {
             generation,
             need,
@@ -461,6 +469,10 @@ fn focused_list(app: &mut App) -> (usize, &mut ratatui::widgets::TableState) {
             &mut app.stations.table,
         ),
         Section::Liked => (loaded_len(&app.liked.entries), &mut app.liked.table),
+        Section::Downloads => (
+            loaded_len(&app.downloads.pinned),
+            &mut app.downloads.table,
+        ),
     }
 }
 
@@ -528,6 +540,9 @@ fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
         Section::Playlists if matches!(app.playlists.list, Loadable::Idle) => {
             playlists::reload_list(app)
         }
+        // Downloads reloads every visit — cache totals + pin state drift as
+        // tracks auto-cache and `d` runs elsewhere; the reads are local.
+        Section::Downloads => downloads::reload(app),
         _ => vec![],
     }
 }
@@ -662,6 +677,7 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
             Some(("track", item.id.clone(), item.title.clone()))
         }
         Section::Playlists => Some(track_target(&playlists::selected_track(app)?)),
+        Section::Downloads => Some(track_target(&downloads::selected_track(app)?)),
     }
     .or_else(|| {
         // Fallback: whatever is playing right now.

@@ -21,6 +21,8 @@ use super::state::{
     SimilarEntry, SimilarKind,
 };
 
+mod downloads;
+
 mod refill;
 
 /// Shared handles the effect tasks need. Cheap to clone (all Arcs).
@@ -467,6 +469,20 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
                 result,
             })
         }
+
+        // ── downloads / offline ─────────────────────────────────────────
+        Effect::LoadDownloads => {
+            let (stats, pinned) = downloads::load(ctx).await;
+            Some(Msg::DownloadsLoaded { stats, pinned })
+        }
+        Effect::PinToggle { track_id, title } => {
+            Some(downloads::pin_toggle(ctx, &track_id, &title).await)
+        }
+        Effect::PinBulk { track_ids, label } => {
+            Some(downloads::pin_bulk(ctx, &track_ids, &label).await)
+        }
+        Effect::WarmLiked => Some(downloads::warm_liked(ctx).await),
+        Effect::EvictCache => Some(downloads::evict(ctx).await),
     }
 }
 

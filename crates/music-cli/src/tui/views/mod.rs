@@ -1,3 +1,4 @@
+pub(crate) mod downloads;
 pub(crate) mod help;
 pub(crate) mod library;
 pub(crate) mod liked;

@@ -10,6 +10,7 @@
 //! the reducer so a stale response can never overwrite newer state.
 
 use bytes::Bytes;
+use music_cache::AudioCacheStats;
 use music_core::{AlbumId, Track};
 use music_player::PlayerEvent;
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
@@ -19,7 +20,8 @@ use crate::api::{PlaylistSummary, WhoamiInfo};
 
 use super::signal::PendingEvent;
 use super::state::{
-    ArtistDetailState, FeedbackVote, LikedEntry, PlaylistDetailState, Rating, Section, SimilarEntry,
+    ArtistDetailState, FeedbackVote, LikedEntry, PinnedRow, PlaylistDetailState, Rating, Section,
+    SimilarEntry,
 };
 
 /// Single-line text-field edits, produced by the keymap only while an input
@@ -127,6 +129,16 @@ pub(crate) enum Msg {
     /// f / F — thumbs up / down on the now-playing autoplay pick
     /// (`/v1/recommend/feedback`); a no-op on user-picked tracks.
     Feedback(FeedbackVote),
+
+    // ── downloads / offline ───────────────────────────────────────────
+    /// d — toggle save-offline for the contextual track. The effect pins
+    /// (fetch-if-missing) or unpins atomically based on current cache state.
+    SaveOffline,
+    /// W — bulk-download: pin a whole album/playlist, or (in the Downloads
+    /// section) warm the cache from every liked track.
+    BulkDownload,
+    /// E — evict the regular cache down to its budget (Downloads only).
+    EvictCache,
 
     // ── playlists ─────────────────────────────────────────────────────
     /// a — open the add-to-playlist picker for the contextual track (any
@@ -256,6 +268,21 @@ pub(crate) enum Msg {
     /// `GET /v1/whoami` completed (boot-time identity fetch).
     WhoamiLoaded {
         result: Result<WhoamiInfo, String>,
+    },
+    /// Downloads section loaded: cache totals + the hydrated pinned table.
+    /// The two halves fail independently — stats is local SQLite; hydration
+    /// needs the server, so `pinned` still `Ok`s (with `track: None` rows)
+    /// when offline.
+    DownloadsLoaded {
+        stats: Result<AudioCacheStats, String>,
+        pinned: Result<Vec<PinnedRow>, String>,
+    },
+    /// A pin / unpin / bulk-download / evict op finished. The reducer sets the
+    /// status note and, if the Downloads section is on screen, reloads it (pin
+    /// set + byte totals moved).
+    PinDone {
+        note: String,
+        is_error: bool,
     },
     /// An autoplay refill resolved. `need` was the shortfall requested (an
     /// under-delivery triggers the long cooldown); `generation` is dropped if
@@ -451,4 +478,28 @@ pub(crate) enum Effect {
         playlist_id: String,
         seeds: Vec<String>,
     },
+
+    // ── downloads / offline ───────────────────────────────────────────
+    /// `stats` + `list_pinned` (local SQLite) + best-effort hydration of the
+    /// pinned ids to tracks; completes as [`Msg::DownloadsLoaded`].
+    LoadDownloads,
+    /// Toggle offline-pin for one track: fetch-if-missing then pin, or unpin
+    /// if it was already pinned. Completes as [`Msg::PinDone`].
+    PinToggle {
+        track_id: String,
+        title: String,
+    },
+    /// Bulk-pin a set of tracks (album / playlist "download all"),
+    /// fetch-if-missing, tolerant per track. Completes as [`Msg::PinDone`].
+    PinBulk {
+        track_ids: Vec<String>,
+        label: String,
+    },
+    /// Warm the offline cache from every liked *track* (the Downloads `W`);
+    /// fetches ratings server-side, then bulk-pins. Completes as
+    /// [`Msg::PinDone`].
+    WarmLiked,
+    /// `evict_lru_to_fit` — fit the regular cache to its budget now.
+    /// Completes as [`Msg::PinDone`].
+    EvictCache,
 }

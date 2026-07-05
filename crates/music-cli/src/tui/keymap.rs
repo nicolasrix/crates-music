@@ -38,6 +38,9 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("o", "toggle audio output on this device (sync)"),
     ("A", "toggle autoplay (keep the queue topped up)"),
     ("f / F", "autoplay pick: thumbs up / down"),
+    ("d", "save track offline (toggle pin)"),
+    ("W", "download album / playlist · warm from liked (downloads)"),
+    ("E", "downloads: evict regular cache to budget"),
     ("N", "playlists: new playlist"),
     ("s / m", "playlist: shuffle-play / suggest more"),
     ("R / X", "playlist: rename / delete"),
@@ -172,6 +175,11 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('A') => Some(Msg::ToggleAutoplay),
         KeyCode::Char('f') => Some(Msg::Feedback(FeedbackVote::Up)),
         KeyCode::Char('F') => Some(Msg::Feedback(FeedbackVote::Down)),
+        // Save-offline is global (any track row); bulk-download acts on the
+        // open album/playlist or the Downloads page; evict is Downloads-only.
+        KeyCode::Char('d') => Some(Msg::SaveOffline),
+        KeyCode::Char('W') => Some(Msg::BulkDownload),
+        KeyCode::Char('E') if app.section == Section::Downloads => Some(Msg::EvictCache),
         // Queue edits only bind inside the queue view — 'x'/'c' are too
         // destructive to be global, and J/K/T would shadow navigation.
         KeyCode::Char('x') if app.section == Section::Queue => Some(Msg::QueueRemoveSelected),
@@ -256,8 +264,12 @@ mod tests {
             action_for(&a, key(KeyCode::Char('6'))),
             Some(Msg::GoSection(Section::Liked))
         ));
-        // No 7th section yet — the number is inert, not a panic.
-        assert!(action_for(&a, key(KeyCode::Char('7'))).is_none());
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('7'))),
+            Some(Msg::GoSection(Section::Downloads))
+        ));
+        // No 8th section yet — the number is inert, not a panic.
+        assert!(action_for(&a, key(KeyCode::Char('8'))).is_none());
     }
 
     #[test]
@@ -320,6 +332,29 @@ mod tests {
         assert!(matches!(
             action_for(&a, key(KeyCode::Char('F'))),
             Some(Msg::Feedback(FeedbackVote::Down))
+        ));
+    }
+
+    #[test]
+    fn download_bindings() {
+        let a = app(); // Library
+        // Save-offline + bulk-download are global; evict is Downloads-only.
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('d'))),
+            Some(Msg::SaveOffline)
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('W'))),
+            Some(Msg::BulkDownload)
+        ));
+        assert!(action_for(&a, key(KeyCode::Char('E'))).is_none());
+        // ctrl-d still pages (not save-offline).
+        assert!(matches!(action_for(&a, ctrl('d')), Some(Msg::NavHalfPageDown)));
+        let mut d = app();
+        d.section = Section::Downloads;
+        assert!(matches!(
+            action_for(&d, key(KeyCode::Char('E'))),
+            Some(Msg::EvictCache)
         ));
     }
 
