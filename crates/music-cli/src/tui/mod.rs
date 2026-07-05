@@ -11,6 +11,7 @@ mod effects;
 mod keymap;
 mod msg;
 mod render;
+mod signal;
 mod state;
 mod terminal;
 mod theme;
@@ -65,49 +66,69 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let ctx = Ctx::new(Arc::clone(&config), client, bearer, cache, msg_tx.clone());
 
-    terminal::install_panic_hook();
-    let _guard = terminal::TerminalGuard::enter()?;
-    let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let theme = Theme::detect();
+    // The terminal session lives in this block so its guard drops (and the
+    // terminal is restored) before the final event flush below — a slow
+    // gateway on exit must not hold the user's shell hostage in raw mode.
+    let leftover_events = {
+        terminal::install_panic_hook();
+        let _guard = terminal::TerminalGuard::enter()?;
+        let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        let theme = Theme::detect();
 
-    let mut app = App::new(player, no_audio_device);
-    // Kick off the initial library load.
-    for effect in update::update(&mut app, Msg::GoSection(Section::Library)) {
-        effects::spawn(effect, &ctx);
-    }
-
-    let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    while !app.should_quit {
-        if let Some(p) = &app.player {
-            app.playback = p.snapshot();
-        }
-        term.draw(|f| render::draw(f, &mut app, &theme))?;
-
-        let msg = tokio::select! {
-            ev = events.next() => match ev {
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    match keymap::action_for(&app, key) {
-                        Some(msg) => msg,
-                        None => continue,
-                    }
-                }
-                // Resize (and ignored key kinds / mouse) → just redraw.
-                Some(Ok(_)) => continue,
-                Some(Err(e)) => return Err(e).context("reading terminal events"),
-                None => break,
-            },
-            Some(pe) = player_rx.recv() => Msg::Player(pe),
-            Some(m) = msg_rx.recv() => m,
-            _ = tick.tick() => Msg::Tick,
-        };
-
-        for effect in update::update(&mut app, msg) {
+        let mut app = App::new(player, no_audio_device, config.gateway.is_some());
+        // Kick off the initial library load.
+        for effect in update::update(&mut app, Msg::GoSection(Section::Library)) {
             effects::spawn(effect, &ctx);
+        }
+
+        let mut events = EventStream::new();
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while !app.should_quit {
+            if let Some(p) = &app.player {
+                app.playback = p.snapshot();
+            }
+            term.draw(|f| render::draw(f, &mut app, &theme))?;
+
+            let msg = tokio::select! {
+                ev = events.next() => match ev {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        match keymap::action_for(&app, key) {
+                            Some(msg) => msg,
+                            None => continue,
+                        }
+                    }
+                    // Resize (and ignored key kinds / mouse) → just redraw.
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Err(e).context("reading terminal events"),
+                    None => break,
+                },
+                Some(pe) = player_rx.recv() => Msg::Player(pe),
+                Some(m) = msg_rx.recv() => m,
+                _ = tick.tick() => Msg::Tick,
+            };
+
+            for effect in update::update(&mut app, msg) {
+                effects::spawn(effect, &ctx);
+            }
+        }
+        std::mem::take(&mut app.events_outbox)
+        // _guard drops here → terminal restored, even on the `?` paths above.
+    };
+
+    // Best-effort tail flush of whatever the tick cadence hadn't sent yet.
+    // Quitting mid-track is not a skip (mirrors the web: closing the tab
+    // doesn't emit one), so only already-noted events are at stake.
+    if !leftover_events.is_empty() {
+        let outgoing: Vec<_> = leftover_events
+            .iter()
+            .map(signal::PendingEvent::to_outgoing)
+            .collect();
+        let flush = crate::api::post_events(&config, &outgoing);
+        if let Ok(Err(e)) = tokio::time::timeout(std::time::Duration::from_secs(3), flush).await {
+            tracing::debug!(error = %e, "final event flush failed");
         }
     }
     Ok(())
-    // _guard drops here → terminal restored, even on the `?` paths above.
 }

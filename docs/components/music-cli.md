@@ -123,6 +123,16 @@ Notes:
   runs in browse-only mode with a visible notice.
 - **Recommender down/degraded**: Stations shows a friendly "warming up /
   embedder offline" panel instead of an error.
+- **Listening signal**: the TUI scrobbles like the web player —
+  a now-playing hint at track start and a submission at min(50 %,
+  4 min); tracks under 30 s never scrobble. In gateway mode, manual
+  skips (next/prev, activating another track, removing/clearing the
+  playing one) are batched to `POST /v1/events` with `played_ms`
+  (~5 s cadence, best-effort flush on quit) to feed preference
+  affinity. Natural end-of-track is not a skip.
+- **Dislike auto-skip**: when the queue *advances onto* a track that is
+  disliked (itself, its album, or its artist), it is skipped
+  automatically — but explicitly activating a row always plays it.
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.

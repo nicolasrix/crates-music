@@ -3,7 +3,8 @@
 //! `Effect` is everything the reducer can ask the runtime to do.
 //!
 //! The invariant that keeps the loop simple: **every spawned `Effect`
-//! completes by sending exactly one `Msg`** back over the channel. Racy
+//! completes by sending exactly one `Msg`** back over the channel (the two
+//! deliberately-silent exceptions: audio prefetch and scrobble). Racy
 //! fetches (albums / search / station) carry a generation counter stamped by
 //! the reducer so a stale response can never overwrite newer state.
 
@@ -12,6 +13,7 @@ use music_core::{AlbumId, Track};
 use music_player::PlayerEvent;
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 
+use super::signal::PendingEvent;
 use super::state::{LikedEntry, Rating, Section};
 
 /// Single-line text-field edits, produced by the keymap only while an input
@@ -132,6 +134,12 @@ pub(crate) enum Msg {
         track_id: String,
         bytes: Bytes,
     },
+    /// A batched `POST /v1/events` finished; `events` echoes what was sent
+    /// so a failure can re-queue them (bounded by their `attempts`).
+    EventsFlushed {
+        events: Vec<PendingEvent>,
+        result: Result<(), String>,
+    },
 }
 
 /// Async work the reducer requests; `effects::spawn` runs each on tokio and
@@ -175,5 +183,17 @@ pub(crate) enum Effect {
     },
     PrefetchAudio {
         track_id: String,
+    },
+    /// `/rest/scrobble` — now-playing hint or play submission. The second
+    /// deliberate exception to the one-`Msg`-per-effect invariant (after
+    /// prefetch): a failed scrobble is logged, never surfaced — playback
+    /// must not grow a status line because Navidrome hiccuped.
+    Scrobble {
+        track_id: String,
+        submission: bool,
+    },
+    /// Batched `POST /v1/events` upload; completes as [`Msg::EventsFlushed`].
+    FlushEvents {
+        events: Vec<PendingEvent>,
     },
 }

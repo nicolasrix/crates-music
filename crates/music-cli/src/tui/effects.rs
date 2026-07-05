@@ -1,7 +1,8 @@
 //! Effect runner: every `Effect` becomes one detached tokio task that does
-//! its I/O and reports back as a `Msg` (exactly one, except audio prefetch,
-//! whose failure is deliberately silent — the resolve path retries and
-//! surfaces the error when the track actually plays).
+//! its I/O and reports back as a `Msg` (exactly one, except audio prefetch
+//! and scrobble, whose failures are deliberately silent — prefetch because
+//! the resolve path retries and surfaces the error when the track actually
+//! plays, scrobble because a lost play count never warrants a status line).
 
 use std::sync::Arc;
 
@@ -198,6 +199,33 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
                     None
                 }
             }
+        }
+        Effect::Scrobble {
+            track_id,
+            submission,
+        } => {
+            // Deliberately silent on failure (see the Effect doc): a play
+            // count is not worth a status line, and the next track retries
+            // the connection anyway.
+            let sent = async {
+                let client = ctx.subsonic().await?;
+                client
+                    .scrobble(&TrackId::from(track_id.clone()), submission)
+                    .await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(e) = sent {
+                tracing::debug!(track = track_id, submission, error = %e, "scrobble failed");
+            }
+            None
+        }
+        Effect::FlushEvents { events } => {
+            let outgoing: Vec<_> = events.iter().map(super::signal::PendingEvent::to_outgoing).collect();
+            let result = api::post_events(&ctx.config, &outgoing)
+                .await
+                .map_err(|e| e.to_string());
+            Some(Msg::EventsFlushed { events, result })
         }
     }
 }

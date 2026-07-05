@@ -21,6 +21,10 @@ pub struct QueuedTrack {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    /// Parent ids, carried so queue-level policy (e.g. dislike auto-skip)
+    /// can match album/artist verdicts without re-fetching metadata.
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
     pub duration: Option<Duration>,
 }
 
@@ -180,6 +184,8 @@ mod tests {
             title: format!("title-{id}"),
             artist: None,
             album: None,
+            artist_id: None,
+            album_id: None,
             duration: None,
         }
     }

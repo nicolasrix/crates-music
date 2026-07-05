@@ -11,7 +11,7 @@ use super::super::state::{App, LibraryPane, Loadable, Overlay, Rating, Section, 
 use super::update;
 
 fn app() -> App {
-    App::new(None, false)
+    App::new(None, false, true)
 }
 
 fn track(id: &str, title: &str) -> Track {
@@ -340,7 +340,7 @@ fn transport_toggle_restarts_finished_queue() {
 
 #[test]
 fn no_audio_device_blocks_playback_with_status() {
-    let mut a = App::new(None, true);
+    let mut a = App::new(None, true, true);
     let album = album_with_songs("al1", &["t1"]);
     a.queue
         .replace(album.tracks.iter().map(to_queued).collect(), 0);
@@ -437,4 +437,246 @@ fn nav_clamps_to_list_bounds() {
     assert_eq!(a.library.albums_table.selected(), Some(1));
     update(&mut a, Msg::NavTop);
     assert_eq!(a.library.albums_table.selected(), Some(0));
+}
+
+// ── listening signal (Phase 1: scrobble / skip events / dislike auto-skip) ─
+
+use std::time::Duration;
+
+use music_player::PlaybackSnapshot;
+
+use super::super::signal::{MAX_EVENT_ATTEMPTS, PendingEvent};
+
+/// Pretend the player reports `id` loaded at `pos_s` of `dur_s`.
+fn set_playing(a: &mut App, id: &str, dur_s: u64, pos_s: u64) {
+    a.playback = PlaybackSnapshot {
+        track_id: Some(id.to_owned()),
+        position: Duration::from_secs(pos_s),
+        duration: Some(Duration::from_secs(dur_s)),
+        playing: true,
+        volume: 1.0,
+    };
+}
+
+#[test]
+fn manual_next_emits_skip_event() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 60);
+    let effects = update(&mut a, Msg::TransportNext);
+    assert_eq!(a.events_outbox.len(), 1);
+    let ev = &a.events_outbox[0];
+    assert_eq!(ev.event_type, "skip");
+    assert_eq!(ev.track_id, "t1");
+    assert_eq!(ev.played_ms, Some(60_000));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t2"
+    ));
+}
+
+#[test]
+fn natural_end_is_not_a_skip() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 179);
+    update(&mut a, Msg::Player(PlayerEvent::TrackEnded));
+    assert!(a.events_outbox.is_empty(), "natural end must not report a skip");
+}
+
+#[test]
+fn short_track_abandonment_is_not_reported() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 20, 10);
+    update(&mut a, Msg::TransportNext);
+    assert!(a.events_outbox.is_empty(), "sub-30s tracks carry no skip signal");
+}
+
+#[test]
+fn unstarted_track_abandonment_is_not_reported() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 0);
+    update(&mut a, Msg::TransportNext);
+    assert!(a.events_outbox.is_empty());
+}
+
+#[test]
+fn abandonment_verdict_taken_once_per_load() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 60);
+    update(&mut a, Msg::TransportNext);
+    // The player hasn't caught up (snapshot still says t1); a follow-up
+    // clear must not double-report the same load.
+    update(&mut a, Msg::QueueClear);
+    assert_eq!(a.events_outbox.len(), 1);
+}
+
+#[test]
+fn activating_another_track_emits_skip() {
+    let mut a = playing_app(&["t1", "t2", "t3"], 0);
+    set_playing(&mut a, "t1", 180, 45);
+    a.section = Section::Queue;
+    a.queue_table.select(Some(2));
+    update(&mut a, Msg::Activate);
+    assert_eq!(a.events_outbox.len(), 1);
+    assert_eq!(a.events_outbox[0].played_ms, Some(45_000));
+}
+
+#[test]
+fn direct_mode_collects_no_events() {
+    let mut a = App::new(None, false, false);
+    let album = album_with_songs("al1", &["t1", "t2"]);
+    a.queue.replace(album.tracks.iter().map(to_queued).collect(), 0);
+    set_playing(&mut a, "t1", 180, 60);
+    update(&mut a, Msg::TransportNext);
+    assert!(a.events_outbox.is_empty(), "/v1/events is gateway-only");
+}
+
+#[test]
+fn dislike_auto_skips_on_natural_advance() {
+    let mut a = playing_app(&["t1", "t2", "t3"], 0);
+    a.ratings.insert("t2".to_owned(), Rating::Dislike);
+    set_playing(&mut a, "t1", 180, 179);
+    let effects = update(&mut a, Msg::Player(PlayerEvent::TrackEnded));
+    assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("t3"));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t3"
+    ));
+    assert!(a.events_outbox.is_empty(), "auto-skipped tracks never played");
+}
+
+#[test]
+fn auto_skip_off_the_end_stops_playback() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    a.ratings.insert("t2".to_owned(), Rating::Dislike);
+    set_playing(&mut a, "t1", 180, 179);
+    let effects = update(&mut a, Msg::Player(PlayerEvent::TrackEnded));
+    assert!(effects.is_empty());
+    assert!(a.queue.current().is_none(), "queue is finished");
+}
+
+#[test]
+fn direct_pick_overrides_dislike() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    a.ratings.insert("t2".to_owned(), Rating::Dislike);
+    a.section = Section::Queue;
+    a.queue_table.select(Some(1));
+    let effects = update(&mut a, Msg::Activate);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ResolveAudio { track_id, .. }] if track_id == "t2"
+        ),
+        "an explicit pick plays even a disliked track"
+    );
+}
+
+#[test]
+fn prev_walks_back_over_disliked_tracks() {
+    let mut a = playing_app(&["t1", "t2", "t3"], 2);
+    a.ratings.insert("t2".to_owned(), Rating::Dislike);
+    set_playing(&mut a, "t3", 180, 1);
+    let effects = update(&mut a, Msg::TransportPrev);
+    assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("t1"));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t1"
+    ));
+}
+
+#[test]
+fn tick_scrobbles_now_playing_then_submission_exactly_once() {
+    let mut a = playing_app(&["t1"], 0);
+    set_playing(&mut a, "t1", 180, 0);
+    let effects = update(&mut a, Msg::Tick);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Scrobble { track_id, submission: false }] if track_id == "t1"
+    ));
+    // Second tick at the same stage: nothing new.
+    assert!(update(&mut a, Msg::Tick).is_empty());
+
+    set_playing(&mut a, "t1", 180, 90);
+    let effects = update(&mut a, Msg::Tick);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Scrobble { track_id, submission: true }] if track_id == "t1"
+    ));
+    assert!(update(&mut a, Msg::Tick).is_empty());
+}
+
+#[test]
+fn scrobble_state_resets_when_track_changes() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 0);
+    update(&mut a, Msg::Tick);
+    set_playing(&mut a, "t2", 180, 0);
+    let effects = update(&mut a, Msg::Tick);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Scrobble { track_id, submission: false }] if track_id == "t2"
+    ));
+}
+
+#[test]
+fn outbox_flushes_on_cadence_and_marks_inflight() {
+    let mut a = app();
+    a.events_outbox.push(PendingEvent::skip("t1".to_owned(), 5_000));
+    a.tick = 19; // next tick lands on the flush cadence
+    let effects = update(&mut a, Msg::Tick);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FlushEvents { events }] if events.len() == 1
+    ));
+    assert!(a.events_outbox.is_empty());
+    assert!(a.events_inflight);
+
+    // While in flight, cadence ticks must not double-send.
+    a.events_outbox.push(PendingEvent::skip("t2".to_owned(), 5_000));
+    a.tick = 39;
+    assert!(update(&mut a, Msg::Tick).is_empty());
+}
+
+#[test]
+fn failed_flush_requeues_until_attempts_exhausted() {
+    let mut a = app();
+    let ev = PendingEvent::skip("t1".to_owned(), 5_000);
+    a.events_inflight = true;
+    update(
+        &mut a,
+        Msg::EventsFlushed {
+            events: vec![ev.clone()],
+            result: Err("boom".to_owned()),
+        },
+    );
+    assert!(!a.events_inflight);
+    assert_eq!(a.events_outbox.len(), 1);
+    assert_eq!(a.events_outbox[0].attempts, 1);
+
+    // An event at the attempt cap is dropped instead of re-queued.
+    let mut worn_out = ev;
+    worn_out.attempts = MAX_EVENT_ATTEMPTS - 1;
+    a.events_outbox.clear();
+    update(
+        &mut a,
+        Msg::EventsFlushed {
+            events: vec![worn_out],
+            result: Err("boom".to_owned()),
+        },
+    );
+    assert!(a.events_outbox.is_empty(), "exhausted events are dropped");
+}
+
+#[test]
+fn successful_flush_just_clears_inflight() {
+    let mut a = app();
+    a.events_inflight = true;
+    update(
+        &mut a,
+        Msg::EventsFlushed {
+            events: vec![PendingEvent::skip("t1".to_owned(), 5_000)],
+            result: Ok(()),
+        },
+    );
+    assert!(!a.events_inflight);
+    assert!(a.events_outbox.is_empty());
 }

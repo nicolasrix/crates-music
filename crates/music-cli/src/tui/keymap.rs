@@ -125,7 +125,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(None, false)
+        App::new(None, false, true)
     }
 
     #[test]

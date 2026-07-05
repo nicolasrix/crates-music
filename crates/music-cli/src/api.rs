@@ -130,6 +130,47 @@ pub async fn fetch_ratings(config: &Config) -> Result<Vec<RatingItem>, ApiError>
     Ok(resp.ratings)
 }
 
+/// One event for `POST /v1/events` — the gateway's append-only interaction
+/// log that feeds per-track preference affinity (today only `skip`, scaled
+/// by `played_ms`). Matches the wire shape in
+/// `music-gateway/src/events.rs::EventPayload`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OutgoingEvent {
+    pub event_type: String,
+    pub track_id: String,
+    /// Client-stamped unix milliseconds.
+    pub occurred_at: i64,
+    /// Type-specific blob, e.g. `{"played_ms": …}` for a skip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// `POST /v1/events` — batch-upload interaction events. Callers coalesce
+/// (one POST every few seconds), so a failure here loses at most a small
+/// window; the TUI re-queues on error.
+pub async fn post_events(config: &Config, events: &[OutgoingEvent]) -> Result<(), ApiError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let gw = require_gateway(config)?;
+    let token = crate::auth::resolve_bearer(config, gw).await?;
+    let url = endpoint(gw, "/v1/events");
+    let body = serde_json::json!({ "events": events });
+    let resp = http_client(gw)?
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .context("sending events")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("events rejected ({status}): {text}").into());
+    }
+    Ok(())
+}
+
 /// `GET /v1/recommend/next?seed=<id>&n=<n>` — tracks acoustically similar
 /// to a seed track, in rank order. 404 → [`ApiError::RecommenderUnavailable`].
 pub async fn recommend_next(
@@ -300,5 +341,36 @@ mod tests {
     fn search_body_parse_failure_is_http_error() {
         let err = parse_search_body("not json").unwrap_err();
         assert!(matches!(err, ApiError::Http(_)));
+    }
+
+    #[test]
+    fn outgoing_event_serializes_to_the_gateway_wire_shape() {
+        // Must deserialize as `music-gateway/src/events.rs::EventPayload`:
+        // event_type / track_id / occurred_at, optional metadata blob.
+        let with_meta = OutgoingEvent {
+            event_type: "skip".to_owned(),
+            track_id: "t1".to_owned(),
+            occurred_at: 1_700_000_000_000,
+            metadata: Some(serde_json::json!({ "played_ms": 61_500 })),
+        };
+        assert_eq!(
+            serde_json::to_value(&with_meta).unwrap(),
+            serde_json::json!({
+                "event_type": "skip",
+                "track_id": "t1",
+                "occurred_at": 1_700_000_000_000_i64,
+                "metadata": { "played_ms": 61_500 },
+            })
+        );
+
+        // No metadata → the key is omitted entirely, not null.
+        let bare = OutgoingEvent {
+            event_type: "scrobble".to_owned(),
+            track_id: "t2".to_owned(),
+            occurred_at: 1,
+            metadata: None,
+        };
+        let v = serde_json::to_value(&bare).unwrap();
+        assert!(v.get("metadata").is_none());
     }
 }

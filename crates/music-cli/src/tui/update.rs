@@ -4,6 +4,9 @@
 //! through effects would only add latency to keypresses.
 
 use super::msg::{Effect, Msg, StationError};
+use super::signal::{
+    self, MAX_EVENT_ATTEMPTS, PendingEvent, ScrobbleDecision, TrackSignal,
+};
 use super::state::{
     ALBUM_KINDS, App, LibraryPane, Loadable, Overlay, Rating, SearchBucket, Section, to_queued,
 };
@@ -15,6 +18,16 @@ mod tests;
 const RECOMMEND_N: usize = 20;
 const STATION_N: usize = 30;
 const ALBUM_PAGE: u32 = 100;
+/// Event-outbox flush cadence in ticks (~5 s at the 250 ms tick).
+const FLUSH_EVERY_TICKS: u64 = 20;
+
+/// How the queue moved off the current track: a user gesture (skip signal)
+/// or the track draining / failing on its own (no signal).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Advance {
+    Manual,
+    Natural,
+}
 
 // A flat message dispatcher, like app.rs's command match — the length is the
 // enum's, not the logic's; per-arm work already lives in helper fns.
@@ -26,7 +39,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             if app.status.as_ref().is_some_and(|s| app.tick >= s.expires_at) {
                 app.status = None;
             }
-            vec![]
+            signal_tick(app)
         }
         Msg::Quit => {
             app.should_quit = true;
@@ -84,7 +97,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::SubmitInput => submit_input(app),
         Msg::TransportToggle => transport_toggle(app),
-        Msg::TransportNext => next_track(app),
+        Msg::TransportNext => next_track(app, Advance::Manual),
         Msg::TransportPrev => prev_track(app),
         Msg::SeekBy(delta) => {
             if let Some(p) = &app.player {
@@ -102,6 +115,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::RecommendFromNowPlaying => recommend_from_now_playing(app),
         Msg::QueueRemoveSelected => queue_remove_selected(app),
         Msg::QueueClear => {
+            note_abandonment(app);
             app.queue.clear();
             app.prefetched = None;
             app.pending_load = None;
@@ -249,7 +263,8 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             app.pending_load = None;
             app.set_status(format!("skipping {track_id}: {error}"), true);
-            next_track(app)
+            // Not a user abandonment — the track never played.
+            next_track(app, Advance::Natural)
         }
         Msg::PrefetchReady { track_id, bytes } => {
             // Only keep it if that track is still next up.
@@ -258,7 +273,105 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::EventsFlushed { events, result } => {
+            app.events_inflight = false;
+            if let Err(e) = result {
+                requeue_failed_events(app, events, &e);
+            }
+            vec![]
+        }
     }
+}
+
+// ── listening signal ────────────────────────────────────────────────────
+
+/// Per-tick signal work: keep the per-track emission state in step with
+/// what the player reports, fire due scrobbles, and flush the event outbox
+/// on its cadence.
+fn signal_tick(app: &mut App) -> Vec<Effect> {
+    let mut effects = Vec::new();
+
+    if let Some(id) = app.playback.track_id.clone() {
+        if app.signal.as_ref().is_none_or(|s| s.track_id != id) {
+            app.signal = Some(TrackSignal::new(id.clone()));
+        }
+        let sig = app.signal.as_mut().expect("just ensured above");
+        match signal::evaluate_scrobble(app.playback.duration, app.playback.position, sig) {
+            ScrobbleDecision::NowPlaying => {
+                sig.now_playing_sent = true;
+                effects.push(Effect::Scrobble {
+                    track_id: id,
+                    submission: false,
+                });
+            }
+            ScrobbleDecision::Submission => {
+                sig.submission_sent = true;
+                effects.push(Effect::Scrobble {
+                    track_id: id,
+                    submission: true,
+                });
+            }
+            ScrobbleDecision::None => {}
+        }
+    }
+
+    if !app.events_outbox.is_empty()
+        && !app.events_inflight
+        && app.tick.is_multiple_of(FLUSH_EVERY_TICKS)
+    {
+        app.events_inflight = true;
+        effects.push(Effect::FlushEvents {
+            events: std::mem::take(&mut app.events_outbox),
+        });
+    }
+    effects
+}
+
+/// The current track is being *manually* abandoned (next/prev, activating
+/// another track, removing or clearing it). Record at most one skip verdict
+/// per load — the gate itself (too short / never started) lives in
+/// [`signal::evaluate_skip`]. Natural end-of-track never comes through here.
+fn note_abandonment(app: &mut App) {
+    if !app.events_enabled {
+        return;
+    }
+    let Some(id) = app.playback.track_id.clone() else {
+        return;
+    };
+    if app
+        .signal
+        .as_ref()
+        .is_some_and(|s| s.track_id == id && s.abandoned)
+    {
+        return;
+    }
+    if let Some(played_ms) = signal::evaluate_skip(app.playback.duration, app.playback.position) {
+        app.events_outbox.push(PendingEvent::skip(id.clone(), played_ms));
+    }
+    // Mark the verdict taken even when gated out — one decision per load.
+    match app.signal.as_mut() {
+        Some(s) if s.track_id == id => s.abandoned = true,
+        _ => {
+            let mut s = TrackSignal::new(id);
+            s.abandoned = true;
+            app.signal = Some(s);
+        }
+    }
+}
+
+/// Put failed events back at the front of the outbox (order preserved),
+/// dropping any that exhausted their attempts.
+fn requeue_failed_events(app: &mut App, events: Vec<PendingEvent>, error: &str) {
+    tracing::debug!(count = events.len(), error, "event flush failed");
+    let mut retained: Vec<PendingEvent> = events
+        .into_iter()
+        .filter_map(|mut ev| {
+            ev.attempts += 1;
+            (ev.attempts < MAX_EVENT_ATTEMPTS).then_some(ev)
+        })
+        .collect();
+    retained.append(&mut app.events_outbox);
+    app.events_outbox = retained;
 }
 
 // ── navigation ─────────────────────────────────────────────────────────
@@ -493,14 +606,47 @@ fn transport_toggle(app: &mut App) -> Vec<Effect> {
     vec![]
 }
 
-fn next_track(app: &mut App) -> Vec<Effect> {
-    if app.queue.advance().is_some() {
-        start_current(app)
-    } else {
+fn next_track(app: &mut App, cause: Advance) -> Vec<Effect> {
+    if cause == Advance::Manual {
+        note_abandonment(app);
+    }
+    if app.queue.advance().is_none() {
         // Ran off the end: playback stops naturally; clear transients.
         app.pending_load = None;
         app.player_stop();
+        return vec![];
+    }
+    auto_skip_forward(app);
+    if app.queue.current().is_some() {
+        start_current(app)
+    } else {
+        // The auto-skip walked off the end — every remaining track was
+        // disliked. Same terminal state as running off naturally.
+        app.pending_load = None;
+        app.player_stop();
         vec![]
+    }
+}
+
+/// Dislike auto-skip: when the queue *advances onto* a disliked track
+/// (track, album, or artist verdict), walk forward to the first playable
+/// one. Direct picks (activating a specific row) never come through here —
+/// an explicit choice overrides the dislike, mirroring the web player.
+fn auto_skip_forward(app: &mut App) {
+    let mut skipped = 0usize;
+    while app
+        .queue
+        .current()
+        .is_some_and(|t| signal::is_disliked(t, &app.ratings))
+    {
+        skipped += 1;
+        if app.queue.advance().is_none() {
+            break;
+        }
+    }
+    if skipped > 0 {
+        app.set_status(format!("auto-skipped {skipped} disliked track(s)"), false);
+        sync_queue_cursor(app);
     }
 }
 
@@ -513,7 +659,24 @@ fn prev_track(app: &mut App) -> Vec<Effect> {
         }
         return vec![];
     }
-    if app.queue.previous().is_some() {
+    // Walk backward over disliked tracks to the first playable target.
+    let not_disliked = |i: &usize| !signal::is_disliked(&app.queue.items()[*i], &app.ratings);
+    let target = match app.queue.current_index() {
+        Some(cur) => (0..cur).rev().find(not_disliked),
+        // Finished queue: "previous" recovers the tail, minus dislikes.
+        None => (0..app.queue.len()).rev().find(not_disliked),
+    };
+    let Some(target) = target else {
+        // Nothing playable behind: restart the current track in place (the
+        // standard prev-at-start behavior).
+        if let Some(p) = &app.player {
+            p.seek_to(std::time::Duration::ZERO);
+        }
+        return vec![];
+    };
+    note_abandonment(app);
+    if app.queue.jump(target).is_some() {
+        sync_queue_cursor(app);
         start_current(app)
     } else {
         vec![]
@@ -522,7 +685,7 @@ fn prev_track(app: &mut App) -> Vec<Effect> {
 
 fn player_event(app: &mut App, ev: music_player::PlayerEvent) -> Vec<Effect> {
     match ev {
-        music_player::PlayerEvent::TrackEnded => next_track(app),
+        music_player::PlayerEvent::TrackEnded => next_track(app, Advance::Natural),
         music_player::PlayerEvent::Error(e) => {
             app.set_status(e, true);
             vec![]
@@ -535,6 +698,9 @@ fn queue_remove_selected(app: &mut App) -> Vec<Effect> {
         return vec![];
     };
     let was_current = app.queue.current_index() == Some(sel);
+    if was_current {
+        note_abandonment(app);
+    }
     app.queue.remove(sel);
     let len = app.queue.len();
     if len == 0 {
@@ -567,6 +733,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                     return vec![];
                 };
                 let queued = album.tracks.iter().map(to_queued).collect();
+                note_abandonment(app);
                 app.queue.replace(queued, sel);
                 app.prefetched = None;
                 sync_queue_cursor(app);
@@ -578,6 +745,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
             let Some(sel) = app.queue_table.selected() else {
                 return vec![];
             };
+            note_abandonment(app);
             if app.queue.jump(sel).is_some() {
                 start_current(app)
             } else {
@@ -592,6 +760,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                 return vec![];
             };
             let queued = tracks.iter().map(to_queued).collect();
+            note_abandonment(app);
             app.queue.replace(queued, sel);
             app.prefetched = None;
             sync_queue_cursor(app);
@@ -622,6 +791,7 @@ fn activate(app: &mut App) -> Vec<Effect> {
                 .iter()
                 .position(|t| t.id == track.id.as_str())
                 .unwrap_or(0);
+            note_abandonment(app);
             app.queue.replace(tracks, start);
             app.prefetched = None;
             sync_queue_cursor(app);
@@ -663,6 +833,7 @@ fn activate_search(app: &mut App) -> Vec<Effect> {
                 return vec![];
             }
             let queued = results.tracks.iter().map(to_queued).collect();
+            note_abandonment(app);
             app.queue.replace(queued, sel);
             app.prefetched = None;
             sync_queue_cursor(app);

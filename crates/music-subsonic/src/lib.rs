@@ -184,6 +184,19 @@ impl Client {
         wire::parse_ping(&body)
     }
 
+    /// Report a play (`scrobble`). `submission = false` is the "now
+    /// playing" hint; `true` submits the play to the server's counts (and
+    /// whatever scrobble targets it forwards to). The response carries no
+    /// payload — only the envelope status matters.
+    pub async fn scrobble(&self, id: &TrackId, submission: bool) -> Result<()> {
+        let params = vec![
+            ("id", id.as_str().to_string()),
+            ("submission", submission.to_string()),
+        ];
+        let body = self.fetch_text("scrobble", &params).await?;
+        wire::parse_ping(&body)
+    }
+
     pub async fn get_album_list2(
         &self,
         list_type: AlbumListType,

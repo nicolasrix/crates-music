@@ -88,7 +88,7 @@ mod tests {
     fn draw_empty_app_does_not_panic() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(None, false);
+        let mut app = App::new(None, false, true);
         let theme = Theme::detect();
         terminal.draw(|f| draw(f, &mut app, &theme)).unwrap();
         // And with the help overlay + a tiny terminal.

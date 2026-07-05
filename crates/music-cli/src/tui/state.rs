@@ -11,6 +11,7 @@ use music_player::{PlayQueue, PlaybackSnapshot, Player, QueuedTrack};
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use ratatui::widgets::TableState;
 
+use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
 
 /// Sidebar sections, in display order (the `1..5` bindings index this).
@@ -203,6 +204,10 @@ pub(crate) struct LikedState {
 }
 
 /// Root state.
+// The bools are independent facts about the session (device present, quit
+// requested, flush in flight, gateway configured), not an implicit state
+// machine — an enum would obscure, not clarify.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub(crate) struct App {
     pub section: Section,
@@ -237,10 +242,21 @@ pub(crate) struct App {
     /// Track/album/artist verdicts, applied optimistically; keyed by entity
     /// id (ids are globally unique across kinds in Navidrome).
     pub ratings: HashMap<String, Rating>,
+
+    // ── listening signal ──────────────────────────────────────────────
+    /// Scrobble/skip emission state for the currently-loaded track.
+    pub signal: Option<TrackSignal>,
+    /// Events awaiting the next batched `POST /v1/events` flush.
+    pub events_outbox: Vec<PendingEvent>,
+    /// A flush effect is in flight — don't start another.
+    pub events_inflight: bool,
+    /// `/v1/events` is gateway-only; direct-to-Navidrome mode disables the
+    /// outbox entirely (scrobbles still go out — they're Subsonic).
+    pub events_enabled: bool,
 }
 
 impl App {
-    pub(crate) fn new(player: Option<Player>, no_audio_device: bool) -> Self {
+    pub(crate) fn new(player: Option<Player>, no_audio_device: bool, events_enabled: bool) -> Self {
         Self {
             section: Section::Library,
             overlay: Overlay::None,
@@ -259,6 +275,10 @@ impl App {
             stations: StationsState::default(),
             liked: LikedState::default(),
             ratings: HashMap::new(),
+            signal: None,
+            events_outbox: Vec::new(),
+            events_inflight: false,
+            events_enabled,
         }
     }
 
@@ -301,6 +321,8 @@ pub(crate) fn to_queued(t: &Track) -> QueuedTrack {
         title: t.title.clone(),
         artist: t.artist_name.clone(),
         album: t.album_name.clone(),
+        artist_id: t.artist_id.as_ref().map(|a| a.as_str().to_owned()),
+        album_id: t.album_id.as_ref().map(|a| a.as_str().to_owned()),
         duration: t.duration_seconds.map(u64::from).map(Duration::from_secs),
     }
 }
