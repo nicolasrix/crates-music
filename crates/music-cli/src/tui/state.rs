@@ -85,6 +85,10 @@ pub(crate) struct RoomState {
     pub meta: HashMap<String, QueuedTrack>,
     /// Metadata fetches in flight (dedups hydration requests).
     pub hydrating: HashSet<String>,
+    /// Ids whose hydration `getSong` failed — held out of re-request so a
+    /// deleted/unresolvable id can't hot-loop a fetch on every inbound
+    /// frame. Cleared when a queue-growth op could reintroduce it.
+    pub hydrate_failed: HashSet<String>,
     /// "Play audio on this device." Starts off so joining a room that is
     /// mid-playback doesn't blast audio; picking a track locally enables
     /// it (that gesture *means* "play here"), `o` toggles it.
@@ -110,6 +114,7 @@ impl RoomState {
             room: SyncState::new(),
             meta: HashMap::new(),
             hydrating: HashSet::new(),
+            hydrate_failed: HashSet::new(),
             output_on: false,
             last_classified: None,
             direct_play: None,

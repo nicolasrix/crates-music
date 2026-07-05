@@ -311,6 +311,96 @@ fn ws_down_drops_to_offline_but_keeps_queue() {
 }
 
 #[test]
+fn reconnect_does_not_auto_skip_the_playing_track() {
+    // Regression: a WS blip must not yank the track the user is hearing.
+    let mut a = online_playing(&["t1", "t2"], 0);
+    a.ratings.insert("t1".into(), Rating::Dislike);
+    // Directly picked disliked t1 (exempt) and it's the classified cursor.
+    a.sync.direct_play = None;
+    a.sync.last_classified = Some("t1".into());
+    // WS drops, then reconnects with the same cursor still on t1.
+    update(&mut a, Msg::Sync(SyncEvent::Down { reason: "blip".into() }));
+    let fx = snapshot(&mut a, room_state(&["t1", "t2"], Some(0), true, 2));
+    // t1 is still the classified cursor → no fresh advance → not skipped.
+    assert!(!fx.iter().any(|e| matches!(
+        e,
+        Effect::SyncSubmit { op: SyncOp::SetNowPlaying { .. } }
+    )));
+}
+
+#[test]
+fn silent_remote_does_not_auto_skip_the_room() {
+    // Output off → this device is a silent remote and must not mutate the
+    // shared room, even when the cursor lands on a disliked track.
+    let mut a = online_playing(&["t1", "t2", "t3"], 0);
+    a.sync.output_on = false;
+    a.ratings.insert("t2".into(), Rating::Dislike);
+    let fx = applied(&mut a, SyncOp::SetNowPlaying { index: Some(1) }, 2);
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SyncSubmit { .. })));
+}
+
+#[test]
+fn hydration_of_album_disliked_current_track_skips_it() {
+    // A track whose *album* is disliked advances to the cursor before its
+    // metadata resolves (so it looks playable); when hydration reveals the
+    // album, follow re-classifies and skips it.
+    let mut a = online_playing(&["t1", "t2"], 0);
+    a.ratings.insert("al-bad".into(), Rating::Dislike);
+    // Server advances onto t2 — unhydrated, so not yet known disliked.
+    let fx = applied(&mut a, SyncOp::SetNowPlaying { index: Some(1) }, 2);
+    assert!(!fx.iter().any(|e| matches!(
+        e,
+        Effect::SyncSubmit { op: SyncOp::SetNowPlaying { .. } }
+    )));
+    // Hydrate t2 with an album that is disliked.
+    let mut t2 = track("t2", "T2");
+    t2.album_id = Some(music_core::AlbumId::from("al-bad".to_owned()));
+    let fx = update(
+        &mut a,
+        Msg::TracksHydrated {
+            ids: vec!["t2".into()],
+            result: Ok(vec![t2]),
+        },
+    );
+    // Now it's known disliked → skip past it (nothing playable → pause).
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::SyncSubmit {
+            op: SyncOp::SetNowPlaying { .. } | SyncOp::SetPlaying { is_playing: false }
+        }
+    )));
+}
+
+#[test]
+fn failed_hydration_is_not_re_requested_every_frame() {
+    let mut a = online_playing(&["t1", "gone"], 0);
+    a.sync.meta.remove("gone");
+    // First follow requested hydration for "gone"; simulate its 404
+    // (resolve returned only t1, "gone" missing).
+    update(
+        &mut a,
+        Msg::TracksHydrated {
+            ids: vec!["gone".into()],
+            result: Ok(vec![]),
+        },
+    );
+    assert!(a.sync.hydrate_failed.contains("gone"));
+    // A benign position-ish frame runs follow again — no re-request.
+    let fx = applied(&mut a, SyncOp::SetPosition { position_ms: 500 }, 2);
+    assert!(!fx.iter().any(|e| matches!(e, Effect::HydrateTracks { .. })));
+    // …but a queue-growth op clears the failed set so it retries.
+    let fx = applied(
+        &mut a,
+        SyncOp::Push {
+            item_id: QueueItemId::from("it-new".to_owned()),
+            track_id: TrackId::from("new".to_owned()),
+        },
+        3,
+    );
+    assert!(fx.iter().any(|e| matches!(e, Effect::HydrateTracks { .. })));
+}
+
+#[test]
 fn reconnect_snapshot_readopts_server_state() {
     let mut a = online_playing(&["t1", "t2"], 0);
     update(&mut a, Msg::Sync(SyncEvent::Down { reason: "drop".into() }));

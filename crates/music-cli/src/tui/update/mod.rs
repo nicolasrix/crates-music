@@ -253,6 +253,13 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 }
                 return if app.sync.online() { room::follow(app) } else { vec![] };
             }
+            // Silent remote: output was toggled off after this resolve was
+            // issued. `player_load` would start the sink, so drop the bytes
+            // rather than break the "no sound on this device" guarantee.
+            if app.sync.online() && !app.sync.output_on {
+                app.pending_load = None;
+                return vec![];
+            }
             let duration = current.and_then(|t| t.duration);
             app.player_load(bytes, track_id, duration);
             app.pending_load = None;
@@ -305,17 +312,44 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             match result {
                 Ok(tracks) => {
+                    let resolved: std::collections::HashSet<&str> =
+                        tracks.iter().map(|t| t.id.as_str()).collect();
+                    // Ids we asked for but didn't get back are unresolvable
+                    // (deleted / not a song) — remember them so hydration
+                    // doesn't re-request on every inbound frame.
+                    for id in &ids {
+                        if !resolved.contains(id.as_str()) {
+                            app.sync.hydrate_failed.insert(id.clone());
+                        }
+                    }
                     for t in &tracks {
                         app.sync.meta.insert(t.id.as_str().to_owned(), to_queued(t));
                     }
                     if app.sync.online() {
+                        // If the *current* track's metadata just arrived, its
+                        // album/artist dislike couldn't be known when it
+                        // became current — force one re-classification so a
+                        // now-known dislike is honored (project alone would
+                        // leave `last_classified` latched and skip it).
+                        if app
+                            .sync
+                            .cursor_track_id()
+                            .is_some_and(|tid| ids.iter().any(|id| id == tid))
+                        {
+                            app.sync.last_classified = None;
+                        }
                         room::project(app);
+                        return room::follow(app);
                     }
                 }
-                // Failed ids stay out of `meta` and out of `hydrating` —
-                // retried on the next queue change, never in a hot loop
-                // (mirrors the web's backfill).
-                Err(e) => tracing::debug!(error = %e, "queue hydration failed"),
+                // A whole-batch failure: hold every id so it isn't retried
+                // in a hot loop (cleared on the next queue-growth op).
+                Err(e) => {
+                    tracing::debug!(error = %e, "queue hydration failed");
+                    for id in &ids {
+                        app.sync.hydrate_failed.insert(id.clone());
+                    }
+                }
             }
             vec![]
         }

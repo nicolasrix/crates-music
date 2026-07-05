@@ -58,6 +58,8 @@ fn adopt_snapshot(app: &mut App, state: SyncState) -> Vec<Effect> {
     }
     app.sync.phase = SyncPhase::Online;
     app.sync.room = state;
+    // Fresh state — anything previously unresolvable is worth retrying.
+    app.sync.hydrate_failed.clear();
     project(app);
     follow(app)
 }
@@ -86,6 +88,12 @@ fn applied(app: &mut App, op: &SyncOp, version: u64) -> Vec<Effect> {
         return vec![Effect::SyncResync];
     }
     app.sync.room.version = version;
+    // A queue-growth op may reintroduce a previously-unresolvable id (or a
+    // now-restored one) — clear the failed set so hydration retries it,
+    // bounding retries to queue changes rather than every frame.
+    if matches!(op, SyncOp::Push { .. } | SyncOp::StartSession { .. }) {
+        app.sync.hydrate_failed.clear();
+    }
     project(app);
     follow(app)
 }
@@ -94,11 +102,14 @@ fn go_offline(app: &mut App, reason: &str) -> Vec<Effect> {
     match app.sync.phase {
         SyncPhase::Online => {
             app.sync.phase = SyncPhase::Offline;
-            // The last projection stays in `app.queue` and simply *is*
-            // the local queue now; audio keeps playing. The WS task keeps
+            // The last projection stays in `app.queue` and simply *is* the
+            // local queue now; audio keeps playing. The WS task keeps
             // retrying and the next snapshot re-adopts the shared state.
-            app.sync.last_classified = None;
-            app.sync.direct_play = None;
+            //
+            // Deliberately keep `last_classified` and `direct_play`: audio
+            // is still playing the same track, so on reconnect the snapshot
+            // must not treat it as a fresh advance and auto-skip the track
+            // the user is actively hearing (a WS blip is not a queue move).
             app.set_status(
                 format!("sync offline — queue is local until reconnect ({reason})"),
                 true,
@@ -156,9 +167,15 @@ pub(super) fn project(app: &mut App) {
 pub(super) fn follow(app: &mut App) -> Vec<Effect> {
     let mut effects = Vec::new();
 
-    // 1. Dislike auto-skip (the web classifier, ported). Only when the
-    //    cursor lands on a *new* track — disliking the song that is
-    //    playing right now must not yank it.
+    // 1. Dislike auto-skip (the web classifier, ported). The device
+    //    playing audio owns this policy, so it's gated on `output_on` —
+    //    a silent remote never mutates the shared room. It fires only
+    //    when the cursor lands on a *new* track (disliking the song that
+    //    is playing right now must not yank it) — with one exception:
+    //    when a track's metadata *just arrived*, its album/artist verdict
+    //    could not be known when it first became current, so hydration
+    //    forces a re-classification (`last_classified` is cleared by the
+    //    hydration handler before calling us).
     let Some(tid) = app.sync.cursor_track_id().map(str::to_owned) else {
         app.sync.last_classified = None;
         if app.playback.track_id.is_some() && app.sync.output_on {
@@ -173,7 +190,7 @@ pub(super) fn follow(app: &mut App) -> Vec<Effect> {
     if app.sync.direct_play.as_deref() == Some(tid.as_str()) {
         // The user explicitly picked it — plays even if disliked.
         app.sync.direct_play = None;
-    } else if advanced && track_disliked(app, &tid) {
+    } else if app.sync.output_on && advanced && track_disliked(app, &tid) {
         let skip_to = next_playable(app);
         effects.extend(hydrate_missing(app));
         app.set_status("auto-skipping a disliked track", false);
@@ -259,6 +276,7 @@ fn hydrate_missing(app: &mut App) -> Vec<Effect> {
         let id = it.track_id.as_str();
         if !app.sync.meta.contains_key(id)
             && !app.sync.hydrating.contains(id)
+            && !app.sync.hydrate_failed.contains(id)
             && !ids.iter().any(|seen| seen == id)
         {
             ids.push(id.to_owned());
@@ -381,7 +399,13 @@ pub(super) fn toggle_playing(app: &mut App) -> Vec<Effect> {
     }
     if pb.now_playing_index.is_none() {
         // Shared queue with no cursor (e.g. the playing row was removed):
-        // space starts it from the top, like the local idle-restart.
+        // space starts it from the top, like the local idle-restart. Reset
+        // the advance direction so auto-skip walks *forward* from track 0
+        // (a stale -1 from an earlier `prev` would step off the front).
+        app.sync.advance_dir = 1;
+        if !app.sync.output_on {
+            app.set_status("room started — this device is a silent remote (o for audio)", false);
+        }
         return vec![
             Effect::SyncSubmit {
                 op: SyncOp::SetNowPlaying { index: Some(0) },
@@ -545,7 +569,13 @@ pub(super) fn reorder_selected(app: &mut App, kind: MoveKind) -> Vec<Effect> {
 /// remote *for*.
 pub(super) fn toggle_output(app: &mut App) -> Vec<Effect> {
     if !app.sync.online() {
-        app.set_status("audio output toggle needs a live sync connection", false);
+        let msg = match app.sync.phase {
+            // No gateway at all — the queue is always local, audio always on.
+            SyncPhase::Disabled => "audio output is always on in local mode",
+            // Gateway configured but the WS is down right now.
+            _ => "audio output toggle needs a live sync connection",
+        };
+        app.set_status(msg, false);
         return vec![];
     }
     app.sync.output_on = !app.sync.output_on;
