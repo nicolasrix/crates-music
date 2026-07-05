@@ -95,12 +95,13 @@ Running `crates-cli` with **no subcommand on a terminal** opens a
 full-screen interactive player (ratatui). On a pipe the same invocation
 prints help and exits 2, so scripts and agents never hang on it.
 
-Six sections (sidebar, keys `1`–`6` or `Tab`): **Library** (a browse
+Seven sections (sidebar, keys `1`–`7` or `Tab`): **Library** (a browse
 list with three modes — albums / artists / tracks, cycled with `[`/`]`
 — that drills into album and artist detail panes), **Search** (the
 gateway's typo-tolerant `/v1/search`), **Queue** (the play queue),
 **Playlists** (gateway-owned playlist CRUD), **Stations**
-(natural-language prompts) and **Liked** (your ratings). Playback is
+(natural-language prompts), **Liked** (your ratings) and **Downloads**
+(the offline audio cache — budgets + pinned tracks). Playback is
 local (rodio) through the same L3 audio cache as `crates-cli play`, with
 the next track prefetched for near-gapless handoff.
 
@@ -124,6 +125,9 @@ the next track prefetched for near-gapless handoff.
 | `o` | toggle audio output on this device (sync rooms) |
 | `A` | toggle autoplay (keep the queue topped up with recommendations) |
 | `f` / `F` | thumbs up / down on the now-playing autoplay pick |
+| `d` | save the selected track offline (toggle pin; fetches if not cached) |
+| `W` | bulk-download the open album/playlist · warm from liked (Downloads) |
+| `E` | Downloads: evict the regular cache down to its budget |
 | `N` `s` `m` `R` `X` `x` | playlists: new · shuffle-play · suggest · rename · delete · remove-track |
 
 Notes:
@@ -199,6 +203,20 @@ Notes:
   `o` toggles "play audio on this device" so a terminal can drive the
   room as a silent remote. In direct-Subsonic mode (no `[gateway]`)
   there's no room and the queue is purely local.
+- **Downloads / offline** (section 7): the same L3 audio cache as the
+  classic `pin`/`pinned`/`cache` subcommands, surfaced as two budget
+  gauges (regular vs pinned, styled like the progress bar) over storage
+  totals and a pinned-track table (`Enter` plays it — offline-capable,
+  keyed on the track id, so unhydrated rows still play). `d` on *any*
+  track row toggles save-offline (fetch-if-missing, then pin; a second
+  `d` un-saves); `W` bulk-downloads the open album or playlist (tolerant
+  per track — the status line tallies saved / already-offline / failed),
+  or warms the cache from every liked track when pressed in Downloads;
+  `E` evicts the regular cache to its budget. Pinned tracks live in a
+  separate budget and are never LRU-evicted; auto-cached (played) tracks
+  ride the regular budget. When the sync WS is down, a `⚠ offline` badge
+  appears at the bottom of the sidebar — a reminder that pinned tracks
+  still play with no gateway.
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.
@@ -258,13 +276,14 @@ crates/music-cli/
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
 │       ├── autoplay.rs   # pure tethered-drift seed weighting (port of autoplaySeeds.ts)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
-│       │   └── refill.rs # autoplay from-seeds/from-any refill orchestration
+│       │   ├── refill.rs # autoplay from-seeds/from-any refill orchestration
+│       │   └── downloads.rs # pin / unpin / bulk / warm / evict cache ops
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
-│       ├── views/        # library · search · queue · playlists · stations · liked · help
-│       └── widgets/      # now-playing bar, sidebar, input field
+│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · help
+│       └── widgets/      # now-playing bar, sidebar (offline badge), input field
 └── tests/            # clap parsing, config, formatters
 ```
 
