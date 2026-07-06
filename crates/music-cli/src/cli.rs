@@ -181,6 +181,16 @@ pub enum AuthAction {
     /// Start the device flow: prints a code + URL, then waits for you to
     /// approve it in a logged-in browser. Saves the resulting tokens.
     Login,
+    /// Redeem a shared guest code to join a host's room. No browser and no
+    /// prior login — the code is the credential. Grants an ephemeral,
+    /// refresh-less session that lapses at its TTL.
+    Guest {
+        /// The shareable guest code (e.g. `XXXX-XXXX`) from the host.
+        code: String,
+        /// Optional display name shown in the host's "who's here".
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Revoke the stored refresh token and delete the local token store.
     Logout,
     /// Show whether the CLI is authenticated and when the access token

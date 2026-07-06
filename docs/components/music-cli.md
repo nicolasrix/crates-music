@@ -409,6 +409,26 @@ them.
 The old static `[gateway].bearer_token` shared secret has been
 **removed** — each device now holds its own revocable refresh token.
 
+### Guest join
+
+`crates-cli auth guest <code> [--name <display>]` redeems a shared guest
+code (`POST /oauth/guest`) to join a host's room. No browser and no prior
+login — the code *is* the credential. The grant returns a **single access
+token with no refresh** (see D4), stored in `cli-tokens.json` with a
+`kind: "guest"` marker so the token store never attempts a refresh grant
+for it. When the session lapses at its TTL, `resolve_bearer` fails with a
+friendly *"guest session expired — redeem a new code"* instead of a
+refresh loop; the visitor runs `auth guest` again. `auth status`
+distinguishes a guest session (and its remaining minutes); `auth logout`
+just clears the local store (a guest has no refresh token to revoke, and
+its server-side row is GC'd at expiry).
+
+Guests join the host's sync room server-side (nothing client-side to do).
+Role-gated writes (ratings, playlist edits) are refused by the gateway
+with `403 → ApiError::Forbidden`, which the CLI and TUI surface as an
+honest "not permitted" message — the server is the enforcement point; the
+UI gating is UX, not security.
+
 ## Tests
 
 - `tests/cli_parser.rs` — clap parsing, including bare invocation
