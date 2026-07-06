@@ -10,6 +10,7 @@
 mod autoplay;
 mod effects;
 mod keymap;
+mod mpris;
 mod msg;
 mod render;
 mod section_state;
@@ -116,6 +117,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             effects::spawn(msg::Effect::LoadWhoami, &ctx);
         }
 
+        // Desktop media keys + now-playing metadata over D-Bus (Linux). A
+        // no-op elsewhere / when there's no session bus. Dropped on quit.
+        let mpris = mpris::Bridge::spawn(msg_tx.clone());
+
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -124,6 +129,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             if let Some(p) = &app.player {
                 app.playback = p.snapshot();
             }
+            mpris.publish(&app);
             term.draw(|f| render::draw(f, &mut app, &theme))?;
 
             let msg = tokio::select! {
@@ -153,23 +159,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     };
     let (leftover_events, exit_message) = session;
 
-    // Best-effort tail flush of whatever the tick cadence hadn't sent yet.
-    // Quitting mid-track is not a skip (mirrors the web: closing the tab
-    // doesn't emit one). Known accepted gap: a batch already in flight at
-    // quit is not retried if its POST fails — retrying would risk
-    // double-sending on success, and the events are advisory.
-    if !leftover_events.is_empty() {
-        let outgoing: Vec<_> = leftover_events
-            .iter()
-            .map(signal::PendingEvent::to_outgoing)
-            .collect();
-        let flush = crate::api::post_events(&config, &outgoing);
-        match tokio::time::timeout(FINAL_FLUSH_TIMEOUT, flush).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::debug!(error = %e, "final event flush failed"),
-            Err(_) => tracing::debug!("final event flush timed out"),
-        }
-    }
+    flush_leftover_events(&config, &leftover_events).await;
 
     // The sign-out "auth-needed screen": a shell line printed after the
     // terminal is restored, telling the user how to sign back in.
@@ -177,4 +167,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         println!("{msg}");
     }
     Ok(())
+}
+
+/// Best-effort tail flush of whatever the tick cadence hadn't sent yet.
+/// Quitting mid-track is not a skip (mirrors the web: closing the tab doesn't
+/// emit one). Known accepted gap: a batch already in flight at quit is not
+/// retried if its POST fails — retrying would risk double-sending on success,
+/// and the events are advisory.
+async fn flush_leftover_events(config: &Config, leftover: &[signal::PendingEvent]) {
+    if leftover.is_empty() {
+        return;
+    }
+    let outgoing: Vec<_> = leftover.iter().map(signal::PendingEvent::to_outgoing).collect();
+    let flush = crate::api::post_events(config, &outgoing);
+    match tokio::time::timeout(FINAL_FLUSH_TIMEOUT, flush).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!(error = %e, "final event flush failed"),
+        Err(_) => tracing::debug!("final event flush timed out"),
+    }
 }

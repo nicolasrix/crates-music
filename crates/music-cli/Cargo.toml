@@ -44,4 +44,9 @@ rand = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# MPRIS media-key + now-playing bridge is a Linux desktop spec; keep the
+# D-Bus/zbus stack out of macOS/Windows builds entirely.
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris-server = { workspace = true }
+
 [dev-dependencies]

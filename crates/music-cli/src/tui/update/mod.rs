@@ -134,6 +134,12 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::SubmitInput => submit_input(app),
         Msg::TransportToggle => playback::transport_toggle(app),
+        // Explicit Play/Pause (MPRIS): only act when it would change state, so
+        // a "Play" while already playing is a no-op (not an accidental pause).
+        // Delegating to the toggle keeps the sync-room / idle-restart handling.
+        Msg::TransportPlay if !app.playback.playing => playback::transport_toggle(app),
+        Msg::TransportPause if app.playback.playing => playback::transport_toggle(app),
+        Msg::TransportPlay | Msg::TransportPause => vec![],
         Msg::TransportNext => playback::next_track(app, Advance::Manual),
         Msg::TransportPrev => playback::prev_track(app),
         Msg::SeekBy(delta) => {

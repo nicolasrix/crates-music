@@ -119,6 +119,13 @@ pub(crate) enum Msg {
     TransportToggle,
     TransportNext,
     TransportPrev,
+    /// Explicit resume / pause (distinct from the toggle) — emitted by the
+    /// Linux MPRIS bridge, which receives separate Play and Pause D-Bus calls
+    /// from desktop media controllers. Never bound to a key.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    TransportPlay,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    TransportPause,
     SeekBy(i64),
     VolumeBy(f32),
     /// M — mute/unmute toggle. Zeroes the volume, remembering the prior level

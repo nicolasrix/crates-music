@@ -763,6 +763,28 @@ fn prev_at_start_reloads_an_idle_sink() {
 }
 
 #[test]
+fn mpris_play_starts_idle_queue_but_pause_is_noop() {
+    // Idle app with a queue (nothing playing yet).
+    let mut a = playing_app(&["t1", "t2"], 0);
+    // Explicit Pause while not playing → no-op (guard blocks the toggle).
+    assert!(update(&mut a, Msg::TransportPause).is_empty());
+    // Explicit Play while not playing → starts the current track.
+    let fx = update(&mut a, Msg::TransportPlay);
+    assert!(matches!(
+        fx.as_slice(),
+        [Effect::ResolveAudio { track_id, .. }] if track_id == "t1"
+    ));
+}
+
+#[test]
+fn mpris_play_while_playing_does_not_restart() {
+    let mut a = playing_app(&["t1", "t2"], 0);
+    set_playing(&mut a, "t1", 180, 60);
+    // Play while already playing must not re-resolve/restart the track.
+    assert!(update(&mut a, Msg::TransportPlay).is_empty());
+}
+
+#[test]
 fn mute_toggle_remembers_and_restores_volume() {
     let mut a = app();
     a.playback.volume = 0.8;
