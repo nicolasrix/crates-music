@@ -121,6 +121,9 @@ pub(crate) enum Msg {
     TransportPrev,
     SeekBy(i64),
     VolumeBy(f32),
+    /// M — mute/unmute toggle. Zeroes the volume, remembering the prior level
+    /// to restore on the next press.
+    ToggleMute,
     /// L / D / u — like / dislike / clear on the selected (or now-playing)
     /// track.
     Rate(Option<Rating>),

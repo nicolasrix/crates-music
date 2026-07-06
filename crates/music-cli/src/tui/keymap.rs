@@ -29,6 +29,7 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("n / p", "next / previous track"),
     (", / .", "seek -10s / +10s"),
     ("- / =", "volume down / up"),
+    ("M", "mute / unmute"),
     ("L / D / u", "like / dislike / unrate"),
     ("r", "recommend from now playing → queue"),
     ("P", "play next (queue: move after current)"),
@@ -167,6 +168,7 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('.') => Some(Msg::SeekBy(10)),
         KeyCode::Char('-') => Some(Msg::VolumeBy(-0.05)),
         KeyCode::Char('=' | '+') => Some(Msg::VolumeBy(0.05)),
+        KeyCode::Char('M') => Some(Msg::ToggleMute),
         KeyCode::Char('L') => Some(Msg::Rate(Some(Rating::Like))),
         KeyCode::Char('D') => Some(Msg::Rate(Some(Rating::Dislike))),
         KeyCode::Char('u') => Some(Msg::Rate(None)),
@@ -455,6 +457,10 @@ mod tests {
         assert!(matches!(
             action_for(&a, key(KeyCode::Char('='))),
             Some(Msg::VolumeBy(_))
+        ));
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('M'))),
+            Some(Msg::ToggleMute)
         ));
     }
 }

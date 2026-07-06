@@ -143,11 +143,15 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             vec![]
         }
         Msg::VolumeBy(delta) => {
+            // Any manual volume nudge cancels a mute — the readout and the
+            // sink converge on the new level, so a stale "muted" flag would lie.
+            app.muted_volume = None;
             if let Some(p) = &app.player {
                 p.set_volume(app.playback.volume + delta);
             }
             vec![]
         }
+        Msg::ToggleMute => toggle_mute(app),
         Msg::Rate(verdict) => rate_selected(app, verdict),
         Msg::RecommendFromNowPlaying => recommend_from_now_playing(app),
         Msg::QueueRemoveSelected => playback::queue_remove_selected(app),
@@ -477,6 +481,28 @@ fn cycle_section(app: &App, delta: i64) -> Section {
         .unwrap_or(0);
     let next = usize::try_from((cur + delta).rem_euclid(n)).unwrap_or(0);
     vis.get(next).copied().unwrap_or(app.section)
+}
+
+/// Toggle mute. First press remembers the live volume and zeroes the sink;
+/// second press restores the remembered level. A near-zero live volume is
+/// treated as already-silent — mute then restores to 100% so the toggle can
+/// never trap the user at 0%.
+fn toggle_mute(app: &mut App) -> Vec<Effect> {
+    let Some(restore) = app.muted_volume.take() else {
+        // Not muted → remember & silence. Guard the degenerate case where the
+        // current volume is already ~0 (nothing meaningful to restore later).
+        let live = app.playback.volume;
+        app.muted_volume = Some(if live > 0.001 { live } else { 1.0 });
+        if let Some(p) = &app.player {
+            p.set_volume(0.0);
+        }
+        return vec![];
+    };
+    // Was muted → unmute to the remembered level.
+    if let Some(p) = &app.player {
+        p.set_volume(restore);
+    }
+    vec![]
 }
 
 // ── navigation ─────────────────────────────────────────────────────────

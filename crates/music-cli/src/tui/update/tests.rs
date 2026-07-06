@@ -761,3 +761,36 @@ fn prev_at_start_reloads_an_idle_sink() {
         [Effect::ResolveAudio { track_id, .. }] if track_id == "t1"
     ));
 }
+
+#[test]
+fn mute_toggle_remembers_and_restores_volume() {
+    let mut a = app();
+    a.playback.volume = 0.8;
+    // First press → muted, remembering 0.8.
+    update(&mut a, Msg::ToggleMute);
+    assert_eq!(a.muted_volume, Some(0.8));
+    // Second press → unmute, mute flag cleared.
+    update(&mut a, Msg::ToggleMute);
+    assert_eq!(a.muted_volume, None);
+}
+
+#[test]
+fn mute_from_zero_volume_restores_to_full() {
+    let mut a = app();
+    a.playback.volume = 0.0;
+    // Muting an already-silent sink must not trap the user at 0% on unmute.
+    update(&mut a, Msg::ToggleMute);
+    assert_eq!(a.muted_volume, Some(1.0));
+}
+
+#[test]
+fn volume_nudge_cancels_mute() {
+    let mut a = app();
+    a.playback.volume = 0.5;
+    update(&mut a, Msg::ToggleMute);
+    assert!(a.muted_volume.is_some());
+    // A manual volume change converges the readout on a real level, so the
+    // stale mute flag must clear.
+    update(&mut a, Msg::VolumeBy(0.05));
+    assert_eq!(a.muted_volume, None);
+}

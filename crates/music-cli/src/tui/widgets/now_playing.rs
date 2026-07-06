@@ -95,7 +95,11 @@ fn draw_gauge(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_hints(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let volume = format!("vol {:>3.0}%", f64::from(app.playback.volume) * 100.0);
+    let volume = if app.muted_volume.is_some() {
+        "vol muted".to_owned()
+    } else {
+        format!("vol {:>3.0}%", f64::from(app.playback.volume) * 100.0)
+    };
     let hints = " space pause · n/p track · ,/. seek · -/= vol · ? help";
     // Autoplay badge sits between the hints and the volume readout (accent
     // when on, so its presence reads at a glance).

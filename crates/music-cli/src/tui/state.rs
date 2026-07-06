@@ -575,6 +575,10 @@ pub(crate) struct App {
     pub no_audio_device: bool,
     /// Snapshot polled from the player each frame by the event loop.
     pub playback: PlaybackSnapshot,
+    /// `Some(v)` while muted, holding the pre-mute volume to restore on
+    /// unmute. Muting is a UI policy (remember + zero + restore) — the player
+    /// only ever hears `set_volume`, so this state lives here, not in the sink.
+    pub muted_volume: Option<f32>,
     pub queue: PlayQueue,
     pub queue_table: TableState,
     /// Prefetched next-up bytes for near-gapless handoff.
@@ -651,6 +655,7 @@ impl App {
             player,
             no_audio_device,
             playback: PlaybackSnapshot::default(),
+            muted_volume: None,
             queue: PlayQueue::new(),
             queue_table: TableState::default(),
             prefetched: None,
