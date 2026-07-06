@@ -10,6 +10,7 @@ pub mod cli;
 pub mod config;
 pub mod format;
 pub mod gateway;
+pub mod playlist;
 pub mod ratings;
 pub mod recommend;
 pub mod style;

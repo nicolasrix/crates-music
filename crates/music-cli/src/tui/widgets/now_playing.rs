@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 
-use super::super::state::{App, Rating};
+use super::super::state::{App, FeedbackVote, Rating};
 use super::super::theme::{Theme, symbols};
 use super::mmss;
 
@@ -52,6 +52,18 @@ fn draw_title_line(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             }
             None => {}
         }
+        // Autoplay pick: show the feedback thumb it carries (f / F rate it).
+        if app.autoplay.recommended.contains(&cur.id) {
+            match app.autoplay.votes.get(&cur.id) {
+                Some(FeedbackVote::Up) => {
+                    spans.push(Span::styled(format!("  {}", symbols::THUMB_UP), theme.like));
+                }
+                Some(FeedbackVote::Down) => {
+                    spans.push(Span::styled(format!("  {}", symbols::THUMB_DOWN), theme.dislike));
+                }
+                None => {}
+            }
+        }
     } else if app.no_audio_device {
         spans.push(Span::styled(
             " no audio device — playback disabled",
@@ -83,13 +95,26 @@ fn draw_gauge(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_hints(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let volume = format!("vol {:>3.0}%", f64::from(app.playback.volume) * 100.0);
+    let volume = if app.muted_volume.is_some() {
+        "vol muted".to_owned()
+    } else {
+        format!("vol {:>3.0}%", f64::from(app.playback.volume) * 100.0)
+    };
     let hints = " space pause · n/p track · ,/. seek · -/= vol · ? help";
-    let pad = usize::from(area.width)
-        .saturating_sub(hints.chars().count() + volume.chars().count() + 1);
+    // Autoplay badge sits between the hints and the volume readout (accent
+    // when on, so its presence reads at a glance).
+    let autoplay = if app.autoplay.enabled {
+        format!("{} auto  ", symbols::AUTOPLAY)
+    } else {
+        String::new()
+    };
+    let pad = usize::from(area.width).saturating_sub(
+        hints.chars().count() + autoplay.chars().count() + volume.chars().count() + 1,
+    );
     let line = Line::from(vec![
         Span::styled(hints, theme.dim),
         Span::raw(" ".repeat(pad)),
+        Span::styled(autoplay, theme.accent),
         Span::styled(volume, theme.dim),
     ]);
     f.render_widget(Paragraph::new(line), area);

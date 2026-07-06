@@ -11,6 +11,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// How the stored access token was obtained. A `Device` token carries a
+/// refresh token and rotates silently; a `Guest` token is single-shot
+/// (`POST /oauth/guest` returns no refresh — see D4) and simply lapses.
+///
+/// `#[serde(default)]` on the field means a token file written before this
+/// enum existed (device logins only) deserializes as `Device`, so an upgrade
+/// doesn't invalidate an existing session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenKind {
+    #[default]
+    Device,
+    Guest,
+}
+
 /// The persisted gateway credentials. `access_expires_at_ms` is an
 /// absolute deadline (computed from the token response's `expires_in` at
 /// save time) so a stale clock between invocations can't be fooled by a
@@ -19,22 +34,52 @@ use serde::{Deserialize, Serialize};
 pub struct StoredTokens {
     pub client_id: String,
     pub access_token: String,
-    pub refresh_token: String,
+    /// Present for device logins (drives silent rotation); `None` for guest
+    /// sessions, which have no refresh token. `#[serde(default)]` keeps old
+    /// device token files (which always stored a bare string) loadable.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     pub access_expires_at_ms: i64,
+    #[serde(default)]
+    pub kind: TokenKind,
 }
 
 impl StoredTokens {
-    /// Build a store entry from a token-endpoint response, stamping the
+    /// Build a store entry from a device token-endpoint response, stamping the
     /// absolute access-token expiry from `expires_in` (seconds).
     pub fn from_response(client_id: &str, access_token: String, refresh_token: String, expires_in: u64) -> Self {
-        let expires_at = now_ms().saturating_add(i64::try_from(expires_in.saturating_mul(1000)).unwrap_or(i64::MAX));
         Self {
             client_id: client_id.to_string(),
             access_token,
-            refresh_token,
-            access_expires_at_ms: expires_at,
+            refresh_token: Some(refresh_token),
+            access_expires_at_ms: expiry_from(expires_in),
+            kind: TokenKind::Device,
         }
     }
+
+    /// Build a store entry from a `POST /oauth/guest` response. Guests get a
+    /// single access token with no refresh — the session lapses at expiry and
+    /// the visitor redeems the code again.
+    pub fn from_guest(client_id: &str, access_token: String, expires_in: u64) -> Self {
+        Self {
+            client_id: client_id.to_string(),
+            access_token,
+            refresh_token: None,
+            access_expires_at_ms: expiry_from(expires_in),
+            kind: TokenKind::Guest,
+        }
+    }
+
+    /// True for a guest session (no refresh; lapses rather than rotates).
+    #[must_use]
+    pub fn is_guest(&self) -> bool {
+        self.kind == TokenKind::Guest
+    }
+}
+
+/// Stamp an absolute expiry deadline from a relative `expires_in` (seconds).
+fn expiry_from(expires_in: u64) -> i64 {
+    now_ms().saturating_add(i64::try_from(expires_in.saturating_mul(1000)).unwrap_or(i64::MAX))
 }
 
 /// Load the token store. `Ok(None)` when the file doesn't exist (not yet
@@ -113,8 +158,9 @@ mod tests {
         let tokens = StoredTokens {
             client_id: "cli".into(),
             access_token: "acc".into(),
-            refresh_token: "ref".into(),
+            refresh_token: Some("ref".into()),
             access_expires_at_ms: 123,
+            kind: TokenKind::Device,
         };
         save(&path, &tokens).unwrap();
         assert_eq!(load(&path).unwrap().unwrap(), tokens);

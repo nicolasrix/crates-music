@@ -148,6 +148,14 @@ pub enum Command {
         action: CacheAction,
     },
 
+    /// Manage gateway-owned playlists (create, edit, play). Playlists live
+    /// in the gateway, not Navidrome, and are private per-user. Requires
+    /// `[gateway]` config.
+    Playlist {
+        #[command(subcommand)]
+        action: PlaylistAction,
+    },
+
     /// Interact with the gateway sync state (queue + playback) shared
     /// across devices. Requires `[gateway]` config.
     Sync {
@@ -173,6 +181,16 @@ pub enum AuthAction {
     /// Start the device flow: prints a code + URL, then waits for you to
     /// approve it in a logged-in browser. Saves the resulting tokens.
     Login,
+    /// Redeem a shared guest code to join a host's room. No browser and no
+    /// prior login — the code is the credential. Grants an ephemeral,
+    /// refresh-less session that lapses at its TTL.
+    Guest {
+        /// The shareable guest code (e.g. `XXXX-XXXX`) from the host.
+        code: String,
+        /// Optional display name shown in the host's "who's here".
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Revoke the stored refresh token and delete the local token store.
     Logout,
     /// Show whether the CLI is authenticated and when the access token
@@ -189,6 +207,57 @@ pub enum RecommendAction {
         /// Number of tracks to return.
         #[arg(short = 'n', long, default_value_t = 20)]
         n: usize,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PlaylistAction {
+    /// List your playlists (plus any shared ones), newest first.
+    List,
+    /// Show a playlist's tracks by id (from `playlist list`).
+    Show {
+        /// Playlist ID.
+        id: String,
+    },
+    /// Create a new empty playlist and print its id.
+    Create {
+        /// Playlist name.
+        name: String,
+    },
+    /// Rename a playlist you own.
+    Rename {
+        /// Playlist ID.
+        id: String,
+        /// New name.
+        name: String,
+    },
+    /// Delete a playlist you own.
+    Delete {
+        /// Playlist ID.
+        id: String,
+    },
+    /// Append one or more tracks to a playlist.
+    Add {
+        /// Playlist ID.
+        id: String,
+        /// Track IDs to append (in order).
+        #[arg(required = true)]
+        track_ids: Vec<String>,
+    },
+    /// Remove every occurrence of a track from a playlist.
+    Remove {
+        /// Playlist ID.
+        id: String,
+        /// Track ID to remove.
+        track_id: String,
+    },
+    /// Stream and play a playlist's tracks locally (gaplessly).
+    Play {
+        /// Playlist ID.
+        id: String,
+        /// Shuffle the track order before playing.
+        #[arg(long)]
+        shuffle: bool,
     },
 }
 

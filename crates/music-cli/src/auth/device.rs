@@ -121,15 +121,17 @@ pub async fn run_logout(config: &Config, gw: &GatewayConfig) -> Result<()> {
     };
 
     // Best effort: a failed revoke (gateway down) still clears local creds.
-    match http_client(gw) {
-        Ok(http) => {
+    // Guests have no refresh token — nothing to revoke, just drop the store.
+    match (http_client(gw), tokens.refresh_token.as_deref()) {
+        (Ok(http), Some(refresh_token)) => {
             let _ = http
                 .post(endpoint(gw, "/oauth/revoke"))
-                .form(&[("token", tokens.refresh_token.as_str())])
+                .form(&[("token", refresh_token)])
                 .send()
                 .await;
         }
-        Err(e) => eprintln!("warning: could not build client to revoke remotely: {e}"),
+        (Err(e), _) => eprintln!("warning: could not build client to revoke remotely: {e}"),
+        (Ok(_), None) => {} // guest: no refresh to revoke
     }
 
     store::delete(&path)?;
@@ -147,12 +149,22 @@ pub fn run_status(config: &Config) -> Result<()> {
         }
         Some(tokens) => {
             let remaining_ms = tokens.access_expires_at_ms - store::now_ms();
-            println!("authenticated as client '{}'", tokens.client_id);
-            println!("token store: {}", path.display());
-            if remaining_ms > 0 {
-                println!("access token valid for ~{}m", remaining_ms / 60_000);
+            if tokens.is_guest() {
+                println!("authenticated as a guest (client '{}')", tokens.client_id);
+                println!("token store: {}", path.display());
+                if remaining_ms > 0 {
+                    println!("guest session valid for ~{}m (no refresh)", remaining_ms / 60_000);
+                } else {
+                    println!("guest session expired — redeem a new code with `crates-cli auth guest <code>`");
+                }
             } else {
-                println!("access token expired (refreshes automatically on next use)");
+                println!("authenticated as client '{}'", tokens.client_id);
+                println!("token store: {}", path.display());
+                if remaining_ms > 0 {
+                    println!("access token valid for ~{}m", remaining_ms / 60_000);
+                } else {
+                    println!("access token expired (refreshes automatically on next use)");
+                }
             }
         }
     }

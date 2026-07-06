@@ -24,6 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use bytes::Bytes;
+use rodio::Source as _;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::PlayError;
@@ -201,6 +202,52 @@ pub fn clamp_seek(position: Duration, duration: Option<Duration>, delta_secs: i6
     duration.map_or(target, |d| target.min(d))
 }
 
+/// Seek within the current source, returning the new absolute offset of the
+/// source's sample zero (the caller's `seek_base`), or `None` to leave it
+/// unchanged.
+///
+/// A native `try_seek` keeps rodio's position counter absolute → base `0`.
+/// When the container reports itself unseekable to symphonia (some
+/// transcoded/streamed MP3s do, even though the whole file is in RAM), we
+/// rebuild the decoder and fast-forward by discarding the leading `pos` — a
+/// format-agnostic seek. That fresh source's counter restarts at zero, so the
+/// seek target *is* the new absolute base. A decoder-rebuild failure leaves the
+/// current source untouched, hence `None`.
+fn seek_within(
+    sink: &rodio::Sink,
+    current_bytes: Option<&Bytes>,
+    pos: Duration,
+    shared: &Arc<Mutex<PlaybackSnapshot>>,
+    events: &UnboundedSender<PlayerEvent>,
+) -> Option<Duration> {
+    if sink.try_seek(pos).is_ok() {
+        return Some(Duration::ZERO);
+    }
+    let bytes = current_bytes?;
+    match rodio::Decoder::new(Cursor::new(bytes.clone())) {
+        Ok(source) => {
+            let was_paused = sink.is_paused();
+            sink.clear(); // no TrackEnded: re-appended immediately below
+            sink.append(source.skip_duration(pos));
+            if was_paused {
+                sink.pause();
+            } else {
+                sink.play();
+            }
+            if let Ok(mut s) = shared.lock() {
+                s.position = pos;
+            }
+            Some(pos)
+        }
+        Err(e) => {
+            let _ = events.send(PlayerEvent::Error(format!(
+                "seek not supported for this track: {e}"
+            )));
+            None
+        }
+    }
+}
+
 /// The only rodio-touching code in interactive playback. Kept dumb on
 /// purpose: no queue knowledge, no retry policy — just the sink.
 fn audio_thread(
@@ -231,6 +278,15 @@ fn audio_thread(
     // (otherwise load/stop would double-advance the caller's queue).
     let mut track_loaded = false;
 
+    // Kept for the seek-by-reload fallback: `Bytes` is Arc-backed, so holding
+    // the current track's whole file costs one refcount, and lets us rebuild
+    // the decoder when a container reports itself unseekable to symphonia.
+    let mut current_bytes: Option<Bytes> = None;
+    // Absolute offset of the loaded source's sample-zero. Zero for normal /
+    // natively-seeked playback (rodio's counter is already absolute); set to
+    // the seek target after a reload-skip, where the counter restarts at zero.
+    let mut seek_base = Duration::ZERO;
+
     loop {
         match cmd_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Cmd::Load {
@@ -239,11 +295,13 @@ fn audio_thread(
                 duration,
             }) => {
                 sink.clear(); // deliberate: also pauses; no TrackEnded for the old source
-                match rodio::Decoder::new(Cursor::new(bytes)) {
+                seek_base = Duration::ZERO;
+                match rodio::Decoder::new(Cursor::new(bytes.clone())) {
                     Ok(source) => {
                         sink.append(source);
                         sink.play();
                         track_loaded = true;
+                        current_bytes = Some(bytes);
                         if let Ok(mut s) = shared.lock() {
                             s.track_id = Some(track_id);
                             s.duration = duration;
@@ -252,6 +310,7 @@ fn audio_thread(
                     }
                     Err(e) => {
                         track_loaded = false;
+                        current_bytes = None;
                         if let Ok(mut s) = shared.lock() {
                             s.track_id = None;
                             s.duration = None;
@@ -272,16 +331,17 @@ fn audio_thread(
                 }
             }
             Ok(Cmd::Seek(pos)) => {
-                if let Err(e) = sink.try_seek(pos) {
-                    let _ = events.send(PlayerEvent::Error(format!(
-                        "seek not supported for this track: {e}"
-                    )));
+                if let Some(base) = seek_within(&sink, current_bytes.as_ref(), pos, shared, events)
+                {
+                    seek_base = base;
                 }
             }
             Ok(Cmd::SetVolume(v)) => sink.set_volume(v),
             Ok(Cmd::Stop) => {
                 sink.clear(); // deliberate — no TrackEnded
                 track_loaded = false;
+                current_bytes = None;
+                seek_base = Duration::ZERO;
                 if let Ok(mut s) = shared.lock() {
                     s.track_id = None;
                     s.duration = None;
@@ -296,7 +356,10 @@ fn audio_thread(
         // alike), so position advances while idle-looping during playback.
         let drained = track_loaded && sink.empty();
         if let Ok(mut s) = shared.lock() {
-            s.position = sink.get_pos();
+            // `seek_base` is zero unless a reload-skip is active, where rodio's
+            // counter restarts at zero — add the target back for an absolute
+            // position (see the seek-by-reload fallback above).
+            s.position = seek_base + sink.get_pos();
             s.playing = !sink.is_paused() && !sink.empty();
             s.volume = sink.volume();
             if drained {

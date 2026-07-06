@@ -158,6 +158,21 @@ pub fn parse_get_artist(body: &str) -> Result<ArtistWithAlbums> {
     Ok(ArtistWithAlbums { artist, albums })
 }
 
+/// Parse `getTopSongs` → `topSongs.song[]`. Missing/empty is `Ok(vec![])`
+/// (an artist the server has no play data for is not an error).
+pub fn parse_top_songs(body: &str) -> Result<Vec<Track>> {
+    let inner = unwrap_envelope(body)?;
+    let Some(songs) = inner
+        .get("topSongs")
+        .and_then(|ts| ts.get("song"))
+        .cloned()
+    else {
+        return Ok(Vec::new());
+    };
+    let wire: Vec<WireTrack> = serde_json::from_value(songs)?;
+    Ok(wire.into_iter().map(Into::into).collect())
+}
+
 /// Parse `search3` into its three buckets. Missing buckets are empty —
 /// a query that matches only songs still returns `Ok`.
 pub fn parse_search3(body: &str) -> Result<SearchResult3> {
@@ -349,6 +364,21 @@ mod tests {
         let got = parse_get_artist(&ok(r#""artist":{"id":"ar-9","name":"Obscure"}"#)).unwrap();
         assert!(got.albums.is_empty());
         assert_eq!(got.artist.name, "Obscure");
+    }
+
+    #[test]
+    fn top_songs_parses_and_is_empty_when_absent() {
+        let body = ok(
+            r#""topSongs":{"song":[
+                {"id":"tr-1","title":"Windowlicker","artist":"Aphex Twin","duration":366},
+                {"id":"tr-2","title":"Xtal","artist":"Aphex Twin"}
+            ]}"#,
+        );
+        let songs = parse_top_songs(&body).unwrap();
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].title, "Windowlicker");
+        // No topSongs key (artist with no play data) → empty, not an error.
+        assert!(parse_top_songs(&ok(r#""x":1"#)).unwrap().is_empty());
     }
 
     #[test]

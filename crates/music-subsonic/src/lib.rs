@@ -184,6 +184,19 @@ impl Client {
         wire::parse_ping(&body)
     }
 
+    /// Report a play (`scrobble`). `submission = false` is the "now
+    /// playing" hint; `true` submits the play to the server's counts (and
+    /// whatever scrobble targets it forwards to). The response carries no
+    /// payload — only the envelope status matters.
+    pub async fn scrobble(&self, id: &TrackId, submission: bool) -> Result<()> {
+        let params = vec![
+            ("id", id.as_str().to_string()),
+            ("submission", submission.to_string()),
+        ];
+        let body = self.fetch_text("scrobble", &params).await?;
+        wire::parse_ping(&body)
+    }
+
     pub async fn get_album_list2(
         &self,
         list_type: AlbumListType,
@@ -231,6 +244,18 @@ impl Client {
         wire::parse_get_artist(&body)
     }
 
+    /// The artist's most-played tracks (`getTopSongs`, keyed by artist
+    /// *name*, not id — that's the Subsonic contract). `count` caps the
+    /// result. Empty when the server has no play data for the artist.
+    pub async fn get_top_songs(&self, artist_name: &str, count: u32) -> Result<Vec<Track>> {
+        let params = vec![
+            ("artist", artist_name.to_string()),
+            ("count", count.to_string()),
+        ];
+        let body = self.fetch_text("getTopSongs", &params).await?;
+        wire::parse_top_songs(&body)
+    }
+
     /// Search across artists, albums and tracks (`search3`, ID3). `count`
     /// caps each bucket; `offset` pages within each bucket (Subsonic applies
     /// the same offset to all three). An empty `query` matches everything on
@@ -260,7 +285,26 @@ impl Client {
     /// performing the GET (potentially with `Range` headers) — this lets
     /// the caller wire bytes directly to a decoder, a cache, or both.
     pub fn stream_url(&self, id: &TrackId) -> Result<Url> {
-        self.build_url("stream", &[("id", id.as_str().to_string())])
+        self.stream_url_with(id, None, None)
+    }
+
+    /// [`Self::stream_url`] with optional transcode hints. `format` +
+    /// `max_bitrate` map to the Subsonic `format`/`maxBitRate` params;
+    /// Navidrome transcodes on demand (`None`/`None` streams the original).
+    pub fn stream_url_with(
+        &self,
+        id: &TrackId,
+        format: Option<&str>,
+        max_bitrate: Option<u32>,
+    ) -> Result<Url> {
+        let mut params = vec![("id", id.as_str().to_string())];
+        if let Some(f) = format {
+            params.push(("format", f.to_string()));
+        }
+        if let Some(b) = max_bitrate {
+            params.push(("maxBitRate", b.to_string()));
+        }
+        self.build_url("stream", &params)
     }
 
     pub fn http(&self) -> &Http {

@@ -1,8 +1,12 @@
+pub(crate) mod diagnostics;
+pub(crate) mod downloads;
 pub(crate) mod help;
 pub(crate) mod library;
 pub(crate) mod liked;
+pub(crate) mod playlists;
 pub(crate) mod queue;
 pub(crate) mod search;
+pub(crate) mod settings;
 pub(crate) mod stations;
 
 use std::collections::HashMap;

@@ -391,6 +391,47 @@ async fn pin_survives_re_put_of_same_key() {
     assert_eq!(entry.bytes, 8);
 }
 
+// ---------- find_by_track + set_budgets ----------
+
+#[tokio::test]
+async fn find_by_track_prefers_pinned_across_qualities() {
+    let (_dir, cache) = open_cache(10_000, 10_000).await;
+    // Two qualities of the same track: an unpinned mp3, a pinned opus.
+    let mp3 = key("tr", Some(320), "mp3");
+    let opus = key("tr", Some(128), "opus");
+    cache.put(&mp3, Bytes::from_static(b"MP3")).await.unwrap();
+    cache.put(&opus, Bytes::from_static(b"OPUS")).await.unwrap();
+    cache.pin(&opus).await.unwrap();
+
+    let found = cache.find_by_track("tr").await.unwrap().unwrap();
+    assert!(found.pinned, "the pinned entry wins");
+    assert_eq!(found.key.codec, "opus");
+
+    // Unknown track → None.
+    assert!(cache.find_by_track("nope").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn set_budgets_lowers_and_eviction_takes_effect() {
+    let (_dir, cache) = open_cache(10_000, 10_000).await;
+    cache
+        .put(&key("a", None, "mp3"), Bytes::from_static(&[0u8; 400]))
+        .await
+        .unwrap();
+    sleep_to_advance_clock().await;
+    cache
+        .put(&key("b", None, "mp3"), Bytes::from_static(&[0u8; 400]))
+        .await
+        .unwrap();
+    assert_eq!(cache.regular_budget_bytes(), 10_000);
+
+    // Drop the regular budget below the current total and fit to it.
+    cache.set_budgets(500, 10_000);
+    assert_eq!(cache.regular_budget_bytes(), 500);
+    let total = cache.evict_lru_to_fit().await.unwrap();
+    assert!(total <= 500, "eviction honours the new budget, got {total}");
+}
+
 // ---------- helpers ----------
 
 async fn sleep_to_advance_clock() {

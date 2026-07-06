@@ -7,6 +7,7 @@
 //! cached access token or silently rotates it via the refresh grant.
 
 pub mod device;
+pub mod guest;
 pub mod store;
 
 use std::path::{Path, PathBuf};
@@ -77,8 +78,18 @@ pub async fn resolve_bearer(config: &Config, gw: &GatewayConfig) -> Result<Strin
         return Ok(tokens.access_token);
     }
 
-    // Access token expired (or about to): rotate via the refresh grant.
-    let refreshed = refresh(gw, &tokens.client_id, &tokens.refresh_token)
+    // Access token expired (or about to). A guest session has no refresh
+    // token — it lapses rather than rotates (D4). Fail with a friendly,
+    // actionable message instead of attempting a refresh grant that can't
+    // exist.
+    let Some(refresh_token) = tokens.refresh_token.as_deref() else {
+        bail!(
+            "guest session expired — redeem a new code with `crates-cli auth guest <code>`"
+        );
+    };
+
+    // Device token: rotate via the refresh grant.
+    let refreshed = refresh(gw, &tokens.client_id, refresh_token)
         .await
         .context("refreshing the gateway access token — run `crates-cli auth login` if this persists")?;
     store::save(&path, &refreshed)?;
@@ -117,12 +128,37 @@ async fn refresh(
     ))
 }
 
+/// Headless sign-out for the TUI Settings view: best-effort revoke the
+/// refresh token, then delete the local store. Unlike [`device::run_logout`]
+/// it prints nothing (the caller surfaces the outcome in the UI). A revoke
+/// failure (gateway down) is swallowed — the local creds are still cleared, so
+/// the session is effectively over.
+pub async fn sign_out(config: &Config, gw: &GatewayConfig) -> Result<()> {
+    let path = token_store_path(config);
+    // Guests have no refresh token to revoke — their server-side row is
+    // GC'd at expiry, so clearing the local store is the whole sign-out.
+    if let (Some(tokens), Ok(http)) = (store::load(&path)?, http_client(gw))
+        && let Some(refresh_token) = tokens.refresh_token.as_deref()
+    {
+        let _ = http
+            .post(endpoint(gw, "/oauth/revoke"))
+            .form(&[("token", refresh_token)])
+            .send()
+            .await;
+    }
+    store::delete(&path)?;
+    Ok(())
+}
+
 /// Dispatch `crates-cli auth <action>`. Runs *before* the Subsonic client is
 /// built (login has no token yet), so it only needs the `[gateway]` block.
 pub async fn run_auth(config: &Config, action: &AuthAction) -> Result<()> {
     let gw = require_gateway(config)?;
     match action {
         AuthAction::Login => device::run_login(config, gw).await,
+        AuthAction::Guest { code, name } => {
+            guest::run_guest(config, gw, code, name.as_deref()).await
+        }
         AuthAction::Logout => device::run_logout(config, gw).await,
         AuthAction::Status => device::run_status(config),
     }

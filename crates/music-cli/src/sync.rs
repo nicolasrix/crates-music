@@ -241,8 +241,9 @@ pub async fn run_watch(config: &Config) -> Result<()> {
 /// Uniqueness within a single CLI invocation is sufficient (there's no
 /// concurrent CLI usage from one terminal); the millisecond prefix
 /// covers cross-invocation uniqueness for the rare case of two
-/// invocations within the same millisecond.
-fn new_item_id() -> String {
+/// invocations within the same millisecond. Shared with the TUI's
+/// sync-room integration, which mints ids for the same wire.
+pub(crate) fn new_item_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -251,6 +252,13 @@ fn new_item_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0u64, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
     format!("cli-{ms:x}-{n:08x}")
+}
+
+/// Session id for `StartSession` ops — same recipe as item ids with a
+/// distinguishing prefix (the web uses `crypto.randomUUID()`; the server
+/// treats both as opaque strings).
+pub(crate) fn new_session_id() -> String {
+    format!("sess-{}", new_item_id())
 }
 
 #[cfg(test)]
