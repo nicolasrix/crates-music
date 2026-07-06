@@ -15,10 +15,10 @@ use crate::config::Config;
 use music_cache::AudioCache;
 use music_subsonic::Client;
 
-use super::msg::{Effect, Msg, StationError, SyncEvent};
+use super::msg::{DiagData, Effect, Msg, StationError, SyncEvent};
 use super::state::{
-    ArtistDetailState, ArtistRow, FeedbackVote, LikedEntry, PlaylistDetailState, Rating,
-    SimilarEntry, SimilarKind,
+    ArtistDetailState, ArtistRow, DiagTab, DiagWindow, FeedbackVote, LikedEntry,
+    PlaylistDetailState, Rating, SimilarEntry, SimilarKind, TracingData,
 };
 
 mod downloads;
@@ -506,6 +506,101 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         Effect::SaveSettings(payload) => Some(settings::save(ctx, payload).await),
         Effect::SignOut => Some(settings::sign_out(ctx).await),
         Effect::CacheInvalidate => Some(settings::invalidate_cache(ctx).await),
+
+        // ── diagnostics ───────────────────────────────────────────────
+        Effect::LoadDiagnostics { tab, window } => Some(diagnostics_load(ctx, tab, window).await),
+        Effect::LoadLatentNeighbours { track_id } => {
+            Some(diagnostics_neighbours(ctx, track_id).await)
+        }
+    }
+}
+
+/// Rows fetched for the tabular diagnostics inspectors.
+const DIAG_TABLE_LIMIT: u32 = 100;
+/// Nearest neighbours fetched for the selected latent-space point.
+const LATENT_NEIGHBOURS_K: usize = 12;
+
+/// Load one diagnostics sub-tab. Resolves the window to a `since_ms` cutoff
+/// here (the reducer stays clock-free), then dispatches to the tab's fetcher.
+async fn diagnostics_load(ctx: &Ctx, tab: DiagTab, window: DiagWindow) -> Msg {
+    let since = window.cutoff_ms(crate::auth::store::now_ms());
+    let result = load_diag_tab(ctx, tab, since).await.map_err(diag_err);
+    Msg::DiagnosticsLoaded { tab, result }
+}
+
+async fn load_diag_tab(ctx: &Ctx, tab: DiagTab, since: Option<i64>) -> Result<DiagData, ApiError> {
+    let cfg = &ctx.config;
+    Ok(match tab {
+        DiagTab::Ingest => DiagData::Ingest(api::queue_depth(cfg).await?),
+        DiagTab::Recommender => {
+            DiagData::Recommender(Box::new(api::recommender_panels(cfg, since).await?))
+        }
+        DiagTab::Listening => {
+            DiagData::Listening(api::recently_played(cfg, DIAG_TABLE_LIMIT).await?)
+        }
+        DiagTab::Tracing => {
+            // Traces + histogram share the tab's window; fetch concurrently.
+            let (mut traces, histogram) = tokio::try_join!(
+                api::traces(cfg, DIAG_TABLE_LIMIT as usize),
+                api::histogram(cfg, since),
+            )?;
+            // Group by trace, ordered within each — makes the span tree read
+            // top-down and keeps the nav selection stable across refreshes.
+            traces.sort_by(|a, b| {
+                a.trace_id
+                    .cmp(&b.trace_id)
+                    .then(a.start_ms.cmp(&b.start_ms))
+            });
+            DiagData::Tracing(TracingData { traces, histogram })
+        }
+        DiagTab::LatentSpace => DiagData::Latent(Box::new(api::latent_space(cfg).await?)),
+        DiagTab::ClientEvents => {
+            DiagData::ClientEvents(api::client_events(cfg, DIAG_TABLE_LIMIT as usize).await?)
+        }
+    })
+}
+
+/// Fetch the selected point's raw neighbours, then hydrate their titles (the
+/// endpoint returns ids + cosine distances only — best-effort names give the
+/// side list something readable).
+async fn diagnostics_neighbours(ctx: &Ctx, track_id: String) -> Msg {
+    let result = async {
+        let mut neighbours =
+            api::latent_neighbours(&ctx.config, &track_id, LATENT_NEIGHBOURS_K).await?;
+        let client = ctx.subsonic().await?;
+        let ids: Vec<TrackId> = neighbours
+            .iter()
+            .map(|n| TrackId::from(n.track_id.clone()))
+            .collect();
+        let (tracks, _failed) = api::resolve_tracks(&client, &ids).await;
+        let by_id: std::collections::HashMap<&str, &music_core::Track> =
+            tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+        for n in &mut neighbours {
+            if let Some(t) = by_id.get(n.track_id.as_str()) {
+                n.title = Some(t.title.clone());
+                n.artist.clone_from(&t.artist_name);
+            }
+        }
+        Ok::<_, ApiError>(neighbours)
+    }
+    .await
+    .map_err(diag_err);
+    Msg::LatentNeighboursLoaded {
+        seed: track_id,
+        result,
+    }
+}
+
+/// Friendly text for a diagnostics `ApiError`. A 403 shouldn't happen (the
+/// section is admin-gated in the UI), but if whoami is stale, say so plainly
+/// rather than dumping an HTTP error; a 404 means "no data yet".
+fn diag_err(e: ApiError) -> String {
+    match e {
+        ApiError::Forbidden => "diagnostics are admin-only".to_owned(),
+        ApiError::RecommenderUnavailable => {
+            "recommender not ready — no data for this panel yet".to_owned()
+        }
+        ApiError::Http(e) => e.to_string(),
     }
 }
 

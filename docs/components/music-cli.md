@@ -95,17 +95,20 @@ Running `crates-cli` with **no subcommand on a terminal** opens a
 full-screen interactive player (ratatui). On a pipe the same invocation
 prints help and exits 2, so scripts and agents never hang on it.
 
-Eight sections (sidebar, keys `1`–`8` or `Tab`): **Library** (a browse
-list with three modes — albums / artists / tracks, cycled with `[`/`]`
-— that drills into album and artist detail panes), **Search** (the
-gateway's typo-tolerant `/v1/search`), **Queue** (the play queue),
+Up to nine sections (sidebar, keys `1`–`9` or `Tab`): **Library** (a
+browse list with three modes — albums / artists / tracks, cycled with
+`[`/`]` — that drills into album and artist detail panes), **Search**
+(the gateway's typo-tolerant `/v1/search`), **Queue** (the play queue),
 **Playlists** (gateway-owned playlist CRUD), **Stations**
 (natural-language prompts), **Liked** (your ratings), **Downloads**
-(the offline audio cache — budgets + pinned tracks) and **Settings**
+(the offline audio cache — budgets + pinned tracks), **Settings**
 (a form for playback quality, cache budgets, autoplay drift, the account
-card + sign-out, and admin cache invalidation). Playback is local
-(rodio) through the same L3 audio cache as `crates-cli play`, with the
-next track prefetched for near-gapless handoff.
+card + sign-out, and admin cache invalidation), and — **admins only** —
+**Diagnostics** (the gateway's `/v1/diagnostics/*` inspectors). The
+Diagnostics slot (`9`) is hidden for non-admins: absent from the sidebar,
+inert on the `9` key, skipped by `Tab`. Playback is local (rodio) through
+the same L3 audio cache as `crates-cli play`, with the next track
+prefetched for near-gapless handoff.
 
 | Key | Action |
 |---|---|
@@ -132,6 +135,8 @@ next track prefetched for near-gapless handoff.
 | `E` | Downloads: evict the regular cache down to its budget |
 | `N` `s` `m` `R` `X` `x` | playlists: new · shuffle-play · suggest · rename · delete · remove-track |
 | `Enter` / `h` `l` | Settings: change (cycle enum / flip toggle / trigger) · adjust a number |
+| `h` `l` / `[` `]` | Diagnostics: cycle sub-tab · cycle the time window |
+| `Enter` | Diagnostics (Latent space): play the selected scatter point |
 
 Notes:
 
@@ -235,6 +240,22 @@ Notes:
   a `crates-cli auth login` reminder. Admins additionally get **invalidate
   gateway cache** (`POST /v1/admin/cache/invalidate`); non-admins never
   see that row (role from `/v1/whoami`, refreshed on entry).
+- **Diagnostics** (section 9, **admin-only**): a live read-only view over
+  the gateway's `/v1/diagnostics/*` inspectors, mirroring the web
+  `/diagnostics` page. Six sub-tabs cycled with `h`/`l`: **Ingest**
+  (`queue_depth` counts), **Recommender** (`recommend/queue_fill` bars +
+  `shortfall` reasons + `similarity` quantiles + `top_results`
+  leaderboard), **Listening** (`recently_played` with repeat counts),
+  **Tracing** (`histogram` with inline p50/95/99 bars + a `traces` span
+  tree), **Latent space** (`recommend/latent_space` as a braille scatter
+  coloured by genre; `j`/`k` move the highlighted point, its
+  `latent_neighbours` show in a side list, `Enter` plays it), and
+  **Client events** (the browser RUM ring). `[`/`]` cycle the time window
+  (15m / 1h / 24h / all) for the `since_ms` inspectors. The active tab
+  auto-refreshes on the 250 ms tick, throttled to ~5 s (matching the web
+  `refetchInterval`), keeping the last data on screen during a refetch.
+  The whole section is hidden for non-admins — the gateway 403s the
+  endpoints regardless, so the UI gate is UX, not security.
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.
@@ -283,7 +304,7 @@ crates/music-cli/
 │   ├── app.rs        # subcommand dispatcher; client/cache constructors
 │   ├── cli.rs        # clap definitions
 │   ├── api/          # typed /v1 fetchers shared by classic commands + TUI
-│   │                 #   mod (ratings/events/search/whoami/sync) · recommend · playlists
+│   │                 #   mod (ratings/events/search/whoami/sync) · recommend · playlists · diagnostics
 │   ├── config.rs     # ~/.config/crates-music/config.toml loader
 │   ├── format.rs     # plain-text table formatters
 │   ├── gateway.rs    # gateway HTTP plumbing (TLS, endpoints, ws URLs)
@@ -294,14 +315,14 @@ crates/music-cli/
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
 │       ├── autoplay.rs   # pure tethered-drift seed weighting (port of autoplaySeeds.ts)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads · settings
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads · settings · diagnostics
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
 │       │   ├── refill.rs # autoplay from-seeds/from-any refill orchestration
 │       │   ├── downloads.rs # pin / unpin / bulk / warm / evict cache ops
 │       │   └── settings.rs # persist+apply config edits · sign-out · cache invalidate · LiveSettings cell
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
-│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · settings · help
+│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · settings · diagnostics · help
 │       └── widgets/      # now-playing bar, sidebar (offline badge), input field
 └── tests/            # clap parsing, config, formatters
 ```

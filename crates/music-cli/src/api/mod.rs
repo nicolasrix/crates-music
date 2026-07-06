@@ -13,9 +13,15 @@
 //! playlist fetchers live in the [`recommend`] and [`playlists`] submodules
 //! (glob-re-exported, so callers still use `api::<name>`).
 
+mod diagnostics;
 mod playlists;
 mod recommend;
 
+pub use diagnostics::{
+    ClientEvent, HistogramBucket, LatentNeighbour, LatentPoint, LatentSpace, QueueDepth,
+    RecentlyPlayed, RecommenderPanels, TraceEntry, client_events, histogram, latent_neighbours,
+    latent_space, queue_depth, recently_played, recommender_panels, traces,
+};
 pub use playlists::{
     PlaylistDetail, PlaylistSummary, SuggestList, create_playlist, delete_playlist, get_playlist,
     list_playlists, put_playlist_tracks, rename_playlist, suggest_from_seeds,

@@ -12,6 +12,7 @@
 
 mod autoplay;
 mod browse;
+mod diagnostics;
 mod downloads;
 mod library;
 mod playback;
@@ -21,6 +22,8 @@ mod settings;
 
 #[cfg(test)]
 mod autoplay_tests;
+#[cfg(test)]
+mod diagnostics_tests;
 #[cfg(test)]
 mod downloads_tests;
 #[cfg(test)]
@@ -57,6 +60,9 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             let mut effects = playback::signal_tick(app);
             effects.extend(autoplay::maybe_refill(app));
+            if app.section == Section::Diagnostics {
+                effects.extend(diagnostics::on_tick(app));
+            }
             effects
         }
         Msg::Quit => {
@@ -73,30 +79,36 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Back => back(app),
         Msg::GoSection(s) => go_section(app, s),
-        Msg::NextSection => {
-            let next = (app.section.index() + 1) % Section::ALL.len();
-            go_section(app, Section::ALL[next])
-        }
-        Msg::PrevSection => {
-            let len = Section::ALL.len();
-            let prev = (app.section.index() + len - 1) % len;
-            go_section(app, Section::ALL[prev])
-        }
+        // Tab / BackTab cycle the *visible* sections, so a non-admin never
+        // lands on the hidden Diagnostics slot.
+        Msg::NextSection => go_section(app, cycle_section(app, 1)),
+        Msg::PrevSection => go_section(app, cycle_section(app, -1)),
         Msg::NavUp => nav(app, -1),
         Msg::NavDown => nav(app, 1),
         Msg::NavTop => nav_to(app, NavTarget::Top),
         Msg::NavBottom => nav_to(app, NavTarget::Bottom),
         Msg::NavHalfPageDown => nav(app, 10),
         Msg::NavHalfPageUp => nav(app, -10),
-        // h / l: adjust the selected settings row when in Settings; otherwise
-        // cycle the library album-list kind / search result bucket.
+        // h / l: adjust the selected settings row when in Settings, cycle the
+        // diagnostics sub-tab when in Diagnostics; otherwise cycle the library
+        // album-list kind / search result bucket.
         Msg::CycleKindPrev if app.section == Section::Settings => settings::adjust(app, -1),
         Msg::CycleKindNext if app.section == Section::Settings => settings::adjust(app, 1),
+        Msg::CycleKindPrev if app.section == Section::Diagnostics => diagnostics::cycle_tab(app, -1),
+        Msg::CycleKindNext if app.section == Section::Diagnostics => diagnostics::cycle_tab(app, 1),
         Msg::CycleKindPrev => cycle_kind(app, -1),
         Msg::CycleKindNext => cycle_kind(app, 1),
+        // [ / ] cycle the diagnostics time window; else the library browse mode.
+        Msg::CycleModePrev if app.section == Section::Diagnostics => {
+            diagnostics::cycle_window(app, -1)
+        }
+        Msg::CycleModeNext if app.section == Section::Diagnostics => {
+            diagnostics::cycle_window(app, 1)
+        }
         Msg::CycleModePrev => library::cycle_mode(app, -1),
         Msg::CycleModeNext => library::cycle_mode(app, 1),
         Msg::AlbumStation => library::album_station(app),
+        Msg::Activate if app.section == Section::Diagnostics => diagnostics::activate(app),
         Msg::Activate => browse::activate(app),
         Msg::Enqueue => browse::enqueue_selected(app),
         Msg::FocusSearch => {
@@ -444,7 +456,27 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::SettingsSaved { result } => settings::on_saved(app, result),
         Msg::SignedOut { result } => settings::on_signed_out(app, result),
         Msg::CacheInvalidated { result } => settings::on_cache_invalidated(app, result),
+
+        // ── diagnostics ───────────────────────────────────────────────
+        Msg::DiagnosticsLoaded { tab, result } => diagnostics::on_loaded(app, tab, result),
+        Msg::LatentNeighboursLoaded { seed, result } => {
+            diagnostics::on_neighbours(app, &seed, result)
+        }
     }
+}
+
+/// The visible section `delta` steps from the current one (Tab/BackTab).
+/// Cycles the *visible* set so Diagnostics is skipped for non-admins.
+fn cycle_section(app: &App, delta: i64) -> Section {
+    let vis = app.visible_sections();
+    let n = i64::try_from(vis.len()).unwrap_or(1).max(1);
+    let cur = vis
+        .iter()
+        .position(|s| *s == app.section)
+        .and_then(|p| i64::try_from(p).ok())
+        .unwrap_or(0);
+    let next = usize::try_from((cur + delta).rem_euclid(n)).unwrap_or(0);
+    vis.get(next).copied().unwrap_or(app.section)
 }
 
 // ── navigation ─────────────────────────────────────────────────────────
@@ -489,6 +521,7 @@ fn focused_list(app: &mut App) -> (usize, &mut ratatui::widgets::TableState) {
             let len = settings::row_count(app);
             (len, &mut app.settings.table)
         }
+        Section::Diagnostics => diagnostics::focused_list(app),
     }
 }
 
@@ -565,6 +598,8 @@ fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
         Section::Downloads => downloads::reload(app),
         // Settings refreshes identity (account card + admin gating).
         Section::Settings => settings::reload(app),
+        // Diagnostics loads the active sub-tab (then auto-refreshes on tick).
+        Section::Diagnostics => diagnostics::reload(app),
         _ => vec![],
     }
 }
@@ -700,8 +735,9 @@ fn rating_target(app: &App) -> Option<(&'static str, String, String)> {
         }
         Section::Playlists => Some(track_target(&playlists::selected_track(app)?)),
         Section::Downloads => Some(track_target(&downloads::selected_track(app)?)),
-        // Settings lists no tracks; rating keys fall through to now-playing.
-        Section::Settings => None,
+        // Settings / Diagnostics list no rateable rows; rating keys fall
+        // through to the now-playing track.
+        Section::Settings | Section::Diagnostics => None,
     }
     .or_else(|| {
         // Fallback: whatever is playing right now.

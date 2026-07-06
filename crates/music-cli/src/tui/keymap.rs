@@ -130,7 +130,13 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::BackTab => Some(Msg::PrevSection),
         KeyCode::Char(c @ '1'..='9') => {
             let idx = (c as usize) - ('1' as usize);
-            Section::ALL.get(idx).copied().map(Msg::GoSection)
+            // Gate the digit through visibility so a non-admin's "9"
+            // (Diagnostics) is inert rather than jumping to a hidden section.
+            Section::ALL
+                .get(idx)
+                .copied()
+                .filter(|s| app.is_section_visible(*s))
+                .map(Msg::GoSection)
         }
         KeyCode::Char('/') => Some(Msg::FocusSearch),
         KeyCode::Char('i') => Some(Msg::FocusInput),
@@ -275,6 +281,24 @@ mod tests {
         ));
         // No 9th section yet — the number is inert, not a panic.
         assert!(action_for(&a, key(KeyCode::Char('9'))).is_none());
+    }
+
+    #[test]
+    fn section_nine_is_admin_only() {
+        let mut a = app();
+        // Non-admin (whoami unset): "9" is inert — Diagnostics is hidden.
+        assert!(action_for(&a, key(KeyCode::Char('9'))).is_none());
+        // Admin: "9" jumps to Diagnostics.
+        a.whoami = Some(crate::api::WhoamiInfo {
+            user_id: 1,
+            role: "admin".to_owned(),
+            username: None,
+            display_name: None,
+        });
+        assert!(matches!(
+            action_for(&a, key(KeyCode::Char('9'))),
+            Some(Msg::GoSection(Section::Diagnostics))
+        ));
     }
 
     #[test]

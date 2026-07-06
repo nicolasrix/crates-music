@@ -20,14 +20,14 @@ use super::widgets::input::InputField;
 // Per-section view-state lives in a sibling module; re-exported so callers
 // keep using `state::{SearchState, DownloadsState, SettingsState, …}`.
 pub(crate) use super::section_state::{
-    DownloadsState, LikedState, PinnedRow, SearchBucket, SearchState, SettingRow, SettingsState,
-    StationsState,
+    DiagnosticsState, DiagTab, DiagWindow, DownloadsState, LikedState, PinnedRow, SearchBucket,
+    SearchState, SettingRow, SettingsState, StationsState, TracingData,
 };
 
 /// Sidebar sections, in display order (the `1..9` number bindings index
 /// this). Playlists sits at slot 4, between Queue and Stations, Downloads at
-/// slot 7, and Settings at slot 8 (Diagnostics lands later), per the parity
-/// plan's target sidebar.
+/// slot 7, Settings at slot 8, and Diagnostics at slot 9 (admin-only — hidden
+/// for non-admins via [`App::is_section_visible`]), per the parity plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     Library,
@@ -38,10 +38,11 @@ pub(crate) enum Section {
     Liked,
     Downloads,
     Settings,
+    Diagnostics,
 }
 
 impl Section {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Library,
         Self::Search,
         Self::Queue,
@@ -50,6 +51,7 @@ impl Section {
         Self::Liked,
         Self::Downloads,
         Self::Settings,
+        Self::Diagnostics,
     ];
 
     pub(crate) fn title(self) -> &'static str {
@@ -62,6 +64,7 @@ impl Section {
             Self::Liked => "Liked",
             Self::Downloads => "Downloads",
             Self::Settings => "Settings",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 
@@ -586,6 +589,8 @@ pub(crate) struct App {
     pub stations: StationsState,
     pub liked: LikedState,
     pub downloads: DownloadsState,
+    /// Admin-only diagnostics section (hidden for non-admins).
+    pub diagnostics: DiagnosticsState,
     pub playlists: PlaylistsState,
     /// Active playlist picker (add-to-playlist overlay), when open.
     pub picker: Option<PickerState>,
@@ -655,6 +660,7 @@ impl App {
             stations: StationsState::default(),
             liked: LikedState::default(),
             downloads: DownloadsState::default(),
+            diagnostics: DiagnosticsState::default(),
             playlists: PlaylistsState::default(),
             picker: None,
             text_prompt: None,
@@ -705,6 +711,25 @@ impl App {
     /// rows). Unknown identity (direct mode / pre-fetch) is treated as non-admin.
     pub(crate) fn is_admin(&self) -> bool {
         self.whoami.as_ref().is_some_and(|w| w.role == "admin")
+    }
+
+    /// Whether a section is shown in the sidebar / reachable by a number key.
+    /// Only Diagnostics is gated (admin-only, decision D3); everything else is
+    /// always visible. The server enforces the real gate — this is UX.
+    pub(crate) fn is_section_visible(&self, section: Section) -> bool {
+        match section {
+            Section::Diagnostics => self.is_admin(),
+            _ => true,
+        }
+    }
+
+    /// Sections to show, in display order — Diagnostics filtered out for
+    /// non-admins. Drives the sidebar and Tab/BackTab cycling.
+    pub(crate) fn visible_sections(&self) -> Vec<Section> {
+        Section::ALL
+            .into_iter()
+            .filter(|s| self.is_section_visible(*s))
+            .collect()
     }
 
     /// The interactive Settings rows in display order (shared by the reducer

@@ -172,3 +172,133 @@ impl Default for SettingsState {
         }
     }
 }
+
+// ── diagnostics (section 9, admin-only) ─────────────────────────────────────
+
+use crate::api::{
+    ClientEvent, HistogramBucket, LatentNeighbour, LatentSpace, QueueDepth, RecentlyPlayed,
+    RecommenderPanels, TraceEntry,
+};
+
+/// The Diagnostics sub-tabs, cycled with `h`/`l` (the section-kind pattern
+/// Search uses for its buckets). One per family of gateway inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DiagTab {
+    #[default]
+    Ingest,
+    Recommender,
+    Listening,
+    Tracing,
+    LatentSpace,
+    ClientEvents,
+}
+
+impl DiagTab {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Ingest,
+        Self::Recommender,
+        Self::Listening,
+        Self::Tracing,
+        Self::LatentSpace,
+        Self::ClientEvents,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Ingest => "Ingest",
+            Self::Recommender => "Recommender",
+            Self::Listening => "Listening",
+            Self::Tracing => "Tracing",
+            Self::LatentSpace => "Latent space",
+            Self::ClientEvents => "Client events",
+        }
+    }
+}
+
+/// Time window for the inspectors that accept a `since_ms` lower bound
+/// (Recommender panels + Tracing histogram). Cycled with `[`/`]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DiagWindow {
+    M15,
+    H1,
+    #[default]
+    H24,
+    All,
+}
+
+impl DiagWindow {
+    pub(crate) const ALL: [Self; 4] = [Self::M15, Self::H1, Self::H24, Self::All];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::M15 => "15m",
+            Self::H1 => "1h",
+            Self::H24 => "24h",
+            Self::All => "all",
+        }
+    }
+
+    /// The `since_ms` lower bound for a given `now` (unix-ms), or `None` for
+    /// "all time" (the query param is omitted).
+    pub(crate) fn cutoff_ms(self, now_ms: i64) -> Option<i64> {
+        let span_ms: i64 = match self {
+            Self::M15 => 15 * 60_000,
+            Self::H1 => 60 * 60_000,
+            Self::H24 => 24 * 60 * 60_000,
+            Self::All => return None,
+        };
+        Some(now_ms - span_ms)
+    }
+
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
+    }
+}
+
+/// The Tracing sub-tab's two datasets (fetched together for one window).
+#[derive(Debug, Clone)]
+pub(crate) struct TracingData {
+    pub traces: Vec<TraceEntry>,
+    pub histogram: Vec<HistogramBucket>,
+}
+
+/// Section 9 — admin-only diagnostics. Each sub-tab holds its own `Loadable`
+/// so switching tabs shows the last data instantly while the fresh fetch
+/// runs; the active tab auto-refreshes on the 250 ms tick, throttled to ~5 s
+/// (mirrors the web `/diagnostics` `refetchInterval`).
+#[derive(Debug, Default)]
+pub(crate) struct DiagnosticsState {
+    /// Active sub-tab (index into [`DiagTab::ALL`]).
+    pub tab: usize,
+    /// Window for the `since_ms` inspectors.
+    pub window: DiagWindow,
+    /// Tick of the last (auto or on-enter) refresh of the active tab.
+    pub last_refresh_tick: u64,
+
+    pub ingest: Loadable<QueueDepth>,
+    pub recommender: Loadable<RecommenderPanels>,
+    pub listening: Loadable<Vec<RecentlyPlayed>>,
+    pub listening_table: TableState,
+    pub tracing: Loadable<TracingData>,
+    pub tracing_table: TableState,
+    pub latent: Loadable<LatentSpace>,
+    /// Cursor into `latent.points` (the highlighted scatter point).
+    pub latent_table: TableState,
+    /// Nearest-neighbour side list for the selected latent point.
+    pub neighbours: Loadable<Vec<LatentNeighbour>>,
+    /// The point id `neighbours` was fetched for (dedups the tick-driven
+    /// re-fetch: only re-request when the selection actually moved).
+    pub neighbour_seed: Option<String>,
+    pub client_events: Loadable<Vec<ClientEvent>>,
+    pub client_events_table: TableState,
+    /// Unused stand-in returned for the non-navigable tabs (Ingest,
+    /// Recommender) so `focused_list` always has a table to hand back and
+    /// cursor keys no-op without disturbing a real selection.
+    pub scratch_table: TableState,
+}
+
+impl DiagnosticsState {
+    pub(crate) fn active_tab(&self) -> DiagTab {
+        DiagTab::ALL[self.tab % DiagTab::ALL.len()]
+    }
+}

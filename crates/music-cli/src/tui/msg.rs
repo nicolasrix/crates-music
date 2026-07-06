@@ -16,14 +16,30 @@ use music_player::PlayerEvent;
 use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::{ServerMessage, SyncOp};
 
-use crate::api::{PlaylistSummary, WhoamiInfo};
+use crate::api::{
+    ClientEvent, LatentNeighbour, LatentSpace, PlaylistSummary, QueueDepth, RecentlyPlayed,
+    RecommenderPanels, WhoamiInfo,
+};
 use crate::config::{AutoplayConfig, PlaybackConfig, Quality};
 
 use super::signal::PendingEvent;
 use super::state::{
-    ArtistDetailState, FeedbackVote, LikedEntry, PinnedRow, PlaylistDetailState, Rating, Section,
-    SimilarEntry,
+    ArtistDetailState, DiagTab, DiagWindow, FeedbackVote, LikedEntry, PinnedRow,
+    PlaylistDetailState, Rating, Section, SimilarEntry, TracingData,
 };
+
+/// The payload of a completed [`Effect::LoadDiagnostics`], one variant per
+/// sub-tab (each tab fetches a different shape). Boxed where large so `Msg`
+/// stays cheap to move.
+#[derive(Debug)]
+pub(crate) enum DiagData {
+    Ingest(QueueDepth),
+    Recommender(Box<RecommenderPanels>),
+    Listening(Vec<RecentlyPlayed>),
+    Tracing(TracingData),
+    Latent(Box<LatentSpace>),
+    ClientEvents(Vec<ClientEvent>),
+}
 
 /// Single-line text-field edits, produced by the keymap only while an input
 /// is focused (so plain chars never trigger global bindings mid-typing).
@@ -323,6 +339,20 @@ pub(crate) enum Msg {
     CacheInvalidated {
         result: Result<(), String>,
     },
+
+    // ── diagnostics (admin-only) ───────────────────────────────────────
+    /// A diagnostics sub-tab load finished. `tab` echoes the request so a
+    /// stale completion (the user switched tabs mid-fetch) can be dropped.
+    DiagnosticsLoaded {
+        tab: DiagTab,
+        result: Result<DiagData, String>,
+    },
+    /// The latent-space nearest neighbours for the selected point resolved.
+    /// `seed` echoes the point id so a stale completion is dropped.
+    LatentNeighboursLoaded {
+        seed: String,
+        result: Result<Vec<LatentNeighbour>, String>,
+    },
 }
 
 /// Full settings snapshot for the [`Effect::SaveSettings`] persist. Floats are
@@ -578,4 +608,18 @@ pub(crate) enum Effect {
     /// `POST /v1/admin/cache/invalidate` (admin-gated); completes as
     /// [`Msg::CacheInvalidated`].
     CacheInvalidate,
+
+    // ── diagnostics (admin-only) ───────────────────────────────────────
+    /// Load one diagnostics sub-tab for the given window; completes as
+    /// [`Msg::DiagnosticsLoaded`]. The effect resolves `window` to a
+    /// `since_ms` cutoff at run time (keeps `Effect` `Eq`, no wall clock).
+    LoadDiagnostics {
+        tab: DiagTab,
+        window: DiagWindow,
+    },
+    /// `recommend/latent_neighbours` for the selected scatter point (+ hydrate
+    /// titles); completes as [`Msg::LatentNeighboursLoaded`].
+    LoadLatentNeighbours {
+        track_id: String,
+    },
 }
