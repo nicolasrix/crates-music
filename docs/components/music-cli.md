@@ -122,7 +122,7 @@ prefetched for near-gapless handoff.
 | `S` | start a station from the open album / artist (replaces the queue) |
 | `a` | add the selected track to a playlist (picker overlay) |
 | `/` | search · `i` edit station prompt · `Esc` back/unfocus |
-| `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume |
+| `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume · `M` mute |
 | `L` / `D` / `u` | like / dislike / unrate selection |
 | `r` | recommend from now playing → enqueue |
 | `x` / `c` | queue: remove / clear upcoming |
@@ -256,6 +256,19 @@ Notes:
   `refetchInterval`), keeping the last data on screen during a refetch.
   The whole section is hidden for non-admins — the gateway 403s the
   endpoints regardless, so the UI gate is UX, not security.
+- **MPRIS media keys** (Linux): the TUI exports
+  `org.mpris.MediaPlayer2.cratesmusic` over the D-Bus session bus, so
+  desktop play/pause/next/previous media keys and now-playing widgets
+  (GNOME Shell, KDE Plasma, `playerctl`, lock screens) drive and observe
+  it — the desktop analog of the PWA's Media Session. Incoming D-Bus calls
+  become the same reducer messages as keypresses; the current track,
+  status, and seek position are published outward. Runs on a dedicated
+  thread (the `mpris-server` `Player` is `!Send`), degrades silently with
+  no session bus (headless / SSH), and is compiled out entirely on
+  non-Linux targets. No configuration needed.
+- **Grapheme-aware editing**: text fields (search, rename, guest code)
+  move and delete by extended grapheme cluster, so combining marks and
+  emoji ZWJ sequences behave as one character.
 - **Logs**: the TUI silences stderr logging (it would corrupt the
   screen). Set `CRATES_CLI_LOG=/path/to/file` to capture tracing output.
 - `NO_COLOR=1` switches the TUI to a monochrome theme.
