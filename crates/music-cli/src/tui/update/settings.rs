@@ -16,7 +16,20 @@ use super::super::msg::{Effect, SettingsSave};
 use super::super::state::{App, SettingRow};
 use super::{autoplay, room};
 
-const GIB: u64 = 1 << 30;
+// Adjustment grids for the numeric rows. Kept as named constants (not inline
+// literals) so the ranges have one place to tune and stay legible; they mirror
+// the web `/settings` sliders and `[tui.autoplay]` defaults.
+const BUDGET_STEP: u64 = 1 << 30; // 1 GiB per h/l tick
+const MIN_UPCOMING: (usize, usize) = (1, 50); // (min, max)
+const FRONTIER_WINDOW_MAX: usize = 20;
+const LEASH_TAU_STEP: f32 = 0.02;
+const LEASH_LAMBDA_STEP: f32 = 1.0;
+const LEASH_LAMBDA_MAX: f32 = 64.0;
+const FRONTIER_WEIGHT_STEP: f32 = 0.02;
+const FRONTIER_DECAY_STEP: f32 = 0.05;
+const MMR_LAMBDA_STEP: f32 = 0.05;
+/// Most drift knobs are unit-interval fractions.
+const UNIT: (f32, f32) = (0.0, 1.0);
 
 pub(super) fn row_count(app: &App) -> usize {
     app.settings_rows().len()
@@ -51,14 +64,7 @@ pub(super) fn activate(app: &mut App) -> Vec<Effect> {
         app.settings.confirm_signout = false;
     }
     match row {
-        SettingRow::StreamQuality => {
-            app.settings.stream_quality = app.settings.stream_quality.next();
-            persist(app, false)
-        }
-        SettingRow::DownloadQuality => {
-            app.settings.download_quality = app.settings.download_quality.next();
-            persist(app, false)
-        }
+        SettingRow::StreamQuality | SettingRow::DownloadQuality => activate_enum(app, row),
         SettingRow::OutputDevice => room::toggle_output(app),
         SettingRow::AutoplayEnabled => toggle_autoplay(app),
         SettingRow::ResetAutoplay => reset_autoplay(app),
@@ -94,40 +100,55 @@ pub(super) fn adjust(app: &mut App, dir: i8) -> Vec<Effect> {
         SettingRow::OutputDevice => return room::toggle_output(app),
         SettingRow::AutoplayEnabled => return toggle_autoplay(app),
         SettingRow::RegularBudget => {
-            app.settings.regular_budget_bytes = step_u64(app.settings.regular_budget_bytes, up, GIB);
+            app.settings.regular_budget_bytes =
+                step_u64(app.settings.regular_budget_bytes, up, BUDGET_STEP);
         }
         SettingRow::PinnedBudget => {
-            app.settings.pinned_budget_bytes = step_u64(app.settings.pinned_budget_bytes, up, GIB);
+            app.settings.pinned_budget_bytes =
+                step_u64(app.settings.pinned_budget_bytes, up, BUDGET_STEP);
         }
         SettingRow::MinUpcoming => {
-            app.autoplay.min_upcoming = step_usize(app.autoplay.min_upcoming, up, 1, 1, 50);
+            app.autoplay.min_upcoming =
+                step_usize(app.autoplay.min_upcoming, up, 1, MIN_UPCOMING.0, MIN_UPCOMING.1);
         }
         SettingRow::LeashTau => {
-            app.settings.leash_tau = step_f32(app.settings.leash_tau, up, 0.02, 0.0, 1.0);
+            app.settings.leash_tau =
+                step_f32(app.settings.leash_tau, up, LEASH_TAU_STEP, UNIT.0, UNIT.1);
         }
         SettingRow::LeashLambda => {
-            app.settings.leash_lambda = step_f32(app.settings.leash_lambda, up, 1.0, 0.0, 64.0);
+            app.settings.leash_lambda = step_f32(
+                app.settings.leash_lambda,
+                up,
+                LEASH_LAMBDA_STEP,
+                0.0,
+                LEASH_LAMBDA_MAX,
+            );
         }
         SettingRow::FrontierWeight => {
             app.settings.frontier_weight =
-                step_f32(app.settings.frontier_weight, up, 0.02, 0.0, 1.0);
+                step_f32(app.settings.frontier_weight, up, FRONTIER_WEIGHT_STEP, UNIT.0, UNIT.1);
         }
         SettingRow::FrontierDecay => {
-            app.settings.frontier_decay = step_f32(app.settings.frontier_decay, up, 0.05, 0.0, 1.0);
+            app.settings.frontier_decay =
+                step_f32(app.settings.frontier_decay, up, FRONTIER_DECAY_STEP, UNIT.0, UNIT.1);
         }
         SettingRow::FrontierWindow => {
-            app.settings.frontier_window = step_usize(app.settings.frontier_window, up, 1, 0, 20);
+            app.settings.frontier_window =
+                step_usize(app.settings.frontier_window, up, 1, 0, FRONTIER_WINDOW_MAX);
         }
         SettingRow::MmrLambda => {
-            app.settings.mmr_lambda = step_f32(app.settings.mmr_lambda, up, 0.05, 0.0, 1.0);
+            app.settings.mmr_lambda =
+                step_f32(app.settings.mmr_lambda, up, MMR_LAMBDA_STEP, UNIT.0, UNIT.1);
         }
         // Action rows don't adjust.
         SettingRow::ResetAutoplay | SettingRow::SignOut | SettingRow::InvalidateCache => {
             return vec![];
         }
     }
-    // A budget row is the only one that can require an eviction (when lowered).
-    let evict = matches!(row, SettingRow::RegularBudget | SettingRow::PinnedBudget) && !up;
+    // Only the *regular* budget, lowered, can free space — the pinned budget
+    // just gates future pins (pinned entries are never LRU-evicted), so an
+    // eviction there would be a guaranteed no-op DB scan.
+    let evict = row == SettingRow::RegularBudget && !up;
     persist(app, evict)
 }
 
@@ -179,8 +200,10 @@ fn sign_out(app: &mut App) -> Vec<Effect> {
 // ── effect completions ────────────────────────────────────────────────────
 
 pub(super) fn on_saved(app: &mut App, result: Result<(), String>) -> Vec<Effect> {
+    // The effect already frames the message (config-write vs eviction failure);
+    // surface it verbatim rather than double-prefixing.
     if let Err(e) = result {
-        app.set_status(format!("settings not saved: {e}"), true);
+        app.set_status(e, true);
     }
     vec![]
 }

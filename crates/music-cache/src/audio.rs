@@ -181,6 +181,25 @@ impl AudioCache {
         Ok(row.as_ref().map(row_to_entry))
     }
 
+    /// Find any cached entry for a track id, regardless of `(bitrate, codec)`.
+    /// A pinned entry wins, then the most-recently-accessed. Lets callers that
+    /// only hold a track id (offline playback, quality-agnostic unpin) locate
+    /// a blob that was cached under a *different* quality than the one they'd
+    /// derive today — otherwise a track pinned at one quality becomes invisible
+    /// (unplayable offline, unable to be unpinned) after the quality setting
+    /// changes.
+    pub async fn find_by_track(&self, track_id: &str) -> Result<Option<AudioEntry>, Error> {
+        let row = sqlx::query(
+            "SELECT key, track_id, bitrate, codec, blob_path, bytes, last_accessed_at, pinned \
+             FROM audio_entries WHERE track_id = ? \
+             ORDER BY pinned DESC, last_accessed_at DESC LIMIT 1",
+        )
+        .bind(track_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_entry))
+    }
+
     /// Insert or replace a cache entry. Writes the blob atomically (tmp +
     /// rename) and triggers LRU eviction if the regular budget is exceeded.
     /// Pinned status is preserved across replacement.

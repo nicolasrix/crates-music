@@ -85,15 +85,18 @@ async fn ensure_cached(
     Ok(())
 }
 
-/// `d` — toggle one track's offline pin. Already pinned → unpin; otherwise
-/// fetch-if-missing then pin. Mirrors the classic `pin`/`unpin` outcomes.
+/// `d` — toggle one track's offline pin. Already pinned (at *any* quality) →
+/// unpin that entry; otherwise fetch-if-missing then pin at the current
+/// download quality. Mirrors the classic `pin`/`unpin` outcomes.
 pub(super) async fn pin_toggle(ctx: &Ctx, track_id: &str, title: &str) -> Msg {
     let tid = TrackId::from(track_id.to_owned());
-    let key = crate::app::audio_key(&tid, ctx.download_quality());
 
-    match ctx.cache.get(&key).await {
+    // Is this track pinned under *any* quality? If so, `d` un-saves that exact
+    // entry — keying off today's `download_quality` would miss a copy pinned
+    // before the setting changed (and silently pin a second one).
+    match ctx.cache.find_by_track(track_id).await {
         Ok(Some(entry)) if entry.pinned => {
-            return match ctx.cache.unpin(&key).await {
+            return match ctx.cache.unpin(&entry.key).await {
                 Ok(_) => pin_done(format!("removed {title} from offline"), false),
                 Err(e) => pin_done(format!("unpin failed: {e}"), true),
             };
@@ -102,6 +105,7 @@ pub(super) async fn pin_toggle(ctx: &Ctx, track_id: &str, title: &str) -> Msg {
         Err(e) => return pin_done(format!("cache error: {e}"), true),
     }
 
+    let key = crate::app::audio_key(&tid, ctx.download_quality());
     let client = match ctx.subsonic().await {
         Ok(c) => c,
         Err(e) => return pin_done(format!("save failed: {e}"), true),

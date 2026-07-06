@@ -302,15 +302,27 @@ impl Config {
         }
         let body =
             toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
-        let tmp = self.source_path.with_extension("toml.tmp");
+        // Unique temp name per write: the TUI Settings view fires a save on
+        // every keystroke, and key-repeat can put several saves in flight at
+        // once (each an independent task). A shared temp path would let two
+        // writers interleave into one file and rename a torn result over the
+        // live config; a per-write name keeps each rename atomic.
+        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self
+            .source_path
+            .with_extension(format!("toml.{}.{seq}.tmp", std::process::id()));
         std::fs::write(&tmp, body)
             .map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &self.source_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp); // don't leak the temp on failure
             anyhow::anyhow!("replacing {}: {e}", self.source_path.display())
         })?;
         Ok(())
     }
 }
+
+/// Monotonic counter for [`Config::save`]'s per-write temp-file name.
+static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Returns the platform-appropriate default config path:
 /// `$XDG_CONFIG_HOME/crates-music/config.toml` on Linux,

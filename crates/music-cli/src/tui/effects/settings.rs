@@ -66,8 +66,11 @@ pub(super) async fn save(ctx: &Ctx, save: SettingsSave) -> Msg {
     });
     ctx.cache
         .set_budgets(save.regular_budget_bytes, save.pinned_budget_bytes);
+    // A lowered budget must evict *visibly* — surface the failure, don't just
+    // log it (CLAUDE.md: "Lowering the cap evicts immediately and visibly").
+    let mut evict_err = None;
     if save.evict_now && let Err(e) = ctx.cache.evict_lru_to_fit().await {
-        tracing::debug!(error = %e, "settings: eviction after budget change failed");
+        evict_err = Some(format!("budget applied, but eviction failed: {e}"));
     }
 
     // Then persist. Build the on-disk config from the boot base + edits.
@@ -76,7 +79,10 @@ pub(super) async fn save(ctx: &Ctx, save: SettingsSave) -> Msg {
     config.cache.regular_budget_bytes = save.regular_budget_bytes;
     config.cache.pinned_budget_bytes = save.pinned_budget_bytes;
     config.tui.autoplay = autoplay;
-    let result = config.save().map_err(|e| e.to_string());
+    let result = match config.save() {
+        Ok(()) => evict_err.map_or(Ok(()), Err),
+        Err(e) => Err(format!("settings not saved: {e}")),
+    };
     Msg::SettingsSaved { result }
 }
 

@@ -503,6 +503,9 @@ pub(super) fn loaded_len<T>(l: &Loadable<Vec<T>>) -> usize {
 }
 
 fn nav(app: &mut App, delta: i64) -> Vec<Effect> {
+    // Moving the cursor off the armed sign-out row disarms it — the two-step
+    // guard must survive intervening navigation, not just other actions.
+    app.settings.confirm_signout = false;
     let (len, table) = focused_list(app);
     if len == 0 {
         table.select(None);
@@ -516,6 +519,7 @@ fn nav(app: &mut App, delta: i64) -> Vec<Effect> {
 }
 
 fn nav_to(app: &mut App, target: NavTarget) -> Vec<Effect> {
+    app.settings.confirm_signout = false;
     let (len, table) = focused_list(app);
     if len == 0 {
         table.select(None);

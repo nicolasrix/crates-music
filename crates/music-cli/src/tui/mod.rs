@@ -12,6 +12,7 @@ mod effects;
 mod keymap;
 mod msg;
 mod render;
+mod section_state;
 mod signal;
 mod state;
 mod sync_ws;

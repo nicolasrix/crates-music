@@ -250,7 +250,12 @@ async fn run_unpin(
     track_id: &TrackId,
     quality: Quality,
 ) -> anyhow::Result<()> {
-    let key = audio_key(track_id, quality);
+    // Unpin whatever quality this track was actually pinned at — not just the
+    // one today's `download_quality` would derive (which may differ).
+    let key = match cache.find_by_track(track_id.as_str()).await? {
+        Some(entry) if entry.pinned => entry.key,
+        _ => audio_key(track_id, quality),
+    };
     match cache.unpin(&key).await? {
         UnpinOutcome::Unpinned => println!("unpinned {}", track_id.as_str()),
         UnpinOutcome::NotPinned => println!("not pinned: {}", track_id.as_str()),
@@ -313,6 +318,19 @@ pub(crate) async fn fetch_track_bytes(
     quality: Quality,
 ) -> anyhow::Result<Bytes> {
     let key = audio_key(track_id, quality);
+    // Cache-first, across qualities: prefer the exact key, but fall back to
+    // *any* cached copy of this track (e.g. a pinned download-quality blob
+    // while streaming at `original`). Without this, a track saved offline at
+    // one quality is unplayable — offline entirely, or a needless refetch
+    // online — after the quality setting changes.
+    if let Some(bytes) = read_cached(cache, &key).await? {
+        return Ok(bytes);
+    }
+    if let Some(entry) = cache.find_by_track(track_id.as_str()).await?
+        && let Some(bytes) = read_cached(cache, &entry.key).await?
+    {
+        return Ok(bytes);
+    }
     let (format, max_bitrate) = match quality.transcode() {
         Some((fmt, kbps)) => (Some(fmt), Some(kbps)),
         None => (None, None),
@@ -415,7 +433,16 @@ async fn play_tracks(
     for track_id in track_ids {
         let key = audio_key(track_id, quality);
         let bytes = if offline {
-            match read_cached(cache, &key).await? {
+            // Prefer the exact quality, else any cached copy of this track
+            // (it may have been pinned under a different quality).
+            let cached = match read_cached(cache, &key).await? {
+                Some(bytes) => Some(bytes),
+                None => match cache.find_by_track(track_id.as_str()).await? {
+                    Some(entry) => read_cached(cache, &entry.key).await?,
+                    None => None,
+                },
+            };
+            match cached {
                 Some(bytes) => bytes,
                 None => anyhow::bail!(
                     "track {} is not in the local cache; remove --offline to fetch from the server",

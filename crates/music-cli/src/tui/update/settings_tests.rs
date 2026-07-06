@@ -196,10 +196,20 @@ fn navigating_away_disarms_sign_out() {
     select(&mut a, SettingRow::SignOut);
     update(&mut a, Msg::Activate); // arm
     assert!(a.settings.confirm_signout);
-    // Moving to another row and acting must not sign out.
-    select(&mut a, SettingRow::StreamQuality);
-    update(&mut a, Msg::Activate);
+    // A cursor move (not just another action) must disarm — otherwise a stray
+    // enter after navigating back would sign out on the first press.
+    update(&mut a, Msg::NavUp);
     assert!(!a.settings.confirm_signout);
+}
+
+#[test]
+fn lowering_pinned_budget_does_not_evict() {
+    // Pinned entries are never LRU-evicted, so a pinned-budget change must not
+    // fire an eviction (which would be a guaranteed no-op DB scan).
+    let mut a = app();
+    select(&mut a, SettingRow::PinnedBudget);
+    let effects = update(&mut a, Msg::CycleKindPrev); // lower it
+    assert!(!saved_effect(&effects).evict_now);
 }
 
 #[test]
