@@ -81,7 +81,17 @@ Two boundaries that matter more than the tree: `music-recommend` is
 **server-only** and must never be linked into a client, and clients consume
 `music-core` types while talking to the gateway over HTTP/WS.
 
-## Getting started
+## Just want to run it?
+
+Follow the [**tutorials**](./docs/tutorials/README.md) — a step-by-step path
+from nothing to music on your phone, using containers, assuming no prior
+experience. Start with
+[01 — Get your music library online](./docs/tutorials/01-navidrome.md).
+
+The rest of this README, and everything under `docs/` outside `tutorials/`
+and `explainers/`, is written for developers.
+
+## Getting started (developers)
 
 Requires Rust 1.95 (pinned in `rust-toolchain.toml`), a current Node LTS for the
 web app (Vite 8), and a reachable Navidrome instance. The recommender
@@ -101,6 +111,8 @@ the Vite dev server — is in
 
 | Doc | What you'll learn |
 |---|---|
+| [tutorials/](./docs/tutorials/README.md) | Non-technical step-by-step setup guides |
+| [explainers/](./docs/explainers/) | Plain-language background — how it works, certificates, glossary |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Gateway, clients, cache layers, auth, recommender |
 | [GETTING-STARTED.md](./docs/GETTING-STARTED.md) | Bring the stack up locally |
 | [CONFIGURATION.md](./docs/CONFIGURATION.md) | Every config block and environment variable |
