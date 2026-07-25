@@ -7,7 +7,24 @@ Local-network-first, with a lightweight **admin / user / guest** role
 model layered on the gateway's hand-rolled OAuth (per-user isolation of
 queues, taste, ratings, and playlists; shared Navidrome catalog).
 
-This directory is the onboarding entry point. Follow the docs in this order:
+This directory is the onboarding entry point.
+
+## Not a developer? Start with the tutorials
+
+The docs below assume you're comfortable with a terminal, TLS certs, and
+Cargo. If you just want to **run** this and listen to music, use the
+step-by-step guides instead — they use pre-packaged containers and assume
+no prior experience:
+
+- **[Tutorials](./tutorials/README.md)** — install Navidrome, install
+  crates-music, put it on your phone, turn on recommendations, add family
+  and guests, and a troubleshooting reference.
+- **[Explainers](./explainers/)** — plain-language background:
+  [how it all fits together](./explainers/how-it-works.md),
+  [why the security warnings?](./explainers/certificates.md),
+  [glossary](./explainers/glossary.md).
+
+Everything below this line is the developer/operator track.
 
 ## Start here
 
