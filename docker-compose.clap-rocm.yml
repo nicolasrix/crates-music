@@ -25,7 +25,7 @@ services:
       # card but torch reports `cuda.is_available() == False` inside the
       # container. The override spoofs the card's gfx ISA so older ROCm
       # kernels load — e.g. set to `11.0.0` to use RDNA3 kernels on
-      # RDNA4 hardware. Unnecessary on RDNA4 (gfx1201) with the
+      # RDNA4 hardware. Unnecessary on gfx1201 with the
       # rocm6.4 wheels baked in.
       # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
     devices:

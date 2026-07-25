@@ -8,12 +8,15 @@ checklists — the full explanations live in
 
 ## Topology
 
-Roles (single-host, or split across two):
+Single-host is the simple case: gateway, reverse proxy and embedder all
+in one compose stack. The recommender is the only component that wants a
+GPU, so it can also be split onto a second host — useful when the box
+holding the library is CPU-only:
 
-| Host | Runs | Notes |
+| Role | Runs | Notes |
 |---|---|---|
-| the NAS host (CPU-only) | `crates-gateway` + `crates-caddy` | The gateway host. Its `EMBEDDER_URL` dials the GPU box over the LAN. Deploy via **Apps → Custom App** (the supported path — manual `docker compose` over SSH works but may not survive the NAS host upgrades). |
-| GPU host (RDNA4 GPU) | GPU embedder sidecar (`crates-embedder`, CLaMP 3 ROCm) on `:9000` | Split-host shape: [DEPLOYMENT.md → Bringing up the GPU box](./DEPLOYMENT.md#bringing-up-the-gpu-box-embedder). |
+| Gateway host | `crates-gateway` + `crates-caddy` | May be CPU-only. Its `EMBEDDER_URL` points at whichever host runs the sidecar — the same stack, or another box over the LAN. NAS app platforms usually want their own Custom-App-style deployment path rather than raw `docker compose` over SSH, which may not survive platform upgrades. |
+| Embedder host (optional) | embedder sidecar (`crates-embedder`, CLaMP 3 ROCm) on `:9000` | Only needed to put inference on a GPU. See [DEPLOYMENT.md → Bringing up the GPU box](./DEPLOYMENT.md#bringing-up-the-gpu-box-embedder). |
 
 ## Health checks
 
@@ -40,7 +43,7 @@ git pull && docker compose build && docker compose up -d
 
 See [DEPLOYMENT.md → Updates](./DEPLOYMENT.md#updates).
 
-**Gateway image → the NAS host (no registry):**
+**Gateway image → a remote host (no registry):**
 
 ```bash
 # 1. Build locally from the release branch
@@ -49,7 +52,7 @@ docker compose build gateway
 # 2. Stream it to the host (the NAS admin user needs sudo for docker)
 REMOTE_DOCKER="sudo docker" ./scripts/ship-image.sh crates-music/gateway:dev nas-host
 
-# 3. Apps → Custom App → Save/restart the app on the NAS host
+# 3. Apps → Custom App → Save/restart the app on the host
 ```
 
 **Verify after any deploy:** `/readyz` is 200, boot log shows the
@@ -63,7 +66,7 @@ A dim change is **non-migratable** for the ANN sidecar. In order:
 1. Rebuild the gateway image from the branch and ship it (above) —
    `RECOMMEND_EMBEDDING_DIM` is read by `gen_config.py` **baked into the
    image**; an env-only change against an old image is a silent no-op.
-2. Set `RECOMMEND_EMBEDDING_DIM` (the NAS host Custom App YAML / `.env`).
+2. Set `RECOMMEND_EMBEDDING_DIM` (Custom App YAML / `.env`, per platform).
 3. Stop the gateway; wipe the ANN sidecar: `gateway-state.ann` +
    `gateway-state.ann.keys`. Do **not** wipe the `embedding_whitening`
    table — a stale-dim cached row is detected at boot and refit
@@ -105,7 +108,7 @@ There is no email or recovery-code path — by design. Two cases:
   echo -n 'new-master-password' | \
     music-gateway --config /path/to/gateway.toml reset-master-password
 
-  # the NAS host / docker (the gateway image is the same binary)
+  # NAS / docker (the gateway image is the same binary)
   echo -n 'new-master-password' | \
     sudo docker exec -i crates-gateway \
       music-gateway --config /config/gateway.toml reset-master-password

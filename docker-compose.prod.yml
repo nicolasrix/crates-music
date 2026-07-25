@@ -1,4 +1,4 @@
-# Production deploy on the NAS host — Caddy reverse-proxies the gateway,
+# Production deploy behind a reverse proxy — Caddy reverse-proxies the gateway,
 # terminating public-trust TLS with a Let's Encrypt cert obtained via
 # Cloudflare DNS-01. The gateway is `expose`d (network-internal only),
 # never published to the host: all external traffic flows through Caddy.
@@ -26,7 +26,7 @@
 #   LE_CONTACT_EMAIL        — LE registration + expiry-warning recipient
 #
 # Optional env:
-#   CADDY_HTTPS_PORT        — alt HTTPS port when 443 is taken (the NAS host).
+#   CADDY_HTTPS_PORT        — alt HTTPS port when 443 is taken (common on NAS platforms).
 #                             Defaults to 443. Whatever you pick must
 #                             also appear in GATEWAY_PUBLIC_BASE_URL.
 #   EMBEDDER_URL            — override the embedder address. Defaults
@@ -40,7 +40,7 @@
 #   EMBEDDER_MODELS_DIR     — host path or named volume holding the
 #                             CLAP checkpoint as clap.pt. Defaults to
 #                             a named volume; override with an absolute
-#                             path on the NAS host for ZFS snapshotting.
+#                             path on the NAS for ZFS snapshotting.
 #   ACME_DIRECTORY          — set to staging while iterating on the flow
 
 services:
@@ -53,7 +53,7 @@ services:
     restart: unless-stopped
     ports:
       # HTTPS port is env-driven: default 443 for local dev, override
-      # via CADDY_HTTPS_PORT=8443 on the NAS host where :443 is taken by
+      # via CADDY_HTTPS_PORT=8443 on hosts where :443 is taken by
       # an existing reverse proxy (Traefik in our homelab). The same
       # value is also exposed inside the container — Caddyfile reads
       # CADDY_HTTPS_PORT to know what to bind.
@@ -123,7 +123,7 @@ services:
       - ${GATEWAY_DATA_DIR:-gw-data}:/data
       # CLAP checkpoint lives in its own volume. ~2 GB, mostly cold.
       # Operators provide the .pt file (research-licensed, not in
-      # git) — drop it in as `clap.pt` at the mount root. On the NAS host,
+      # git) — drop it in as `clap.pt` at the mount root. On a NAS,
       # set EMBEDDER_MODELS_DIR to an absolute path so the file is on
       # a ZFS-snapshottable dataset and survives `docker volume rm`.
       - ${EMBEDDER_MODELS_DIR:-embedder-models}:/models:ro
@@ -177,7 +177,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info,music_gateway=info,sqlx=warn}
     volumes:
       # Same env-driven pattern as caddy-data — local default is a
-      # named volume, override on the NAS host via GATEWAY_DATA_DIR=
+      # named volume, override on a NAS via GATEWAY_DATA_DIR=
       # /mnt/<pool>/crates-music-state/gw-data so ZFS snapshots cover it.
       - ${GATEWAY_DATA_DIR:-gw-data}:/data
     # NOTE: no `ports:` — gateway is reachable only via Caddy on the

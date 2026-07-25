@@ -10,7 +10,7 @@
 # docker-compose.clamp3.yml.
 #
 # CPU only — slower than a ROCm build but hermetic and runs on any
-# x86-64 host (the NAS box, for now). A ROCm variant can mirror
+# x86-64 host. A ROCm variant can mirror
 # Dockerfile.clap-rocm later.
 #
 # Build from the repo root:

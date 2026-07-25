@@ -20,7 +20,7 @@
 	# ACME_DIRECTORY=… in .env while iterating on the issuance flow.
 	acme_ca {$ACME_DIRECTORY:https://acme-v02.api.letsencrypt.org/directory}
 
-	# Override the HTTPS port when 443 is unavailable (e.g. the NAS host
+	# Override the HTTPS port when 443 is unavailable (e.g. many NAS platforms
 	# where Traefik already binds :443). Cert issuance is unaffected —
 	# DNS-01 challenge is port-independent, and certs are scoped to
 	# hostnames, not ports. Default 443 keeps local dev unchanged.
@@ -28,7 +28,7 @@
 
 	# Skip the automatic :80 HTTP-redirect listener. With a non-default
 	# HTTPS port Caddy doesn't know where to redirect *to*, and on
-	# the NAS host :80 is taken anyway. Clients use the explicit https://…
+	# port 80 is often taken anyway. Clients use the explicit https://…
 	# URL with port, including the OAuth redirect_uri.
 	auto_https disable_redirects
 }

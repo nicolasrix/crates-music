@@ -2,7 +2,7 @@
 #
 # GPU twin of docker-compose.clamp3.yml. Stacks on the split-host
 # embedder-only base (the GPU box runs the embedder; the gateway runs on
-# the NAS host and reaches it over the LAN at $EMBEDDER_URL):
+# the gateway host and reaches it over the LAN at $EMBEDDER_URL):
 #
 #   cp docker/.env.example .env
 #   $EDITOR .env    # set EMBEDDER_BEARER_TOKEN (match the gateway),
@@ -10,7 +10,7 @@
 #   docker compose -f docker-compose.embedder-only.yml \
 #                  -f docker-compose.clamp3-rocm.yml up --build
 #
-# A supported split-host shape: gateway + caddy on the NAS host, the GPU
+# A supported split-host shape: gateway + caddy on the NAS, the GPU
 # CLaMP 3 embedder here on :9000. The cutover from the CLAP GPU embedder
 # is: bring this up on the same port + bearer token, then on the gateway
 # set recommend.embedding_dim = 768 and wipe the 512-dim ANN sidecar.

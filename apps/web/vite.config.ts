@@ -7,7 +7,7 @@ import { VitePWA } from "vite-plugin-pwa";
 // Build stamp surfaced in Settings → About, so "which deploy is this?" is
 // answerable from the running app. Prefer an injected GIT_SHA (the Docker
 // web-builder stage has no .git, so it passes one as a build-arg → env);
-// fall back to a local `git` call for `npm run build` on the GPU host;
+// fall back to a local `git` call for `npm run build` on a dev machine;
 // "unknown" if neither is available (e.g. a tarball build).
 function gitSha(): string {
   if (process.env.GIT_SHA) return process.env.GIT_SHA;

@@ -626,11 +626,12 @@ loads it without a dim-mismatch guard and the index goes split-brained.
 
 ## Split-host deployment (gateway + remote embedder)
 
-This is the **a supported split-host topology**: a **CPU-only host** (
-running `crates-gateway` + `crates-caddy`) hosts the gateway and dials
-the embedder over the LAN, while a separate **GPU workstation** (the GPU host, with an RDNA4 GPU) runs the embedder sidecar. The embedder
-image is **never shipped to the NAS** — only the gateway + caddy images
-go there; the GPU box builds and runs the embedder locally. The embedder
+A common shape when the box holding the library has no GPU: a
+**CPU-only host** (running `crates-gateway` + `crates-caddy`) serves the
+gateway and dials the embedder over the LAN, while a separate **GPU
+workstation** runs the embedder sidecar. The embedder image then never
+needs shipping to the gateway host — only the gateway + caddy images go
+there; the GPU box builds and runs the embedder locally. The embedder
 is a stateless HTTP service, so this is a configuration concern, not an
 architectural one — but the default `docker-compose.yml` assumes
 co-located containers, so two new compose files exist for the split
@@ -734,8 +735,8 @@ $EDITOR .env
 docker compose -f docker-compose.gateway-only.yml up --build
 ```
 
-This box is CPU-only — it never runs the embedder, so no GPU, ROCm
-wheels, or device passthrough are needed here. The gateway logs
+In this layout the gateway host never runs the embedder, so no GPU,
+ROCm wheels, or device passthrough are needed here. The gateway logs
 `embedder: ready model=… dim=768` on first probe (CLaMP 3; `dim=512` if
 you're still on CLAP).
 If the embedder is unreachable at boot, the gateway logs a warning
@@ -840,7 +841,7 @@ switches → stations work. On recovery: gateway prefers the primary again
 (it's first in the list) → watchdog sees `OK_THRESHOLD` hits → stops the
 fallback to reclaim RAM.
 
-> **the NAS host note.** The watchdog needs the Docker socket, which the
+> **NAS app platform note.** The watchdog needs the Docker socket, which the
 > k3s-based NAS app platform doesn't cleanly expose. Run the failover
 > overlay on a real `docker compose` host, or keep a small always-on CPU
 > sidecar as a `fallback_urls` entry instead of using the watchdog (the

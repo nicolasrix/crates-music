@@ -238,9 +238,9 @@ Both will eventually be stored as mmap'd HNSW files via
 [`usearch`](https://github.com/unum-cloud/usearch).
 
 Inference runs in a Python sidecar (FastAPI + CLaMP 3, or LAION CLAP
-on the legacy backend) so the gateway stays lightweight. In the live
-deployment the sidecar runs on the GPU host, which has the GPU (AMD
-RDNA4 GPU); the gateway host can be CPU-only and reaches the
+on the legacy backend) so the gateway stays lightweight. It can be
+co-located with the gateway, or split onto a machine with a GPU — in
+which case the gateway host stays CPU-only and reaches the
 sidecar over the LAN. Boot probe: gateway checks the embedder's
 `/healthz` at startup. If unreachable, it logs a warning and runs in
 **degraded mode** — recommend endpoints return 404 for every seed

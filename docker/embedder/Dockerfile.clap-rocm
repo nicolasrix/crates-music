@@ -4,7 +4,7 @@
 #
 # Phase B step 2: same image shape as Dockerfile.clap but with the
 # PyTorch ROCm 6.4 wheels instead of CPU wheels. Targets the
-# native RDNA4-class GPU (RDNA4 / gfx1201) but
+# native RDNA4 / gfx1201 support but
 # any ROCm-supported GPU works — gfx1201 coverage in rocm6.4 wheels
 # is sufficient that no HSA_OVERRIDE_GFX_VERSION is needed on this
 # hardware. Set it at runtime if your card needs spoofing.

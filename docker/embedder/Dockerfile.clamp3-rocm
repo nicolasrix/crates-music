@@ -5,7 +5,7 @@
 # GPU twin of Dockerfile.clamp3 (CPU): same CLaMP 3 pipeline (MERT-v1-95M
 # frontend + CLaMP 3 audio encoder over the vendored `embedder._clamp3`
 # package, 768-dim), but on the rocm6.4 PyTorch wheels instead of CPU.
-# Targets the RDNA4-class GPU (RDNA4 / gfx1201); any
+# Targets RDNA4 / gfx1201; any
 # ROCm-supported card works.
 #
 # Build from the repo root:
@@ -157,7 +157,7 @@ ENV EMBEDDER_BACKEND=clamp3 \
     NUMBA_NUM_THREADS=4 \
     NUMBA_CACHE_DIR=/var/cache/numba
     # NOTE: HSA_OVERRIDE_GFX_VERSION intentionally NOT set — rocm6.4 wheels
-    # cover gfx1201 (RDNA4) on RDNA4 (gfx1201). Pass it via compose
+    # cover gfx1201 (RDNA4). Pass it via compose
     # env if your card needs ISA spoofing.
 
 EXPOSE 9000

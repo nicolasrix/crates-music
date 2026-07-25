@@ -9,7 +9,7 @@ doesn't block gateway startup.
 
 The gateway calls this service over HTTP. It's expected to live on
 `localhost` or on the same trusted LAN as the gateway — and in the live
-deployment it runs on a **separate GPU host** (the GPU host with the AMD
+deployment it runs on a **separate GPU host** (a host with an
 RDNA4 GPU) while the gateway runs CPU-only on the NAS, reaching the
 sidecar over the LAN. For that split-host shape an optional bearer token
 guards the compute endpoints (see [Authentication](#authentication)).
@@ -191,7 +191,7 @@ text encoder produces a same-space 512-dim embedding.
 
 The default PyPI torch wheel is CUDA-only. To use an AMD card, install the
 system ROCm SDK and route torch through PyTorch's ROCm wheel index.
-Verified working on the RDNA4 (gfx1201) with ROCm 7.2.2 + torch
+Verified working on RDNA4 (gfx1201) with ROCm 7.2.2 + torch
 2.9.x+rocm6.4.
 
 **1. Install ROCm userspace** (Arch / CachyOS):

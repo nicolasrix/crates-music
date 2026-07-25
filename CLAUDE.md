@@ -88,8 +88,8 @@ Backend-only. Two indices, blended at query time — they capture different thin
 Both stored as **mmap'd HNSW files** via [`usearch`](https://github.com/unum-cloud/usearch) or [`hnsw_rs`](https://crates.io/crates/hnsw_rs). At our scale (a household sharing one ~10⁴-track catalog) an in-process index is sufficient — no separate vector DB.
 
 Inference runtime: the Python embedder sidecar (PyTorch, ROCm). The
-**GPU lives on the GPU host** (RDNA4 GPU, 16 GB VRAM), which hosts
-the embedder sidecar; the **gateway host (the NAS host) is CPU-only** and
+**GPU lives on the embedder host** (an RDNA4-class card, 16 GB VRAM), which hosts
+the embedder sidecar; the **gateway host can be CPU-only** and
 reaches the sidecar over the LAN — see the deployment topology in the
 status section below. CPU fallback always available — required because
 ROCm coverage for newest AMD generations sometimes lags.
@@ -342,50 +342,39 @@ music-specific acoustic similarity. Done so far:
   the gateway to 768 via `gen_config.py`'s new optional `[recommend]`
   section. GPU twins `docker/embedder/Dockerfile.clamp3-rocm` +
   `docker-compose.clamp3-rocm.yml` (rocm6.4 wheels, MIOpen kernel cache,
-  HF prebake) — the split-host shape, since the embedder runs on the
-  GPU host's GPU (RDNA4) and the gateway reaches it over the LAN.
-- **GPU image built + smoke-tested + swapped live (2026-05-30).** Real
-  forward pass on RDNA4 verified end-to-end: `/healthz` →
-  `dim:768, device:cuda`, saas `state_dict` aligns, output L2-normed
-  (norm=1.0), warm ~230 ms/clip (cold first call ~5 s = MIOpen JIT,
-  then cached). The GPU box's `:9000` embedder is now CLaMP 3 (was CLAP),
-  same container name + port + shared bearer token.
+  HF prebake) — for the split-host shape, where the embedder runs on a
+  GPU host the gateway reaches over the LAN.
+- **The GPU image is built and smoke-tested.** Real forward pass on
+  RDNA4 verified end-to-end: `/healthz` → `dim:768, device:cuda`, saas
+  `state_dict` aligns, output L2-normed (norm=1.0), warm ~230 ms/clip
+  (cold first call ~5 s = MIOpen JIT, then cached). Swapping CLAP → CLaMP 3
+  keeps the same container name, port and shared bearer token.
 
-**Deployment topology** (optionally split across two hosts):
+**Deployment topology.** Single-host (everything in one compose stack) is
+the simple case. A split-host layout is also supported and is what the
+`gateway-only` / `embedder-only` compose files exist for:
 
-- **the NAS host** is the **gateway host** and is **CPU-only** (no GPU). It
-  runs `crates-gateway` (the live recommender consumer) + `crates-caddy`.
-  Its primary `EMBEDDER_URL` dials the GPU host's GPU sidecar over the
-  LAN. Since the failover work (PR #22) its local `crates-embedder` was
-  swapped to a **CPU CLaMP 3** image (same checkpoint → same
-  `model_version`/768-dim as the GPU primary, so ANN-compatible) and
-  registered as a `fallback_urls` entry — no longer vestigial; it carries
-  text-station traffic when the GPU box is down.
-- **The GPU host** (`192.0.2.53`) has the **AMD RDNA4
-  XT** and runs the **GPU embedder sidecar** (`crates-embedder`,
-  `embedder-clamp3-rocm:dev`) on `:9000`. It additionally runs a
-  caddy+gateway *cert/proxy test* instance with a deliberately-dead
-  embedder URL — not a recommender, ignore its health.
+- The **gateway host** runs `crates-gateway` + `crates-caddy` and may be
+  **CPU-only**; its primary `EMBEDDER_URL` dials whichever host runs the
+  sidecar. Since the failover work (PR #22) it can also run a local
+  **CPU CLaMP 3** embedder registered as a `fallback_urls` entry — same
+  checkpoint, so same `model_version`/768-dim and ANN-compatible — which
+  carries text-station traffic when the GPU host is unreachable.
+- The optional **embedder host** has the GPU (RDNA4/gfx1201 is the
+  tested target) and runs the sidecar on `:9000`. Only the gateway and
+  caddy images need shipping to the gateway host; the GPU host builds
+  and runs the embedder locally.
 
-**Production cutover on the NAS host — DONE (2026-05-31).** Verified live:
+**The 512→768 cutover has been performed end-to-end**, so the mechanics
+below are known-good rather than theoretical: `RECOMMEND_EMBEDDING_DIM`
+reaches `gateway.toml` via `gen_config.py`, the ANN rebuilds at the new
+dim from SQLite, and a healthy boot logs the embedder probe dim/device,
+the loaded whitening `k`, and a fitted cross-modal text mean.
 
-- `crates-gateway` image rebuilt from this branch (built 2026-05-31
-  00:58, baked `gen_config.py` has full `RECOMMEND_EMBEDDING_DIM`
-  support); `RECOMMEND_EMBEDDING_DIM=768` set in the Custom App YAML and
-  reflected in the live `gateway.toml` (`[recommend] embedding_dim =
-  768`); the 512-dim ANN sidecar was wiped and rebuilt at 768 from
-  SQLite (**7349 embedded tracks**). Boot log: embedder probe
-  `dim=768 device=cuda`, whitening loaded (`k=7`), cross-modal text mean
-  fitted + persisted, plus a post-tokenizer-fix `refit_whitening`.
-- The GPU sidecar on the GPU host was rebuilt with the tokenizer fix
-  (`embedder-clamp3-rocm:dev`, built 2026-05-31 01:44): `sentencepiece`
-  present, full xlm-roberta vocab (`vocab_size=250002`, distinct token
-  streams per genre, 0 `<unk>`), `dim=768 device=cuda`.
-
-Cutover mechanics for reference (e.g. future model bumps): (1) rebuild
-`crates-music/gateway:dev` from the branch and ship to the NAS host
+Cutover mechanics (e.g. future model bumps): (1) rebuild
+`crates-music/gateway:dev` from the branch and ship to the gateway host
 (`scripts/ship-image.sh … nas-host`, `REMOTE_DOCKER="sudo docker"`);
-(2) set `RECOMMEND_EMBEDDING_DIM` in the NAS Custom App YAML;
+(2) set `RECOMMEND_EMBEDDING_DIM` in the platform's env config;
 (3) wipe the old-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) —
 a dim change is non-migratable; (4) Save/restart; (5) re-embed via
 `scripts/enqueue_all_tracks.py` — recommender runs degraded until the
@@ -416,13 +405,13 @@ on top of the CLaMP 3 base after the P6 minimum-viable slice:
   **0016** (the P6-MVP notes above only cover 0011–0012).
 
 **Embedder failover + watchdog (PR #22, merged to `dev` 2026-06-09;
-live on the NAS host).** Text-prompt **stations** now survive the GPU
+deployed).** Text-prompt **stations** now survive the GPU
 embedder sidecar being down (`/v1/recommend/next` was never affected —
 it reads stored vectors). Root cause was a boot-latched health flag
 (`record_health` was dead code). Fix: `[embedder]` gained
 `fallback_urls` + a `probe_interval_seconds` re-probe loop that switches
 the active client to the first healthy URL. A CPU CLaMP 3 fallback runs
-on the NAS host (`http://embedder:9000`) behind the GPU primary; an optional
+alongside the gateway (`http://embedder:9000`) behind the GPU primary; an optional
 docker watchdog (`docker-compose.embedder-failover.yml` +
 `docker/embedder/watchdog.sh`) can start/stop a local CPU fallback on
 demand. See `docs/DEPLOYMENT.md` "Embedder failover".
@@ -625,7 +614,7 @@ plus `feat/web-mobile-responsive`, `fix/oauth-mobile-viewport`,
   menus). A `getSong` backfill effect re-hydrates `trackMeta`; the context
   value keys on a `metaTick` so consumers re-render when it arrives.
 
-The whole stack was rebuilt into the gateway image, shipped to the NAS host, and
+The whole stack was rebuilt into the gateway image, shipped to the gateway host, and
 verified live (manifest 200, apple-touch-icon 200, `beforeinstallprompt`
 present in the running bundle).
 

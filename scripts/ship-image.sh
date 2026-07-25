@@ -17,13 +17,13 @@
 #     tarball loads as-is. (Cross-arch would need buildx --platform.)
 #
 # Prerequisites on the remote (the ssh user must satisfy these):
-#   - docker CLI on PATH and permission to `docker load`. On the NAS host
+#   - docker CLI on PATH and permission to `docker load`. On hosts where docker needs root
 #     the `admin` user is NOT in the docker group but has passwordless
 #     sudo, so set REMOTE_DOCKER="sudo docker" (see below).
 #   - gunzip on PATH (coreutils — effectively always present).
 #
 # REMOTE_DOCKER env overrides the remote docker invocation (default
-# "docker"). For the NAS host:
+# "docker"). For hosts needing sudo:
 #   REMOTE_DOCKER="sudo docker" ./scripts/ship-image.sh <image> nas-host
 #
 # After shipping, deploy on the remote with the compose files (which must
