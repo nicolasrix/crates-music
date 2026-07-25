@@ -8,7 +8,7 @@ This design system describes the visual language for the React web client (and i
 
 ## Sources reviewed
 
-- **GitHub repo:** `nicolasrix/crates-music` (private, default branch `main`)
+- **GitHub repo:** `nicolasrix/crates-music` (default branch `main`)
 - **Imported into this project for reference:**
   - `apps/web/index.html`
   - `apps/web/tailwind.config.js` — current Tailwind setup (stone palette, system-ui)

@@ -38,6 +38,14 @@ Cargo.lock.bak
 # Local ML model checkpoints (multi-GB; downloaded out-of-band)
 /models/
 
+# Working notes and design docs. Deliberately untracked: these carry live
+# deployment detail and security-review findings that must not ship in a
+# public repo (they were committed by accident once — see git history).
+/docs/plans/
+
+# Local code-graph index (tokensave MCP server).
+.tokensave/
+
 # Node
 node_modules/
 
