@@ -16,22 +16,24 @@ source of truth.
                     │  • Subsonic proxy + augments     │
                     │  • Cover-art proxy + self-heal   │
                     │  • OAuth 2.1 server              │
-                    │  • Recommender (CLAP + ANN +     │
+                    │  • Recommender (CLaMP 3 + ANN +  │
                     │    queue filter + MMR + feedback)│
                     │  • Event log + scrobble intercept│
                     │  • WebSocket sync                │
                     │  • Diagnostics ring + RUM        │
                     │  • SQLite (gateway state, 3 DBs) │
-                    └──┬──────────────┬─────────────┬──┘
-                       │              │             │
-                ┌──────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐
-                │  CLI       │ │  Web       │ │  Mobile   │
-                │  (Rust)    │ │  (TS+React │ │  (Compose │
-                │            │ │   + Vite)  │ │   MP+KMP) │
-                └────────────┘ └────────────┘ └───────────┘
+                    └──────┬───────────────────┬───────────┘
+                           │                   │
+                ┌──────────▼───────┐ ┌─────────▼───────────────────┐
+                │  CLI  (Rust)     │ │  Web  (TS+React+Vite)       │
+                │                  │ │  └─ installable PWA = mobile│
+                └──────────────────┘ └─────────────────────────────┘
 ```
 
-The mobile client is planned (P4); it does not exist in the codebase yet.
+There is no separate mobile client. The web app is an installable PWA,
+and that **is** the mobile client; native mobile (P4) was retired. See
+[PLATFORM-PARITY.md](./PLATFORM-PARITY.md) and [/CLAUDE.md](../CLAUDE.md)
+→ "Mobile is the PWA".
 
 ## Why a gateway?
 
@@ -40,7 +42,8 @@ Three things benefit from being shared across clients:
 1. **Cache** — transcoded audio is expensive to produce. Producing it
    once on the gateway and serving it to every client beats paying
    the transcode cost per device.
-2. **Recommender** — the CLAP model is hundreds of MB; running it on
+2. **Recommender** — the content embedder (CLaMP 3, formerly CLAP) is
+   hundreds of MB; running it on
    each client is impractical. Running it once on the gateway and
    exposing similarity queries over HTTP is straightforward.
 3. **Sync** — playback queue + playback position + likes need to be
@@ -59,7 +62,7 @@ crates/
   music-cache/       # SQLite metadata cache + on-disk LRU audio cache
   music-player/      # native playback (rodio + symphonia)
   music-sync/        # WebSocket client + state machine
-  music-recommend/   # SERVER-ONLY: CLAP embedder, ANN index, event log
+  music-recommend/   # SERVER-ONLY: CLaMP 3 embedder (CLAP legacy), ANN index, event log
   music-gateway/     # the gateway binary
   music-cli/         # the CLI binary
 
@@ -67,7 +70,7 @@ apps/
   web/               # TS + React + Vite
 
 services/
-  embedder/          # Python FastAPI sidecar (CLAP audio + text)
+  embedder/          # Python FastAPI sidecar (CLaMP 3 audio + text; CLAP legacy)
 ```
 
 Each `crates/*` directory is a workspace member with its own
@@ -109,36 +112,70 @@ implementation details.
 
 ## Auth
 
-Single-user means OAuth does the job of *device pairing + token
-rotation*, not user identification.
+OAuth does device pairing + token rotation **and** carries identity. The
+gateway has a three-role model — **admin / user / guest** — layered on
+the hand-rolled OAuth without switching to JWTs (opaque tokens keep
+instant revocation and the device-grant CLI flow).
 
 | Client | Flow | Status |
 |---|---|---|
-| Web | Authorization Code + PKCE | Implemented |
-| Mobile | Authorization Code + PKCE via Custom Tabs | Planned (P4) |
-| CLI | Device Authorization Grant (RFC 8628) | Planned; currently uses static bearer token |
+| Web / PWA (mobile) | Authorization Code + PKCE (`username` + password login) | Implemented |
+| CLI | Device Authorization Grant (RFC 8628) | Implemented (`music auth login`) |
+| Guest (PWA) | Shared-code grant — `POST /oauth/guest`, no password/PKCE | Authored (PR D) |
 
-**Bootstrap:** the gateway prints a one-time setup URL on first run.
-The user visits it, sets a master password (Argon2id), and from then
-on the OAuth endpoints are usable.
+**Bootstrap:** the gateway prints a one-time setup URL on first run. The
+owner visits it and sets a master password (Argon2id), becoming
+`users.id=1, role='admin'`. Admins then provision real Users
+(`POST /v1/admin/users`); guests join by redeeming a shared code.
 
-**Storage:** five tables in `gateway-state.sqlite` —
-- `users` — Argon2id master password
+**Principal & roles.** After the `sha256 → access_tokens` lookup,
+`require_bearer` reads the token's `user_id`, loads the role, and injects
+an `axum::Extension<Principal>` where
+`Principal { user_id, role, host_user_id }`. The legacy static bearer and
+any NULL-`user_id` row resolve to the owner (`id=1`, admin) — the
+identity layer is additive and backward-compatible. Handlers that care
+about identity take the `AuthPrincipal` extractor; "any authenticated"
+handlers ignore it.
+
+**Authorization tiers** (small `from_fn_with_state` layers / in-handler
+capability checks):
+
+1. **Any authenticated** — browse, play, recommend reads, room control, ratings/events, `whoami`.
+2. **Write-capable (admin + user, not guest)** — playlist CRUD, persisted ratings/taste. Guests get 403; guest taste signal is dropped from training.
+3. **Admin-only** — `/v1/admin/*`, `/v1/diagnostics/*`, recommender maintenance (`refit_whitening`, `enqueue`).
+
+**Rooms** are the sync partition: a User owns one room
+(`room_id == user_id`); a Guest attaches to its host's
+(`room_id == host_user_id`). See
+[components/music-sync.md](./components/music-sync.md#rooms-per-user-partition).
+
+**Account recovery (no email):** an admin resets a user's password
+(`POST /v1/admin/users/:id/password`); the owner's *master* password is
+reset out-of-band on the gateway host (`music-gateway …
+reset-master-password`). Both rewrite the Argon2 hash on `users.id=1` in
+place — never delete/recreate the row.
+
+**Storage** (`gateway-state.sqlite`):
+- `users` — identity + role: `id`, `username`/`display_name` (NULL for guests), `role` (`admin|user|guest`), `password_hash` (Argon2id; NULL for guests), `host_user_id` + `expires_at` (guests only). The owner is `id=1`.
 - `oauth_clients` — registered client_ids + redirect URIs
 - `auth_codes` — short-lived (60s) authorization codes
 - `refresh_tokens` — long-lived, per-device, individually revocable
 - `access_tokens` — short-lived (1h), looked up by `sha256(token)`
+- `device_codes` — RFC 8628 device-grant pairing codes (the CLI's auth path)
+- `guest_codes` — shared guest-join codes (host-owned; sha256-hashed; expiry + max-uses) *(PR D)*
+- `playlists` / `playlist_tracks` — gateway-owned, per-user playlists *(PR F)*
 
-Plus a `sessions` table for the browser login flow (not the same as
+The token tables carry a `user_id` so issuance is per-account. Plus a
+`sessions` table for the browser login flow (not the same as
 access_tokens — sessions are how the *login form* remembers you between
 the password POST and the consent screen).
 
-`require_bearer` in [crates/music-gateway/src/auth.rs](../crates/music-gateway/src/auth.rs)
-accepts either an OAuth-issued access token (sha256 lookup) or the
-legacy static bearer from `gateway.toml`. Token can come via
-`Authorization: Bearer <token>` or `?access_token=<token>` (RFC 6750
-§2.3 — required for `<audio>` and `<img>` URLs that can't set
-headers).
+Token can come via `Authorization: Bearer <token>` or
+`?access_token=<token>` (RFC 6750 §2.3 — required for `<audio>` and
+`<img>` URLs that can't set headers). `require_bearer` lives in
+[crates/music-gateway/src/auth.rs](../crates/music-gateway/src/auth.rs);
+the principal/role/capability machinery is in
+[crates/music-gateway/src/principal.rs](../crates/music-gateway/src/principal.rs).
 
 ## TLS
 
@@ -165,7 +202,8 @@ The gateway exposes three categories of endpoints:
 
 1. **OAuth** (`/oauth/*`) — auth flow. See [API.md#auth](./API.md).
 2. **Augmentations** (`/v1/*`) — anything beyond Subsonic: sync,
-   recommender, event log.
+   recommender, event log, ratings, gateway-owned playlists,
+   `whoami`, and the admin/diagnostics surface (admin-only).
 3. **Pass-through** (`/rest/*`) — proxied verbatim to Navidrome with
    the upstream credentials and the L2/L4 cache layered in front.
 
@@ -179,12 +217,18 @@ See [API.md](./API.md) for the endpoint reference.
 Backend-only. Two indices planned, blended at query time — they
 capture different things:
 
-- **Content embeddings** (CLAP) — computed once per track at ingest.
-  Captures "these tracks sound similar." Bonus: text-aligned, so
-  natural-language queries ("sunny afternoon", "late night drive")
-  work via the same index. **Live;** text queries land via
-  `GET /v1/recommend/station?text=...&n=...` and the web app's
-  `/station` page.
+- **Content embeddings** (CLaMP 3, 768-dim; CLAP at 512-dim is the
+  prior/alternative backend) — computed once per track at ingest.
+  Captures "these tracks sound similar." CLaMP 3 is music-specific:
+  audio runs through a MERT-v1-95M frontend (mean over 13 hidden
+  layers) into the CLaMP 3 audio encoder; text runs an xlm-roberta-base
+  tokenizer into the CLaMP 3 text encoder, landing in the **same
+  768-dim joint space** as audio. So natural-language queries ("sunny
+  afternoon", "late night drive") work via the same index. **Live;**
+  text queries land via `GET /v1/recommend/station?text=...&n=...` and
+  the web app's `/station` page. Embedding dim is a per-backend
+  property (CLaMP 3 768, CLAP 512); the gateway's
+  `[recommend].embedding_dim` must match the running embedder.
 - **Behavioural embeddings** (track2vec on listening sessions) —
   retrained nightly. Captures "this user plays these together,"
   which can diverge from acoustic similarity. **Deferred (P6.8);**
@@ -193,8 +237,11 @@ capture different things:
 Both will eventually be stored as mmap'd HNSW files via
 [`usearch`](https://github.com/unum-cloud/usearch).
 
-Inference runs in a Python sidecar (FastAPI + LAION CLAP) so the
-gateway stays lightweight. Boot probe: gateway checks the embedder's
+Inference runs in a Python sidecar (FastAPI + CLaMP 3, or LAION CLAP
+on the legacy backend) so the gateway stays lightweight. It can be
+co-located with the gateway, or split onto a machine with a GPU — in
+which case the gateway host stays CPU-only and reaches the
+sidecar over the LAN. Boot probe: gateway checks the embedder's
 `/healthz` at startup. If unreachable, it logs a warning and runs in
 **degraded mode** — recommend endpoints return 404 for every seed
 (reserved for a future tag-only fallback).
@@ -205,7 +252,8 @@ New track discovered (Subsonic poll)
       MP3 sources → raw byte-range (no transcode, ~10× faster)
       everything else (FLAC/OGG/OPUS/M4A) → ?format=mp3 transcode
   → POST /embed/audio to the sidecar
-  → sidecar returns L2-normalized 512-dim float32 vector
+  → sidecar returns an L2-normalized float32 vector (dim is
+    backend-dependent: 768 for CLaMP 3, 512 for CLAP)
   → upsert into content-ANN index (mmap'd HNSW, cosine)
   → mark track ready in catalog
 ```
@@ -221,6 +269,18 @@ Ingest is single-worker. Crash recovery is built in: rows flagged
 `in_progress` at startup get reset to `not_started`. The ANN is a
 derived cache — rebuildable from SQLite, so you can wipe the file
 freely.
+
+CLaMP 3 embeddings are anisotropic — they cluster in a narrow cone,
+which inflates and poorly-separates cosine similarities (especially
+for text-query stations). An **All-but-the-Top (ABTT)** whitening step
+([`crates/music-recommend/src/whitening.rs`](../crates/music-recommend/src/whitening.rs))
+corrects this: subtract the corpus mean, project out the top ~dim/100
+principal directions, renormalize. It's fit post-hoc over the existing
+audio embeddings (no re-embedding) and gated by
+`[recommend].whitening_enabled` (default true). A cross-modal **text
+mean** additionally centers text-station queries by the text-modality
+mean, since CLaMP 3 text embeddings sit at a modality-gap offset from
+audio. Whitening is a no-op for the CLAP backend.
 
 ### Beyond raw similarity
 
@@ -243,6 +303,14 @@ layer three post-retrieval steps on top:
    `session_id`, tracks the user thumbs-downed *within that session*
    are excluded. Per-session, not global — the user may have been
    in a different mood last week.
+4. **Durable like/dislike** (`RatingStore`, `PUT /v1/library/rating`).
+   A persistent per-entity verdict that — unlike the session downvotes
+   and the decaying affinity signal — never decays and is enforced
+   always-on. A **dislike hard-excludes** the entity from play (a
+   disliked track, or *every track* of a disliked album/artist, drops
+   out of candidate generation and the player auto-skips it); a **like**
+   adds a relevance bonus weighted `track > album > artist`. This is the
+   gateway's own taste store — never written back to Navidrome.
 
 The `/rest/scrobble` interceptor writes a `last_played_ms` per track
 to a dedicated `play_history` table. That row is reserved for a planned
@@ -332,8 +400,9 @@ Tactics that load-bear:
 
 ## Phasing
 
-Vertical slices, each end-to-end usable. Current phase is **P3 in
-flight**, with the **P6 recommender minimum-viable scope shipped** in
+Vertical slices, each end-to-end usable. **P3 is done** (web UI +
+installable PWA, which doubles as the mobile client), **P4 native mobile
+was retired**, and the **P6 recommender minimum-viable scope shipped** in
 parallel.
 
 | Phase | Deliverable | Status |
@@ -341,8 +410,8 @@ parallel.
 | P0 | CLI + `music-core` + `music-subsonic`. Lists albums, plays a track via rodio. No cache, no gateway. | Done |
 | P1 | Gateway + L2 metadata cache. ETag refresh. | Done |
 | P2 | L3 audio cache, pinning, gapless playback. | Done |
-| P3 | Web UI. TS/React on gateway API. OAuth login. | In progress |
-| P4 | Mobile. UniFFI bindings, Compose Multiplatform, Media3. | Not started |
+| P3 | Web UI. TS/React on gateway API. OAuth login. Installable PWA + offline cache (= mobile client). | Done |
+| ~~P4~~ | ~~Native mobile (UniFFI + Compose Multiplatform + Media3).~~ | Retired — mobile is the PWA |
 | P5 | WebSocket sync. Queue CRDT. Cross-device state. | Done |
 | P6 | Recommender. CLAP ingest + content ANN + event log. | Minimum viable shipped |
 | P6.8 | Behavioural index + nightly track2vec retrain. | Deferred |

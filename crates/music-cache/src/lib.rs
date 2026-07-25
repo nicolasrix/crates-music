@@ -213,6 +213,15 @@ impl Cache {
         Ok(res.rows_affected())
     }
 
+    /// Remove every cover-art cache entry (keys starting with
+    /// `getCoverArt|`). Returns the number of rows removed.
+    pub async fn clear_covers(&self) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM cache_entries WHERE key LIKE 'getCoverArt|%'")
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Remove every entry whose deadline (`fetched_at + ttl`) is at or before
     /// `cutoff`. Returns the number of rows removed.
     pub async fn expire_before(&self, cutoff: SystemTime) -> Result<u64> {

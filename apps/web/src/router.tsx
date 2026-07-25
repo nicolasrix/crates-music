@@ -3,7 +3,7 @@
 // consumer. The earlier single-`setter` design only updated whichever
 // component mounted last, leaving the others stale.
 
-import { ReactNode, useSyncExternalStore } from "react";
+import { AnchorHTMLAttributes, ReactNode, useSyncExternalStore } from "react";
 
 const subscribers = new Set<() => void>();
 
@@ -52,13 +52,22 @@ export function Link({
   to,
   children,
   className,
+  ...rest
 }: {
   to: string;
   children: ReactNode;
   className?: string;
-}) {
+} & Omit<
+  AnchorHTMLAttributes<HTMLAnchorElement>,
+  "href" | "className" | "onClick"
+>) {
+  // `...rest` is spread first so the router's own href/className/onClick
+  // always win — callers can attach extra handlers (e.g. drag-and-drop drop
+  // zones) but can't override navigation. onClick is excluded from the props
+  // type for the same reason.
   return (
     <a
+      {...rest}
       href={to}
       className={className}
       onClick={(e) => {

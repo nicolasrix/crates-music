@@ -23,7 +23,7 @@
 //! This module owns paths (1) only as far as the store API; the worker
 //! hook lives in `ingest.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use music_core::TrackId;
@@ -81,9 +81,11 @@ pub fn normalize_title(s: &str) -> String {
         // close_idx is the position of the trailing ')' in `trimmed`.
         let close_idx = trimmed.len() - 1;
         let inner = &trimmed[open_idx + 1..close_idx];
-        let has_keyword = EDITION_KEYWORDS
-            .iter()
-            .any(|kw| inner.split(|c: char| !c.is_alphanumeric()).any(|tok| tok == *kw));
+        let has_keyword = EDITION_KEYWORDS.iter().any(|kw| {
+            inner
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|tok| tok == *kw)
+        });
         if !has_keyword {
             break;
         }
@@ -247,6 +249,53 @@ impl MetadataStore {
         Ok(out)
     }
 
+    /// Track ids belonging to any of the given album ids. Powers the
+    /// dislike-album → exclude-its-tracks expansion in the recommender:
+    /// a disliked album excludes every track we have cached for it. Uses
+    /// the `track_metadata_album_id_idx` index; chunked under SQLite's
+    /// 999-parameter limit. Result deduped via the `HashSet`.
+    pub async fn track_ids_for_albums(&self, album_ids: &[String]) -> Result<HashSet<TrackId>> {
+        self.track_ids_for_parent("album_id", album_ids).await
+    }
+
+    /// Track ids belonging to any of the given artist ids — the
+    /// dislike-artist → exclude-its-tracks expansion. Uses the
+    /// `track_metadata_artist_id_idx` index.
+    pub async fn track_ids_for_artists(&self, artist_ids: &[String]) -> Result<HashSet<TrackId>> {
+        self.track_ids_for_parent("artist_id", artist_ids).await
+    }
+
+    /// Shared body for [`Self::track_ids_for_albums`] /
+    /// [`Self::track_ids_for_artists`]. `column` is a fixed, internal
+    /// literal (`"album_id"` / `"artist_id"`) — never user input — so
+    /// interpolating it into the SQL is safe; the ids themselves are bound
+    /// parameters.
+    async fn track_ids_for_parent(
+        &self,
+        column: &str,
+        parent_ids: &[String],
+    ) -> Result<HashSet<TrackId>> {
+        if parent_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut out = HashSet::new();
+        for chunk in parent_ids.chunks(500) {
+            let placeholders: String = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql =
+                format!("SELECT track_id FROM track_metadata WHERE {column} IN ({placeholders})");
+            let mut q = sqlx::query(&sql);
+            for id in chunk {
+                q = q.bind(id);
+            }
+            for row in q.fetch_all(&self.pool).await? {
+                out.insert(TrackId::from(row.get::<String, _>("track_id")));
+            }
+        }
+        Ok(out)
+    }
+
     /// Of the given ids, return those *not* in the cache. Drives the
     /// backfill loop and the lazy-on-miss path.
     pub async fn missing_ids(&self, ids: &[TrackId]) -> Result<Vec<TrackId>> {
@@ -254,7 +303,11 @@ impl MetadataStore {
             return Ok(Vec::new());
         }
         let present = self.get_many(ids).await?;
-        Ok(ids.iter().filter(|id| !present.contains_key(*id)).cloned().collect())
+        Ok(ids
+            .iter()
+            .filter(|id| !present.contains_key(*id))
+            .cloned()
+            .collect())
     }
 
     /// Find `track_id`s that are present as `done` embeddings under
@@ -485,15 +538,15 @@ mod tests {
 
     #[test]
     fn strips_acoustic_version() {
-        assert_eq!(normalize_title("Wonderwall (Acoustic Version)"), "wonderwall");
+        assert_eq!(
+            normalize_title("Wonderwall (Acoustic Version)"),
+            "wonderwall"
+        );
     }
 
     #[test]
     fn strips_feat_collaborator() {
-        assert_eq!(
-            normalize_title("Imagine (feat. John Lennon)"),
-            "imagine"
-        );
+        assert_eq!(normalize_title("Imagine (feat. John Lennon)"), "imagine");
     }
 
     #[test]
@@ -528,10 +581,7 @@ mod tests {
 
     #[test]
     fn strips_multiple_trailing_edition_suffixes() {
-        assert_eq!(
-            normalize_title("Song (Live) (Remastered)"),
-            "song"
-        );
+        assert_eq!(normalize_title("Song (Live) (Remastered)"), "song");
     }
 
     // --- normalize_title: things we DO NOT strip ---
@@ -564,10 +614,7 @@ mod tests {
     #[test]
     fn does_not_strip_middle_paren_even_with_keyword() {
         // "live" is in the middle, not the end — keep the title intact.
-        assert_eq!(
-            normalize_title("Live and Let Die"),
-            "live and let die"
-        );
+        assert_eq!(normalize_title("Live and Let Die"), "live and let die");
     }
 
     // --- normalize_title: edge cases ---
@@ -770,6 +817,55 @@ mod tests {
         store.upsert(&sample_metadata("t1")).await.unwrap();
         store.upsert(&sample_metadata("t2")).await.unwrap();
         assert_eq!(store.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn track_ids_for_albums_returns_member_tracks() {
+        // Drives dislike-album → exclude-its-tracks. Two tracks share
+        // album al1; a third on al2 must not leak in.
+        let store = MetadataStore::new(test_pool().await);
+        let mut t1 = sample_metadata("t1");
+        t1.album_id = Some("al1".into());
+        let mut t2 = sample_metadata("t2");
+        t2.album_id = Some("al1".into());
+        let mut t3 = sample_metadata("t3");
+        t3.album_id = Some("al2".into());
+        store.upsert(&t1).await.unwrap();
+        store.upsert(&t2).await.unwrap();
+        store.upsert(&t3).await.unwrap();
+
+        let got = store
+            .track_ids_for_albums(&["al1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&TrackId::from("t1")));
+        assert!(got.contains(&TrackId::from("t2")));
+        assert!(!got.contains(&TrackId::from("t3")));
+    }
+
+    #[tokio::test]
+    async fn track_ids_for_artists_returns_member_tracks() {
+        let store = MetadataStore::new(test_pool().await);
+        let mut t1 = sample_metadata("t1");
+        t1.artist_id = Some("ar1".into());
+        let mut t2 = sample_metadata("t2");
+        t2.artist_id = Some("ar2".into());
+        store.upsert(&t1).await.unwrap();
+        store.upsert(&t2).await.unwrap();
+
+        let got = store
+            .track_ids_for_artists(&["ar1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(got, HashSet::from([TrackId::from("t1")]));
+    }
+
+    #[tokio::test]
+    async fn track_ids_for_parent_empty_input_is_empty() {
+        let store = MetadataStore::new(test_pool().await);
+        assert!(store.track_ids_for_albums(&[]).await.unwrap().is_empty());
+        assert!(store.track_ids_for_artists(&[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

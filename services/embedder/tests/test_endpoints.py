@@ -9,11 +9,13 @@ server respects the model_loaded flag.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
-from embedder.app import EMBEDDING_DIM, build_app, get_embedder
-from embedder.stub import StubEmbedder
+from embedder.app import _auth_disabled_warning, build_app, get_embedder
+from embedder.stub import DEFAULT_DIM as STUB_DIM, StubEmbedder
 
 
 @pytest.fixture
@@ -39,7 +41,7 @@ def test_healthz_returns_200_when_loaded(app_with_loaded_stub):
     body = r.json()
     assert body["model_loaded"] is True
     assert body["model_version"] == "stub-v1"
-    assert body["dim"] == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
 
 
 def test_healthz_reports_device_for_stub(app_with_loaded_stub):
@@ -76,10 +78,10 @@ def test_embed_audio_returns_vector(app_with_loaded_stub):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["dim"] == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
     assert body["model_version"] == "stub-v1"
     assert isinstance(body["vector"], list)
-    assert len(body["vector"]) == EMBEDDING_DIM
+    assert len(body["vector"]) == STUB_DIM
     assert all(isinstance(x, float) for x in body["vector"])
 
 
@@ -125,6 +127,20 @@ def test_embed_audio_rejects_empty_body(app_with_loaded_stub):
     assert "empty" in r.json()["detail"].lower()
 
 
+def test_embed_audio_rejects_oversized_body(app_with_loaded_stub, monkeypatch):
+    # Guardrail against a runaway payload exhausting embedder memory.
+    # Shrink the cap so the test stays cheap rather than allocating 64 MiB.
+    monkeypatch.setattr("embedder.app.MAX_AUDIO_BYTES", 8)
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/embed/audio",
+        content=b"way more than eight bytes",
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 413
+    assert "too large" in r.json()["detail"].lower()
+
+
 def test_embed_audio_returns_503_when_not_loaded(app_with_unloaded_stub):
     client = TestClient(app_with_unloaded_stub)
     r = client.post(
@@ -140,8 +156,8 @@ def test_embed_text_returns_vector(app_with_loaded_stub):
     r = client.post("/embed/text", json={"text": "rainy sunday afternoon"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["dim"] == EMBEDDING_DIM
-    assert len(body["vector"]) == EMBEDDING_DIM
+    assert body["dim"] == STUB_DIM
+    assert len(body["vector"]) == STUB_DIM
 
 
 def test_embed_text_rejects_missing_field(app_with_loaded_stub):
@@ -168,82 +184,96 @@ def test_embed_text_returns_503_when_not_loaded(app_with_unloaded_stub):
 
 # --- /reduce ---------------------------------------------------------------
 #
-# The reduce endpoint is the same-host counterpart to the `reduce.py`
-# CLI: the gateway calls it after enough new embeddings have landed,
-# the embedder opens the SQLite path directly, runs UMAP+PCA, and
-# writes projection rows. Body of the endpoint = arguments of
-# `reduce.run`. Response = (proj_version, written).
+# Vectors over the wire: the gateway reads its own recommend DB, packs
+# the embedding matrix as base64 little-endian f32, and POSTs it here.
+# The embedder is pure compute — it decodes the matrix, runs UMAP+PCA
+# via `reduce.project_matrix`, and returns one point per track. It does
+# NOT open any SQLite file (that assumed a shared volume, which breaks
+# when the embedder runs on a separate GPU host). The gateway persists
+# the returned coordinates itself.
+
+import base64
+import struct
+
+from embedder.reduce import Projection2D
 
 
-def test_reduce_invokes_run_with_request_params(
-    app_with_loaded_stub, tmp_path, monkeypatch
+def _pack(vectors: list[list[float]]) -> str:
+    """Pack a matrix the way the gateway's `EmbedderClient::reduce`
+    does — row-major little-endian f32, base64."""
+    raw = b"".join(struct.pack(f"<{len(row)}f", *row) for row in vectors)
+    return base64.b64encode(raw).decode("ascii")
+
+
+def test_reduce_decodes_matrix_and_returns_points(
+    app_with_loaded_stub, monkeypatch
 ):
-    """Happy path that doesn't require umap-learn — monkeypatch
-    `embedder.reduce.run` so we can assert on the arguments without
-    pulling the full reducer stack into the test."""
+    """Happy path without umap-learn — monkeypatch
+    `embedder.reduce.project_matrix` so we can assert on the decoded
+    matrix and forwarded params without pulling in the reducer stack."""
     captured: dict = {}
 
-    def fake_run(
-        *,
-        db_path,
-        model_version,
-        n_neighbors,
-        min_dist,
-        random_state,
-        proj_version,
-        n_components,
+    def fake_project_matrix(
+        track_ids, matrix, *, n_neighbors, min_dist, random_state, metric, n_components
     ):
-        captured["db_path"] = db_path
-        captured["model_version"] = model_version
+        captured["track_ids"] = list(track_ids)
+        captured["matrix"] = matrix.tolist()
         captured["n_neighbors"] = n_neighbors
         captured["min_dist"] = min_dist
         captured["random_state"] = random_state
-        captured["proj_version"] = proj_version
+        captured["metric"] = metric
         captured["n_components"] = n_components
-        return ("umap-v1-rs42-n15-m0p10-auto-12345", 42)
+        return [
+            Projection2D(track_id="t1", x=0.5, y=-0.5, pc1=0.1, pc2=0.2),
+            Projection2D(track_id="t2", x=1.5, y=-1.5, z=None),
+        ]
 
-    monkeypatch.setattr("embedder.reduce.run", fake_run)
-
-    db_file = tmp_path / "rec.sqlite"
-    db_file.touch()  # path-exists check inside the handler
+    monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
     client = TestClient(app_with_loaded_stub)
     r = client.post(
         "/reduce",
         json={
-            "db_path": str(db_file),
-            "model_version": "stub-v1",
+            "track_ids": ["t1", "t2"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0], [3.0, 4.0]]),
             "n_neighbors": 20,
             "min_dist": 0.25,
             "random_state": 7,
-            "proj_version": "umap-v1-rs42-n15-m0p10-auto-12345",
             "n_components": 2,
+            "metric": "euclidean",
         },
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body == {
-        "proj_version": "umap-v1-rs42-n15-m0p10-auto-12345",
-        "written": 42,
+    assert [p["track_id"] for p in body["points"]] == ["t1", "t2"]
+    assert body["points"][0] == {
+        "track_id": "t1",
+        "x": 0.5,
+        "y": -0.5,
+        "z": None,
+        "pc1": 0.1,
+        "pc2": 0.2,
+        "pc3": None,
+        "pc4": None,
     }
-    assert captured["db_path"] == db_file
-    assert captured["model_version"] == "stub-v1"
+    # Matrix decoded row-major at the announced dim.
+    assert captured["track_ids"] == ["t1", "t2"]
+    assert captured["matrix"] == [[1.0, 2.0], [3.0, 4.0]]
     assert captured["n_neighbors"] == 20
     assert captured["min_dist"] == 0.25
     assert captured["random_state"] == 7
-    assert captured["proj_version"] == "umap-v1-rs42-n15-m0p10-auto-12345"
+    assert captured["metric"] == "euclidean"
     assert captured["n_components"] == 2
 
 
-def test_reduce_defaults_match_reduce_module(
-    app_with_loaded_stub, tmp_path, monkeypatch
-):
-    """When the body omits the param knobs, the handler must forward
-    the same defaults the CLI uses. The contract is "request body =
-    `reduce.run` keyword arguments," and silent divergence between
-    the HTTP path and the CLI path is exactly the kind of bug the
-    auto-trigger path will surface only weeks after the fact."""
+def test_reduce_defaults_match_reduce_module(app_with_loaded_stub, monkeypatch):
+    """When the body omits the knobs, the handler forwards the same
+    defaults the CLI uses. Silent divergence between the HTTP path and
+    the reducer module is exactly the bug the auto-trigger surfaces
+    weeks later."""
     from embedder.reduce import (
+        DEFAULT_METRIC,
         DEFAULT_MIN_DIST,
         DEFAULT_N_NEIGHBORS,
         DEFAULT_RANDOM_STATE,
@@ -251,86 +281,339 @@ def test_reduce_defaults_match_reduce_module(
 
     captured: dict = {}
 
-    def fake_run(**kwargs):
+    def fake_project_matrix(track_ids, matrix, **kwargs):
         captured.update(kwargs)
-        return ("pv", 0)
+        return []
 
-    monkeypatch.setattr("embedder.reduce.run", fake_run)
-    db_file = tmp_path / "rec.sqlite"
-    db_file.touch()
+    monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
     client = TestClient(app_with_loaded_stub)
     r = client.post(
         "/reduce",
-        json={"db_path": str(db_file), "model_version": "stub-v1"},
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+        },
     )
     assert r.status_code == 200, r.text
     assert captured["n_neighbors"] == DEFAULT_N_NEIGHBORS
     assert captured["min_dist"] == DEFAULT_MIN_DIST
     assert captured["random_state"] == DEFAULT_RANDOM_STATE
+    assert captured["metric"] == DEFAULT_METRIC
     assert captured["n_components"] == 2
-    assert captured["proj_version"] is None
 
 
-def test_reduce_returns_400_when_db_path_missing(app_with_loaded_stub, tmp_path):
-    # Path validation is local to the handler — surfacing a 400 here
-    # keeps the gateway's auto-trigger task from logging an opaque
-    # `OperationalError` from sqlite3.
+def test_reduce_returns_400_on_byte_length_mismatch(app_with_loaded_stub):
+    # The decoded matrix must be exactly N*dim*4 bytes. A mismatch is a
+    # caller bug; surface a 400 with a clear detail rather than letting
+    # numpy raise an opaque reshape error.
     client = TestClient(app_with_loaded_stub)
     r = client.post(
         "/reduce",
         json={
-            "db_path": str(tmp_path / "missing.sqlite"),
-            "model_version": "stub-v1",
+            "track_ids": ["t1", "t2"],
+            "dim": 2,
+            # Only one row's worth of bytes for two track_ids.
+            "vectors_b64": _pack([[1.0, 2.0]]),
         },
     )
     assert r.status_code == 400
-    assert "db_path" in r.json()["detail"].lower()
+    assert "vectors_b64" in r.json()["detail"]
 
 
 def test_reduce_returns_503_when_umap_extra_missing(
-    app_with_loaded_stub, tmp_path, monkeypatch
+    app_with_loaded_stub, monkeypatch
 ):
-    # The `reduce` extra (umap-learn + sklearn) is optional. Production
-    # deployments install it; dev installs often don't. Surface the
-    # missing dependency as 503 with a recognisable detail so the
-    # gateway can log "service degraded" instead of treating it as a
-    # generic 5xx.
-    def fake_run(**kwargs):
+    # The `reduce` extra (umap-learn + sklearn) is optional. Surface the
+    # missing dependency as 503 so the gateway logs "service degraded"
+    # rather than treating it as a generic 5xx.
+    def fake_project_matrix(track_ids, matrix, **kwargs):
         raise ImportError("No module named 'umap'")
 
-    monkeypatch.setattr("embedder.reduce.run", fake_run)
-    db_file = tmp_path / "rec.sqlite"
-    db_file.touch()
+    monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
     client = TestClient(app_with_loaded_stub)
     r = client.post(
         "/reduce",
-        json={"db_path": str(db_file), "model_version": "stub-v1"},
+        json={"track_ids": ["t1"], "dim": 2, "vectors_b64": _pack([[1.0, 2.0]])},
     )
     assert r.status_code == 503
     assert "umap" in r.json()["detail"].lower() or "reduce" in r.json()["detail"].lower()
 
 
-def test_reduce_does_not_require_model_loaded(
-    app_with_unloaded_stub, tmp_path, monkeypatch
+def test_reduce_returns_400_with_sanitized_detail_on_reducer_valueerror(
+    app_with_loaded_stub, monkeypatch
 ):
-    # The reducer reads stored embeddings — it doesn't run inference,
-    # so `model_loaded=False` is not a reason to refuse the call.
-    # The sidecar can be mid-CLAP-warmup and still service /reduce.
-    def fake_run(**kwargs):
-        return ("pv", 0)
+    # Data-dependent knobs only the reducer can validate (chiefly
+    # n_neighbors ≥ N) raise ValueError from inside UMAP — a caller bug,
+    # surfaced as 400. The exception text can carry internal detail
+    # (array shapes, library internals), so the response body must be a
+    # fixed, non-leaky message and the specifics logged server-side only.
+    leaky = "n_neighbors=20 >= n_samples=1; internal array shape (1, 2)"
 
-    monkeypatch.setattr("embedder.reduce.run", fake_run)
-    db_file = tmp_path / "rec.sqlite"
-    db_file.touch()
+    def fake_project_matrix(track_ids, matrix, **kwargs):
+        raise ValueError(leaky)
+
+    monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
+
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "metric": "cosine",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid reduction parameters"
+    # The internal exception text must not leak to the client.
+    assert "n_samples" not in r.text
+    assert "array shape" not in r.text
+
+
+def test_reduce_rejects_unknown_metric_with_422(app_with_loaded_stub):
+    # The metric is allowlisted at the schema level (Literal), so an
+    # unknown metric is rejected as a 422 before the handler runs —
+    # never passed through to UMAP.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "metric": "bogus",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_reduce_rejects_out_of_range_knobs_with_422(app_with_loaded_stub):
+    # n_neighbors and min_dist are bounded at the schema level.
+    client = TestClient(app_with_loaded_stub)
+    for bad in ({"n_neighbors": 0}, {"n_neighbors": 9999}, {"min_dist": -0.1}, {"min_dist": 2.0}):
+        r = client.post(
+            "/reduce",
+            json={
+                "track_ids": ["t1"],
+                "dim": 2,
+                "vectors_b64": _pack([[1.0, 2.0]]),
+                **bad,
+            },
+        )
+        assert r.status_code == 422, f"expected 422 for {bad}, got {r.status_code}"
+
+
+def test_reduce_rejects_bad_n_components(app_with_loaded_stub):
+    # n_components is bounded to {2, 3} at the schema level, so an
+    # out-of-range value is a 422 validation error before the handler runs.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": _pack([[1.0, 2.0]]),
+            "n_components": 5,
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_reduce_rejects_malformed_base64(app_with_loaded_stub):
+    # Non-base64 garbage in vectors_b64 is a caller bug → 400, not a 500.
+    client = TestClient(app_with_loaded_stub)
+    r = client.post(
+        "/reduce",
+        json={
+            "track_ids": ["t1"],
+            "dim": 2,
+            "vectors_b64": "!!!not base64!!!",
+        },
+    )
+    assert r.status_code == 400
+    assert "base64" in r.json()["detail"]
+
+
+def test_reduce_does_not_require_model_loaded(
+    app_with_unloaded_stub, monkeypatch
+):
+    # /reduce is pure compute, not inference — `model_loaded=False` is
+    # not a reason to refuse. The sidecar can be mid-CLAP-warmup and
+    # still service a reduction.
+    def fake_project_matrix(track_ids, matrix, **kwargs):
+        return []
+
+    monkeypatch.setattr("embedder.reduce.project_matrix", fake_project_matrix)
 
     client = TestClient(app_with_unloaded_stub)
     r = client.post(
         "/reduce",
-        json={"db_path": str(db_file), "model_version": "stub-v1"},
+        json={"track_ids": ["t1"], "dim": 2, "vectors_b64": _pack([[1.0, 2.0]])},
     )
     assert r.status_code == 200, r.text
+
+
+# --- bearer auth (optional, for split-host deployments) -------------------
+#
+# When EMBEDDER_BEARER_TOKEN is set in the environment the embedder
+# requires `Authorization: Bearer <token>` on /embed/* and /reduce.
+# /healthz stays reachable for liveness probes — boot probes shouldn't
+# need the secret — but it redacts the descriptive fields
+# (model_version, dim, device) for unauthenticated callers so a LAN peer
+# can't fingerprint the model/hardware.
+
+
+@pytest.fixture
+def secured_app(monkeypatch):
+    monkeypatch.setenv("EMBEDDER_BEARER_TOKEN", "shared-secret")
+    app = build_app()
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    app.dependency_overrides[get_embedder] = lambda: stub
+    return app
+
+
+def test_auth_healthz_stays_open_when_token_set(secured_app):
+    # Liveness must not require the secret — Docker HEALTHCHECK / readiness
+    # probes hit /healthz without a bearer.
+    client = TestClient(secured_app)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["model_loaded"] is True
+
+
+def test_auth_healthz_redacts_descriptive_fields_without_bearer(secured_app):
+    # An unauthenticated peer must not be able to fingerprint the model
+    # or hardware: model_version / dim / device are withheld.
+    client = TestClient(secured_app)
+    body = client.get("/healthz").json()
+    assert "model_version" not in body
+    assert "dim" not in body
+    assert "device" not in body
+
+
+def test_auth_healthz_full_body_with_correct_bearer(secured_app):
+    # The gateway boot probe carries the bearer, so split-host deploys
+    # still get the descriptive fields they read at startup.
+    client = TestClient(secured_app)
+    body = client.get(
+        "/healthz", headers={"Authorization": "Bearer shared-secret"}
+    ).json()
+    assert body["model_version"] == "stub-v1"
+    assert body["dim"] == STUB_DIM
+    assert body["device"] == "cpu"
+
+
+def test_auth_healthz_redacts_with_wrong_bearer(secured_app):
+    # A wrong token is treated like no token for /healthz — liveness
+    # only, no fingerprinting. (It's a hard 401 on the compute endpoints.)
+    client = TestClient(secured_app)
+    r = client.get("/healthz", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 200
+    assert "model_version" not in r.json()
+
+
+def test_auth_embed_audio_401_without_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_embed_audio_401_with_wrong_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={
+            "content-type": "application/octet-stream",
+            "Authorization": "Bearer not-the-token",
+        },
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_embed_audio_200_with_correct_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={
+            "content-type": "application/octet-stream",
+            "Authorization": "Bearer shared-secret",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_auth_embed_text_401_without_bearer(secured_app):
+    client = TestClient(secured_app)
+    r = client.post("/embed/text", json={"text": "hello"})
+    assert r.status_code == 401, r.text
+
+
+def test_auth_reduce_401_without_bearer(secured_app, monkeypatch, tmp_path):
+    # /reduce also opens the gateway's DB file — privileged.
+    monkeypatch.setattr("embedder.reduce.run", lambda **_: ("pv", 0))
+    db_file = tmp_path / "rec.sqlite"
+    db_file.touch()
+    client = TestClient(secured_app)
+    r = client.post(
+        "/reduce",
+        json={"db_path": str(db_file), "model_version": "stub-v1"},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_auth_no_token_stub_backend_allows_everything(monkeypatch, caplog):
+    # Default dev behaviour: stub backend + no token → no enforcement,
+    # calls pass through, and NO warning is emitted (loopback dev is the
+    # intended fail-open case).
+    monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("EMBEDDER_BACKEND", raising=False)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app()
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    app.dependency_overrides[get_embedder] = lambda: stub
+    client = TestClient(app)
+    r = client.post(
+        "/embed/audio",
+        content=b"\x00" * 64,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert r.status_code == 200, r.text
+    assert not any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_no_token_real_backend_warns(monkeypatch, caplog):
+    # Canary: a real model backend with no token is the split-host
+    # footgun — auth is silently off. We don't hard-fail (loopback
+    # deployments stay working), but the warning must be impossible to
+    # miss. Inject a stub so no model/torch load happens; the warning
+    # keys off EMBEDDER_BACKEND, not the injected embedder.
+    monkeypatch.delenv("EMBEDDER_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("EMBEDDER_BACKEND", "clamp3")
+    stub = StubEmbedder(model_version="stub-v1", loaded=True)
+    with caplog.at_level(logging.WARNING, logger="embedder"):
+        app = build_app(embedder=stub)
+    assert app.state.bearer_token is None
+    assert any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+def test_auth_disabled_warning_decision():
+    # Pure decision helper: warn only for a non-stub backend with no token.
+    assert _auth_disabled_warning("stub", None) is None
+    assert _auth_disabled_warning("clamp3", "secret") is None
+    assert _auth_disabled_warning("clap", None) is not None
+    assert _auth_disabled_warning("clamp3", None) is not None
 
 
 def test_vectors_are_l2_normalized(app_with_loaded_stub):

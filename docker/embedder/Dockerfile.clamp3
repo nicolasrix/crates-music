@@ -1,0 +1,188 @@
+# syntax=docker/dockerfile:1.7
+#
+# Embedder sidecar — CLaMP 3 variant (CPU inference).
+#
+# Phase B: real CLaMP 3 (MERT-v1-95M frontend + CLaMP 3 audio encoder
+# over the vendored `embedder._clamp3` package). Produces 768-dim
+# acoustic embeddings — note the dim change from CLAP's 512, which the
+# gateway must be told about (`recommend.embedding_dim = 768`) and which
+# requires wiping the ANN sidecar so it rebuilds at the new dim. See
+# docker-compose.clamp3.yml.
+#
+# CPU only — slower than a ROCm build but hermetic and runs on any
+# x86-64 host. A ROCm variant can mirror
+# Dockerfile.clap-rocm later.
+#
+# Build from the repo root:
+#
+#   docker build -f docker/embedder/Dockerfile.clamp3 -t crates-music/embedder-clamp3 .
+#
+# The CLaMP 3 saas checkpoint is NOT baked in — it's data, not code, and
+# operators bind-mount it at runtime (see docker-compose.clamp3.yml).
+# MERT-v1-95M and the xlm-roberta-base text branch ARE baked into the HF
+# cache below, since CLaMP3Model loads the text model even for audio-only
+# inference and the unprivileged runtime user has no writable HF cache.
+
+ARG PYTHON_VERSION=3.12
+
+# ─── Stage 1: resolve & install deps into site-packages ───────────────
+FROM python:${PYTHON_VERSION}-slim AS deps
+
+# build-essential covers wheels that lack a manylinux build (umap-learn's
+# numba/llvmlite chain occasionally, depending on the version pin).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Base deps from pyproject (no extra — the [clamp3] extra routes torch
+# through the ROCm wheel index via tool.uv.sources, which is only
+# meaningful for the native dev install. We install the CLaMP 3 packages
+# explicitly below from the CPU PyTorch index so this image stays
+# hermetic from uv source routing.)
+COPY services/embedder/pyproject.toml services/embedder/README.md ./
+
+RUN pip install --no-cache-dir \
+        'fastapi>=0.115' \
+        'uvicorn[standard]>=0.32' \
+        'pydantic>=2.9' \
+        'numpy>=1.26' \
+        'python-multipart>=0.0.20'
+
+# CLaMP 3 needs torch + torchaudio (audio decode/resample lives in
+# `_clamp3.audio_io`). Pulled from the official CPU wheel index so we
+# don't drag in CUDA or ROCm binaries. No torchvision — unlike the CLAP
+# image, nothing in the CLaMP 3 path imports it. Pin major to match the
+# [clamp3] extra's `>=2.4` floor.
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        'torch>=2.4,<3' \
+        'torchaudio>=2.4,<3'
+
+# The remaining stack from PyPI:
+#   - transformers: MERT (HuBERT) + the CLaMP 3 / MusicHuBERT model classes
+#     + the xlm-roberta-base text branch. Pinned to match the extra.
+#   - nnAudio: spectrogram frontend imported unconditionally via
+#     `embedder._clamp3.__init__` (MusicHubertModel).
+#   - soundfile: in-memory decode in `_clamp3.audio_io`; needs libsndfile1
+#     at runtime (installed in stage 2).
+#   - umap-learn: powers `embedder.reduce` / the `/reduce` endpoint (the
+#     gateway's auto_projection task calls it). Without it the endpoint
+#     503s with "reduce extra not installed". Pulls numba/scipy/sklearn.
+RUN pip install --no-cache-dir \
+        'transformers>=4.40' \
+        'sentencepiece>=0.2' \
+        'nnAudio>=0.3' \
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
+
+# Install the embedder package itself last, --no-deps so we don't
+# re-resolve the carefully-pinned torch wheels.
+COPY services/embedder/embedder ./embedder
+RUN pip install --no-cache-dir --no-deps .
+
+# ─── Stage 2: slim runtime ────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Runtime system deps:
+#   - ca-certificates: TLS for the build-time HF downloads below
+#   - libsndfile1: soundfile's libsndfile.so
+#   - ffmpeg: decode fallback for compressed formats
+#   - libgomp1: OpenMP runtime linked by torch
+#   - curl: container HEALTHCHECK
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libsndfile1 \
+        ffmpeg \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uid/gid pinned to 10001 to match the gateway + stub + CLAP embedders —
+# all containers share the `gw-data` volume so the embedder can write
+# UMAP projections into gateway-state.recommend.sqlite. Keep aligned with
+# docker/gateway/Dockerfile and the other embedder Dockerfiles.
+RUN groupadd --system --gid 10001 embedder \
+ && useradd --system --uid 10001 --gid embedder \
+        --home-dir /var/empty --shell /usr/sbin/nologin embedder
+
+# Lift site-packages and the uvicorn launcher from the deps stage.
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+
+# Pre-download the HuggingFace artefacts CLaMP 3 touches at construction
+# time. Two reasons this must be a build step, not first-boot:
+#   1. CLaMP3Model.__init__ loads `FacebookAI/xlm-roberta-base` as the
+#      text branch *even when we only call get_audio_features* — there is
+#      no audio-only constructor path.
+#   2. MERT-v1-95M is loaded via MusicHubertModel.from_pretrained(MERT_FOLDER);
+#      baking it lets MERT_FOLDER be the hub id with TRANSFORMERS_OFFLINE=1.
+# Without this prebake the container reaches huggingface.co on every boot,
+# and crashes anyway because the unprivileged `embedder` user has
+# HOME=/var/empty (non-writable) so the cache write fails.
+#
+# Run the prebake with EMBEDDER_BACKEND unset (it is — set further down)
+# so importing the package falls back to the stub default and does not try
+# to load the not-yet-mounted checkpoint. Instantiating MusicHubertModel
+# here also validates the MERT weights load into the vendored architecture
+# at build time rather than failing on the first audio embed.
+ENV HF_HOME=/opt/huggingface \
+    TRANSFORMERS_OFFLINE=1
+RUN mkdir -p ${HF_HOME} \
+ && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python -c \
+        "from transformers import AutoModel, AutoTokenizer; \
+         AutoModel.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         from embedder._clamp3.musichubert_model import MusicHubertModel; \
+         MusicHubertModel.from_pretrained('m-a-p/MERT-v1-95M')" \
+ && python -c \
+        "from transformers import AutoTokenizer; \
+         t=AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         assert t('death metal')['input_ids']!=t('smooth jazz')['input_ids'], \
+           'tokenizer vocab not baked: distinct text tokenizes identically'; \
+         assert t.vocab_size>1000, f'tokenizer vocab too small: {t.vocab_size}'" \
+ && chmod -R a+rX ${HF_HOME}
+
+# /models is the expected bind-mount target for the saas checkpoint. We
+# pre-create it so a missing volume gives a clearer "file not found" than
+# a permission-denied on mkdir.
+RUN mkdir -p /models && chown embedder:embedder /models
+
+# numba (via umap-learn → /reduce) JIT-caches @njit(cache=True) kernels and
+# tries to write next to read-only site-packages; with no writable HOME it
+# raises "cannot cache function 'rdist': no locator available" at import
+# time, crashing `import umap`. Give it a writable baked cache dir.
+RUN mkdir -p /var/cache/numba && chown embedder:embedder /var/cache/numba
+
+USER embedder
+
+# CLAMP3_CHECKPOINT defaults to the canonical upstream saas filename.
+# IMPORTANT: the filename becomes the embedding model_version (see
+# Clamp3Embedder._derive_version) and the gateway content-addresses
+# embeddings by it. Do NOT rename the checkpoint to something generic —
+# bind-mount the real file under /models and override CLAMP3_CHECKPOINT
+# if your filename differs (see docker-compose.clamp3.yml).
+ENV EMBEDDER_BACKEND=clamp3 \
+    CLAMP3_CHECKPOINT=/models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth \
+    MERT_FOLDER=m-a-p/MERT-v1-95M \
+    PYTHONUNBUFFERED=1 \
+    # Cap threads — torch spins up its own pools and over-subscribes
+    # small hosts. 4 is a reasonable default; override at runtime if you
+    # have headroom.
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMBA_NUM_THREADS=4 \
+    NUMBA_CACHE_DIR=/var/cache/numba
+
+EXPOSE 9000
+
+# start_period 180 s: CPU CLaMP 3 boot loads the saas checkpoint + MERT +
+# xlm-roberta (several GB of float32 weights). The gateway's
+# `depends_on: { embedder: { condition: service_healthy } }` gate waits
+# on this — keep it generous or boot races.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD curl --silent --fail http://localhost:9000/healthz || exit 1
+
+CMD ["uvicorn", "embedder.app:app", "--host", "0.0.0.0", "--port", "9000"]

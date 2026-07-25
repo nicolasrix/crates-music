@@ -5,61 +5,121 @@ use std::path::Path;
 use anyhow::Context;
 use bytes::Bytes;
 use music_cache::{AudioCache, AudioKey, PinOutcome, UnpinOutcome};
-use music_core::{AlbumId, TrackId};
+use music_core::{AlbumId, ArtistId, TrackId};
 use music_player::{play_queue_blocking, read_cached, resolve_source};
-use music_subsonic::{Client, Credentials};
+use music_subsonic::{Client, Credentials, SearchResult3};
 
-use crate::cli::{CacheAction, Cli, Command, SyncAction};
-use crate::config::{Config, resolve_cache_root};
-use crate::format::{albums_table, tracks_table};
+use crate::cli::{CacheAction, Cli, Command, PlaylistAction, RecommendAction, SyncAction};
+use crate::config::{Config, Quality, resolve_cache_root};
+use crate::format::{album_header, albums_table, artist_header, artists_table, tracks_table};
 
+// A flat command dispatcher — splitting the match across helpers would
+// hurt readability more than the length lint helps.
+#[allow(clippy::too_many_lines)]
 pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Result<()> {
     let config = load_config(config_path_override.or(cli.config.as_deref()))?;
-    let client = build_client(&config).context("constructing Subsonic client")?;
 
-    match cli.command {
+    // Bare invocation (main.rs only routes it here on a TTY) and the hidden
+    // `tui` subcommand both open the interactive UI, which owns its own
+    // client/cache lifecycle (and the terminal).
+    let Some(command) = cli.command else {
+        return crate::tui::run(config).await;
+    };
+    if let Command::Tui = &command {
+        return crate::tui::run(config).await;
+    }
+
+    // `auth` is special: `login` bootstraps the token store and the others
+    // manage it, so they run before we try to construct an authed client
+    // (which, in gateway mode, would require a token we may not have yet).
+    if let Command::Auth { action } = &command {
+        return crate::auth::run_auth(&config, action).await;
+    }
+
+    let client = build_client(&config)
+        .await
+        .context("constructing Subsonic client")?;
+
+    match command {
         Command::Ping => {
             client.ping().await.context("ping failed")?;
-            println!("ok");
+            println!("{}", crate::style::ok("ok"));
         }
         Command::Albums { size, kind } => {
             let albums = client
                 .get_album_list2(kind.into(), Some(size), None)
                 .await?;
-            print!("{}", albums_table(&albums));
+            print!("{}", crate::style::table(&albums_table(&albums)));
         }
         Command::Album { id } => {
             let result = client.get_album(&AlbumId::from(id)).await?;
-            println!(
-                "{}{}{}",
-                result.album.name,
-                result
-                    .album
-                    .artist_name
-                    .as_deref()
-                    .map(|a| format!(" — {a}"))
-                    .unwrap_or_default(),
-                result
-                    .album
-                    .year
-                    .map(|y| format!(" ({y})"))
-                    .unwrap_or_default(),
-            );
+            println!("{}", album_header(&result.album));
             println!();
-            print!("{}", tracks_table(&result.tracks));
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
         }
+        Command::Artists => {
+            let artists = client.get_artists().await?;
+            print!("{}", crate::style::table(&artists_table(&artists)));
+        }
+        Command::Artist { id } => {
+            let result = client.get_artist(&ArtistId::from(id)).await?;
+            println!("{}", artist_header(&result.artist));
+            println!();
+            print!("{}", crate::style::table(&albums_table(&result.albums)));
+        }
+        Command::Tracks { size, offset } => {
+            // Empty query matches the whole library on Navidrome; paging is
+            // via search3's shared offset.
+            let result = client.search3("", size, offset).await?;
+            print!("{}", crate::style::table(&tracks_table(&result.tracks)));
+        }
+        Command::Search { query, limit } => {
+            let result = client.search3(&query, limit, 0).await?;
+            print_search(&result);
+        }
+        Command::Like { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, Some("like")).await?;
+        }
+        Command::Dislike { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, Some("dislike")).await?;
+        }
+        Command::Unrate { id, kind } => {
+            crate::ratings::run_set(&config, kind, &id, None).await?;
+        }
+        Command::Liked => {
+            crate::ratings::run_liked(&config).await?;
+        }
+        Command::Station { prompt, n } => {
+            crate::recommend::run_station(&config, &client, &prompt, n).await?;
+        }
+        Command::Recommend { action } => match action {
+            RecommendAction::Next { seed, n } => {
+                crate::recommend::run_next(&config, &client, &seed, n).await?;
+            }
+        },
         Command::Play { track_ids, offline } => {
             let cache = open_audio_cache(&config).await?;
             let ids: Vec<TrackId> = track_ids.into_iter().map(TrackId::from).collect();
-            play_tracks(&client, &cache, &ids, offline).await?;
+            play_tracks(&client, &cache, &ids, offline, config.playback.stream_quality).await?;
         }
         Command::Pin { track_id } => {
             let cache = open_audio_cache(&config).await?;
-            run_pin(&client, &cache, &TrackId::from(track_id)).await?;
+            run_pin(
+                &client,
+                &cache,
+                &TrackId::from(track_id),
+                config.playback.download_quality,
+            )
+            .await?;
         }
         Command::Unpin { track_id } => {
             let cache = open_audio_cache(&config).await?;
-            run_unpin(&cache, &TrackId::from(track_id)).await?;
+            run_unpin(
+                &cache,
+                &TrackId::from(track_id),
+                config.playback.download_quality,
+            )
+            .await?;
         }
         Command::Pinned => {
             let cache = open_audio_cache(&config).await?;
@@ -72,29 +132,97 @@ pub async fn run(cli: Cli, config_path_override: Option<&Path>) -> anyhow::Resul
                 CacheAction::Evict => run_cache_evict(&cache).await?,
             }
         }
+        Command::Playlist { action } => match action {
+            PlaylistAction::List => crate::playlist::run_list(&config).await?,
+            PlaylistAction::Show { id } => crate::playlist::run_show(&config, &client, &id).await?,
+            PlaylistAction::Create { name } => crate::playlist::run_create(&config, &name).await?,
+            PlaylistAction::Rename { id, name } => {
+                crate::playlist::run_rename(&config, &id, &name).await?;
+            }
+            PlaylistAction::Delete { id } => crate::playlist::run_delete(&config, &id).await?,
+            PlaylistAction::Add { id, track_ids } => {
+                crate::playlist::run_add(&config, &id, &track_ids).await?;
+            }
+            PlaylistAction::Remove { id, track_id } => {
+                crate::playlist::run_remove(&config, &id, &track_id).await?;
+            }
+            PlaylistAction::Play { id, shuffle } => {
+                let cache = open_audio_cache(&config).await?;
+                let ids = crate::playlist::resolve_play_ids(&config, &id, shuffle).await?;
+                play_tracks(&client, &cache, &ids, false, config.playback.stream_quality).await?;
+            }
+        },
         Command::Sync { action } => match action {
             SyncAction::State => crate::sync::run_state(&config).await?,
+            SyncAction::Queue => crate::sync::run_queue(&config, &client).await?,
             SyncAction::Push { track_ids } => crate::sync::run_push(&config, &track_ids).await?,
+            SyncAction::Remove { item_id } => crate::sync::run_remove(&config, &item_id).await?,
+            SyncAction::Move {
+                item_id,
+                new_index,
+            } => crate::sync::run_move(&config, &item_id, new_index).await?,
+            SyncAction::Jump { index } => crate::sync::run_jump(&config, index).await?,
+            SyncAction::Clear => crate::sync::run_clear(&config).await?,
             SyncAction::Watch => crate::sync::run_watch(&config).await?,
         },
+        // Handled above, before the client is built.
+        Command::Auth { .. } | Command::Tui => {
+            unreachable!("dispatched before client construction")
+        }
     }
     Ok(())
 }
 
-fn audio_key(track_id: &TrackId) -> AudioKey {
-    AudioKey {
-        track_id: track_id.as_str().to_string(),
-        bitrate: None,
-        codec: "stream".to_string(),
+/// Render a `search3` result as three labelled sections. Empty buckets are
+/// skipped so a song-only match doesn't print bare "ARTISTS"/"ALBUMS"
+/// headers. If nothing matched at all, say so on stderr-free stdout.
+fn print_search(result: &SearchResult3) {
+    let mut printed = false;
+    if !result.artists.is_empty() {
+        println!("{}", crate::style::heading("ARTISTS"));
+        print!("{}", crate::style::table(&artists_table(&result.artists)));
+        printed = true;
+    }
+    if !result.albums.is_empty() {
+        if printed {
+            println!();
+        }
+        println!("{}", crate::style::heading("ALBUMS"));
+        print!("{}", crate::style::table(&albums_table(&result.albums)));
+        printed = true;
+    }
+    if !result.tracks.is_empty() {
+        if printed {
+            println!();
+        }
+        println!("{}", crate::style::heading("TRACKS"));
+        print!("{}", crate::style::table(&tracks_table(&result.tracks)));
+        printed = true;
+    }
+    if !printed {
+        println!("(no matches)");
     }
 }
 
-async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
-    let key = audio_key(track_id);
+pub(crate) fn audio_key(track_id: &TrackId, quality: Quality) -> AudioKey {
+    AudioKey {
+        track_id: track_id.as_str().to_string(),
+        bitrate: quality.bitrate(),
+        codec: quality.codec().to_string(),
+    }
+}
+
+async fn run_pin(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+    quality: Quality,
+) -> anyhow::Result<()> {
+    let key = audio_key(track_id, quality);
     // Ensure the bytes are present (fetch if not).
     if cache.get(&key).await?.is_none() {
         tracing::info!(track = track_id.as_str(), "pin: track not cached, fetching");
-        fetch_into_cache(client, cache, track_id, &key).await?;
+        fetch_into_cache(client, cache, track_id, quality).await?;
     }
     match cache.pin(&key).await? {
         PinOutcome::Pinned => println!("pinned {}", track_id.as_str()),
@@ -117,8 +245,17 @@ async fn run_pin(client: &Client, cache: &AudioCache, track_id: &TrackId) -> any
     Ok(())
 }
 
-async fn run_unpin(cache: &AudioCache, track_id: &TrackId) -> anyhow::Result<()> {
-    let key = audio_key(track_id);
+async fn run_unpin(
+    cache: &AudioCache,
+    track_id: &TrackId,
+    quality: Quality,
+) -> anyhow::Result<()> {
+    // Unpin whatever quality this track was actually pinned at — not just the
+    // one today's `download_quality` would derive (which may differ).
+    let key = match cache.find_by_track(track_id.as_str()).await? {
+        Some(entry) if entry.pinned => entry.key,
+        _ => audio_key(track_id, quality),
+    };
     match cache.unpin(&key).await? {
         UnpinOutcome::Unpinned => println!("unpinned {}", track_id.as_str()),
         UnpinOutcome::NotPinned => println!("not pinned: {}", track_id.as_str()),
@@ -162,11 +299,45 @@ async fn fetch_into_cache(
     client: &Client,
     cache: &AudioCache,
     track_id: &TrackId,
-    key: &AudioKey,
+    quality: Quality,
 ) -> anyhow::Result<()> {
-    let url = client.stream_url(track_id)?;
+    let _ = fetch_track_bytes(client, cache, track_id, quality)
+        .await
+        .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
+    Ok(())
+}
+
+/// Resolve a track's audio bytes: cache hit returns the stored blob; miss
+/// streams from the gateway/Navidrome and caches. Shared by classic
+/// `play`/`pin` and the TUI's resolve/prefetch effects — callers attach
+/// their own user-facing context to failures.
+pub(crate) async fn fetch_track_bytes(
+    client: &Client,
+    cache: &AudioCache,
+    track_id: &TrackId,
+    quality: Quality,
+) -> anyhow::Result<Bytes> {
+    let key = audio_key(track_id, quality);
+    // Cache-first, across qualities: prefer the exact key, but fall back to
+    // *any* cached copy of this track (e.g. a pinned download-quality blob
+    // while streaming at `original`). Without this, a track saved offline at
+    // one quality is unplayable — offline entirely, or a needless refetch
+    // online — after the quality setting changes.
+    if let Some(bytes) = read_cached(cache, &key).await? {
+        return Ok(bytes);
+    }
+    if let Some(entry) = cache.find_by_track(track_id.as_str()).await?
+        && let Some(bytes) = read_cached(cache, &entry.key).await?
+    {
+        return Ok(bytes);
+    }
+    let (format, max_bitrate) = match quality.transcode() {
+        Some((fmt, kbps)) => (Some(fmt), Some(kbps)),
+        None => (None, None),
+    };
+    let url = client.stream_url_with(track_id, format, max_bitrate)?;
     let http = client.http().clone();
-    let _ = resolve_source(cache, key, || async move {
+    let bytes = resolve_source(cache, &key, || async move {
         let response = http
             .get(url)
             .send()
@@ -180,12 +351,11 @@ async fn fetch_into_cache(
             .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
         Ok::<Bytes, anyhow::Error>(bytes)
     })
-    .await
-    .with_context(|| format!("could not fetch track {} from upstream", track_id.as_str()))?;
-    Ok(())
+    .await?;
+    Ok(bytes)
 }
 
-async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
+pub(crate) async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     let root = resolve_cache_root(&config.cache)
         .context("could not determine audio cache root (no XDG cache dir)")?;
     AudioCache::open(
@@ -197,22 +367,49 @@ async fn open_audio_cache(config: &Config) -> anyhow::Result<AudioCache> {
     .with_context(|| format!("opening audio cache at {}", root.display()))
 }
 
-fn build_client(config: &Config) -> music_subsonic::Result<Client> {
+pub(crate) async fn build_client(config: &Config) -> anyhow::Result<Client> {
     let creds = Credentials {
         username: config.server.username.clone(),
         password: config.server.password.clone(),
     };
-    if let Some(gateway) = &config.gateway {
-        // Gateway mode: target the gateway URL with a bearer token. The
-        // upstream Subsonic auth params (u/t/s/…) are still appended by
-        // `Client`, but the gateway strips them and uses its own creds.
-        Client::new(&gateway.url, creds)?.with_bearer(&gateway.bearer_token)
-    } else {
-        Client::new(&config.server.url, creds)
+    let Some(gateway) = &config.gateway else {
+        return Ok(Client::new(&config.server.url, creds)?);
+    };
+
+    // Gateway mode authenticates with a device-flow access token (resolved
+    // — and silently refreshed — from the token store). No static bearer.
+    let bearer = crate::auth::resolve_bearer(config, gateway).await?;
+
+    // Gateway mode: target the gateway URL with a bearer token. The upstream
+    // Subsonic auth params (u/t/s/…) are still appended by `Client`, but the
+    // gateway strips them and uses its own creds.
+    //
+    // The same TLS trust knobs the dedicated gateway HTTP client honours
+    // (`crate::gateway::http_client`) must apply here too: the workspace
+    // builds reqwest with rustls' bundled webpki roots, so a private mkcert
+    // `gateway.local` cert is invisible unless the CA is added explicitly.
+    // Without this, gateway-mode `ping`/browse and recommend/station
+    // title-resolution fail with `UnknownIssuer`, while ratings/sync (which
+    // go through `gateway.rs`) work — a confusing split.
+    let ca_cert_pem = match &gateway.ca_cert_path {
+        Some(path) => Some(
+            std::fs::read(path)
+                .with_context(|| format!("reading gateway CA cert {}", path.display()))?,
+        ),
+        None => None,
+    };
+    if gateway.insecure_tls {
+        eprintln!(
+            "WARNING: [gateway].insecure_tls is set — Subsonic TLS certificate \
+             verification is disabled; prefer [gateway].ca_cert_path."
+        );
     }
+    Ok(Client::new(&gateway.url, creds)?
+        .with_bearer(&bearer)?
+        .with_tls(ca_cert_pem.as_deref(), gateway.insecure_tls)?)
 }
 
-fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
+pub(crate) fn load_config(path_override: Option<&Path>) -> anyhow::Result<Config> {
     let path = match path_override {
         Some(p) => p.to_path_buf(),
         None => crate::config::default_config_path()
@@ -226,6 +423,7 @@ async fn play_tracks(
     cache: &AudioCache,
     track_ids: &[TrackId],
     offline: bool,
+    quality: Quality,
 ) -> anyhow::Result<()> {
     // Resolve every track *before* starting playback. This is the gapless
     // pre-roll: by the time the first track's last sample is consumed,
@@ -233,9 +431,18 @@ async fn play_tracks(
     // queue is fed back-to-back.
     let mut queue: Vec<Bytes> = Vec::with_capacity(track_ids.len());
     for track_id in track_ids {
-        let key = audio_key(track_id);
+        let key = audio_key(track_id, quality);
         let bytes = if offline {
-            match read_cached(cache, &key).await? {
+            // Prefer the exact quality, else any cached copy of this track
+            // (it may have been pinned under a different quality).
+            let cached = match read_cached(cache, &key).await? {
+                Some(bytes) => Some(bytes),
+                None => match cache.find_by_track(track_id.as_str()).await? {
+                    Some(entry) => read_cached(cache, &entry.key).await?,
+                    None => None,
+                },
+            };
+            match cached {
                 Some(bytes) => bytes,
                 None => anyhow::bail!(
                     "track {} is not in the local cache; remove --offline to fetch from the server",
@@ -243,24 +450,7 @@ async fn play_tracks(
                 ),
             }
         } else {
-            let url = client.stream_url(track_id)?;
-            let http = client.http().clone();
-            resolve_source(cache, &key, || async move {
-                let response = http
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("stream request failed: {e}"))?
-                    .error_for_status()
-                    .map_err(|e| anyhow::anyhow!("stream returned error status: {e}"))?;
-                let bytes: Bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("reading stream body: {e}"))?;
-                Ok::<Bytes, anyhow::Error>(bytes)
-            })
-            .await
-            .with_context(|| {
+            fetch_track_bytes(client, cache, track_id, quality).await.with_context(|| {
                 format!(
                     "could not resolve audio for track {}: server unreachable and \
                      not in local cache (try --offline to play only what's cached)",

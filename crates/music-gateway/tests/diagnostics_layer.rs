@@ -8,6 +8,7 @@
 //!   * fields recorded on the span survive as JSON
 //!   * nested spans share a trace_id and link via parent_span_id
 
+use music_gateway::app::http_trace_span;
 use music_gateway::diagnostics::{SpanRecord, TraceLayer, TraceStore};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -148,4 +149,47 @@ async fn drainer_flushes_buffered_records_to_store_on_tick() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(count >= 1, "drainer should have flushed at least one row");
+}
+
+#[tokio::test]
+async fn http_request_span_records_path_not_query_string() {
+    // Bearer tokens can ride in `?access_token=` (RFC 6750 §2.3). The
+    // HTTP request span must record the path only, so the token never
+    // reaches the diagnostics trace store.
+    let (layer, mut rx) = TraceLayer::new(64);
+    // Registry with no level filter so the DEBUG request span is enabled.
+    let dispatch: tracing::Dispatch = Registry::default().with(layer).into();
+
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri("/v1/stream/track-42?access_token=SUPER_SECRET_TOKEN&bitrate=128")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        let span = http_trace_span(&request);
+        let _enter = span.enter();
+    });
+
+    let records = drain_all(&mut rx);
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r.name, "request");
+    // The path survives...
+    assert!(
+        r.fields_json.contains("/v1/stream/track-42"),
+        "path must be recorded: {}",
+        r.fields_json
+    );
+    // ...but neither the token nor any query key does.
+    assert!(
+        !r.fields_json.contains("SUPER_SECRET_TOKEN"),
+        "access token leaked into trace store: {}",
+        r.fields_json
+    );
+    assert!(
+        !r.fields_json.contains("access_token") && !r.fields_json.contains("bitrate"),
+        "query string leaked into trace store: {}",
+        r.fields_json
+    );
 }

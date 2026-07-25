@@ -3,24 +3,29 @@
 // pins this layout).
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Play, Plus, Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Pencil, Play, Plus, Shuffle, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { coverArtUrl } from "../api/client";
 import {
   addTrackToPlaylist,
-  coverArtUrl,
   deletePlaylist,
   getPlaylist,
+  removeTrackFromPlaylist,
   renamePlaylist,
-} from "../api/client";
+} from "../api/playlists";
 import { suggestForPlaylist } from "../api/recommend";
 import { Cover } from "../components/Cover";
+import { DownloadAllButton } from "../components/DownloadAllButton";
+import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { navigate } from "../router";
 import { usePlayback } from "../sync/usePlayback";
+import { useToast } from "../toast/ToastContext";
 import { fmtDuration } from "../utils/format";
-import type { Track } from "../api/types";
+import { shuffle } from "../utils/shuffle";
+import type { PlaylistWithTracks, Track } from "../api/types";
 
 export function Playlist({ id }: { id: string }) {
   const q = useQuery({
@@ -31,11 +36,11 @@ export function Playlist({ id }: { id: string }) {
   // the playlist itself often lacks dedicated artwork.
   const seedCover =
     q.data?.tracks.find((t) => t.coverArt)?.coverArt ?? q.data?.playlist.coverArt;
-  const palette = useCoverPalette(
-    coverArtUrl(seedCover, 600, q.data?.playlist.name),
-  );
+  const cover = coverArtUrl(seedCover, 600, q.data?.playlist.name);
+  const palette = useCoverPalette(cover);
   const { playSingle, playList } = usePlayback();
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   // Lightweight dialogs — same prompt-based UX as new-playlist creation
   // in Sidebar. Once a proper modal primitive lands, swap these two and
@@ -53,16 +58,30 @@ export function Playlist({ id }: { id: string }) {
       await queryClient.invalidateQueries({ queryKey: ["playlist", id] });
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
     } catch (e) {
-      window.alert(`couldn't rename playlist: ${(e as Error).message}`);
+      toast(`couldn't rename playlist: ${(e as Error).message}`, {
+        variant: "error",
+      });
     }
   }
 
+  // Two-step delete (same pattern as admin delete-user): window.confirm
+  // is suppressed in iOS standalone PWAs, where it returns false — the
+  // delete would silently never fire on the installed app.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const t = setTimeout(() => setConfirmingDelete(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirmingDelete]);
+
   async function handleDelete() {
     if (!q.data) return;
-    const ok = window.confirm(
-      `delete playlist "${q.data.playlist.name}"? this can't be undone.`
-    );
-    if (!ok) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      toast(`tap delete again to remove “${q.data.playlist.name}”`);
+      return;
+    }
+    setConfirmingDelete(false);
     try {
       await deletePlaylist(id);
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
@@ -70,7 +89,9 @@ export function Playlist({ id }: { id: string }) {
       // the user staring at a deleted playlist's tracks.
       navigate("/");
     } catch (e) {
-      window.alert(`couldn't delete playlist: ${(e as Error).message}`);
+      toast(`couldn't delete playlist: ${(e as Error).message}`, {
+        variant: "error",
+      });
     }
   }
 
@@ -128,9 +149,38 @@ export function Playlist({ id }: { id: string }) {
           : s
       );
     } catch (e) {
-      window.alert(`couldn't add track: ${(e as Error).message}`);
+      toast(`couldn't add track: ${(e as Error).message}`, { variant: "error" });
     } finally {
       setAddingId(null);
+    }
+  }
+
+  // Remove a track from the playlist. Optimistic: patch the ["playlist", id]
+  // cache immediately (so the row disappears and rapid successive removes
+  // each read a fresh membership), then persist by replacing against the RAW
+  // stored ids — never the hydrated tracks, so an id that failed to hydrate
+  // this load isn't dropped. Roll back + toast on failure.
+  async function handleRemove(track: Track) {
+    const key = ["playlist", id] as const;
+    const current = queryClient.getQueryData<PlaylistWithTracks>(key);
+    if (!current) return;
+    const nextTrackIds = current.trackIds.filter((t) => t !== track.id);
+    queryClient.setQueryData<PlaylistWithTracks>(key, {
+      ...current,
+      tracks: current.tracks.filter((t) => t.id !== track.id),
+      trackIds: nextTrackIds,
+    });
+    try {
+      await removeTrackFromPlaylist(id, track.id, current.trackIds);
+      // Refresh the sidebar list (song counts) — cheap, and the playlist
+      // body already reflects the removal optimistically.
+      await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+      toast("removed from playlist");
+    } catch (e) {
+      queryClient.setQueryData(key, current); // rollback
+      toast(`couldn't remove track: ${(e as Error).message}`, {
+        variant: "error",
+      });
     }
   }
 
@@ -161,8 +211,8 @@ export function Playlist({ id }: { id: string }) {
 
   return (
     <Layout breadcrumb={`playlists · ${playlist.name}`} palette={palette}>
-      <div className="tinted-wash" />
       <div className="hero">
+        <HeroBackdrop url={cover} />
         <div className="cover-lg">
           <Quilt urls={quiltCovers} fallback={playlist.name} />
         </div>
@@ -188,6 +238,15 @@ export function Playlist({ id }: { id: string }) {
             </button>
             <button
               className="icon-btn"
+              onClick={() => playList(shuffle(tracks), 0)}
+              disabled={tracks.length === 0}
+              aria-label="shuffle playlist"
+              title="shuffle play"
+            >
+              <Shuffle size={18} strokeWidth={1.5} />
+            </button>
+            <button
+              className="icon-btn"
               onClick={handleRename}
               aria-label="rename playlist"
               title="rename playlist"
@@ -205,11 +264,17 @@ export function Playlist({ id }: { id: string }) {
             >
               <Sparkles size={18} strokeWidth={1.5} />
             </button>
+            <DownloadAllButton tracks={tracks} label="download playlist for offline" />
             <button
               className="icon-btn"
+              style={confirmingDelete ? { color: "var(--danger)" } : undefined}
               onClick={handleDelete}
-              aria-label="delete playlist"
-              title="delete playlist"
+              aria-label={
+                confirmingDelete ? "really delete playlist?" : "delete playlist"
+              }
+              title={
+                confirmingDelete ? "really delete playlist?" : "delete playlist"
+              }
             >
               <Trash2 size={18} strokeWidth={1.5} />
             </button>
@@ -221,6 +286,14 @@ export function Playlist({ id }: { id: string }) {
           tracks={tracks}
           showAlbum
           onPlay={(i) => playSingle(tracks[i]!)}
+          rowMenuExtras={(track) => [
+            {
+              key: "remove-from-playlist",
+              label: "remove from playlist",
+              icon: <X size={14} strokeWidth={1.5} />,
+              onClick: () => void handleRemove(track),
+            },
+          ]}
         />
       </div>
       <SuggestionsPanel

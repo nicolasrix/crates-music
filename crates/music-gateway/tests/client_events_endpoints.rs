@@ -210,6 +210,30 @@ async fn client_events_post_oversized_batch_returns_413() {
 }
 
 #[tokio::test]
+async fn client_events_post_rejects_oversized_field() {
+    let state = common::build_state(common::test_config()).await;
+    // page_path far over its 512-char cap — reject the batch with 422 and
+    // name the offending field, rather than write it to the un-trimmed ring.
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/v1/diagnostics/client_events",
+        json!({"events": [{
+            "session_id": "s",
+            "occurred_ms": 1,
+            "name": "playback.start",
+            "page_path": "/".to_string() + &"x".repeat(600)
+        }]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["field"], "page_path");
+    // Nothing persisted.
+    let (_, got) = get_json(build_router(state), "/v1/diagnostics/client_events").await;
+    assert_eq!(got["events"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn client_events_post_rejects_event_without_required_fields() {
     let state = common::build_state(common::test_config()).await;
     // Missing `name` — axum's Json extractor rejects with 422
@@ -247,8 +271,7 @@ async fn client_events_get_requires_auth() {
 #[tokio::test]
 async fn client_events_get_empty_returns_empty_array() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) =
-        get_json(build_router(state), "/v1/diagnostics/client_events").await;
+    let (status, json) = get_json(build_router(state), "/v1/diagnostics/client_events").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["events"], json!([]));
 }
@@ -265,8 +288,7 @@ async fn client_events_get_filters_by_name() {
             {"session_id":"s","occurred_ms":3,"name":"web-vital.LCP","page_path":"/"}
         ]
     });
-    let (status, _) =
-        post_json(app, "/v1/diagnostics/client_events", body, None).await;
+    let (status, _) = post_json(app, "/v1/diagnostics/client_events", body, None).await;
     assert_eq!(status, StatusCode::OK);
 
     let (status, json) = get_json(

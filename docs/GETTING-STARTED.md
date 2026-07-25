@@ -113,15 +113,36 @@ password = "wonderland"
 
 [gateway]
 url = "https://gateway.local:8443"
-bearer_token = "<the same token you put in gateway.toml>"
 EOF
 
-cargo run -p music-cli -- albums list
+# Authenticate (once) — Device Authorization Grant, RFC 8628. Prints a
+# code + URL; approve it in a browser logged into the gateway. Tokens
+# persist to ~/.config/crates-music/cli-tokens.json and refresh on their
+# own. (Needs a `[[oauth.clients]] client_id = "cli"` block in gateway.toml.)
+cargo run -p music-cli -- auth login
+
+cargo run -p music-cli -- albums
 ```
+
+The binary is named **`crates-cli`** (`cargo install --path
+crates/music-cli` puts it on your PATH). Running it bare on a terminal —
+`crates-cli` with no subcommand — opens the interactive full-screen UI;
+see [components/music-cli.md § Interactive mode](./components/music-cli.md#interactive-mode-tui).
+
+> Installing the CLI as a **client against an already-running gateway**
+> (e.g. your production box) rather than the dev stack? See
+> [components/music-cli.md § Install](./components/music-cli.md#install-as-a-client-against-a-running-gateway)
+> — it covers `cargo install`, the prod-cert vs mkcert TLS split, and the
+> device-login flow.
 
 You should see your Navidrome's albums. If you get a TLS error,
 either `mkcert -install` didn't take effect, or `gateway.local` isn't
-in your hosts file.
+in your hosts file. As an alternative to installing the CA
+system-wide, point `[gateway].ca_cert_path` at the mkcert root CA
+(`mkcert -CAROOT`/`rootCA.pem`) — the CLI trusts it as an extra anchor
+for this connection without touching your system trust store. (The
+`insecure_tls = true` escape hatch disables verification entirely and
+is debug-only — it re-exposes the bearer token to a MITM.)
 
 ## 6. Start the web app
 
@@ -157,7 +178,18 @@ cd services/embedder
 uv sync                                    # or: pip install -e .[dev]
 uv run uvicorn embedder.app:app --port 9000
 
-# Or the real CLAP backend — requires PyTorch + ROCm/CUDA + a checkpoint:
+# Or the real CLaMP 3 backend (production) — 768-dim, music-specific.
+# Requires PyTorch + ROCm/CUDA, a CLaMP 3 checkpoint, and MERT-v1-95M:
+uv sync --extra clamp3
+EMBEDDER_BACKEND=clamp3 \
+  CLAMP3_CHECKPOINT=/path/to/weights_clamp3_saas_*.pth \
+  MERT_FOLDER=/path/to/MERT-v1-95M \
+  uv run uvicorn embedder.app:app --port 9000
+# MERT_FOLDER can be a local copy or the hub id `m-a-p/MERT-v1-95M`.
+# The clamp3 extra includes `sentencepiece`, required by the
+# xlm-roberta-base text tokenizer that powers text-query stations.
+
+# Or the legacy CLAP backend — 512-dim, requires PyTorch + ROCm/CUDA + a checkpoint:
 uv sync --extra clap
 CLAP_CHECKPOINT=/path/to/clap.pt EMBEDDER_BACKEND=clap \
   uv run uvicorn embedder.app:app --port 9000
@@ -171,13 +203,17 @@ url = "http://localhost:9000"
 timeout_seconds = 30
 ```
 
-Restart the gateway. You'll see:
+Restart the gateway. You'll see (CLaMP 3, the production backend):
 
 ```
-INFO  embedder: probe ok model=clap-music_audioset_epoch_15_esc_90.14 dim=512
+INFO  embedder: probe ok model=clamp3-saas dim=768 device=cuda
 ```
 
-(or `model=stub-v1` if you went with the stub backend).
+For the legacy CLAP backend the probe reports `dim=512` instead; the
+stub backend reports `model=stub-v1` (and `dim=512` by default,
+overridable via `EMBEDDER_STUB_DIM`). The gateway's
+`[recommend].embedding_dim` must match the probed dim — see
+[CONFIGURATION.md](./CONFIGURATION.md).
 
 ## Verifying everything works
 

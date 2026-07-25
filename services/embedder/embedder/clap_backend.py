@@ -15,15 +15,24 @@ done with soundfile + librosa.resample to CLAP's expected 48 kHz mono.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
+import os
+import threading
 import time
 
 import numpy as np
 
+from embedder.checkpoint import verify_checkpoint
 from embedder.protocol import EmbedResult
 
 logger = logging.getLogger(__name__)
+
+# Optional pin: when set, the checkpoint's SHA-256 must match this digest
+# or the backend refuses to start. The strongest guard against a swapped
+# or tampered .pt, since loading one unpickles (i.e. runs arbitrary code).
+_CHECKPOINT_SHA256_ENV = "CLAP_CHECKPOINT_SHA256"
 
 
 class ClapEmbedder:
@@ -35,6 +44,9 @@ class ClapEmbedder:
     """
 
     SAMPLE_RATE = 48000  # CLAP expects 48 kHz mono.
+    # HTSAT-base + RoBERTa projection produces 512-dim joint embeddings.
+    # Hard-coded because the architecture is fixed at construction time.
+    DIM = 512
 
     def __init__(self, checkpoint_path: str, model_version: str | None = None) -> None:
         try:
@@ -48,12 +60,23 @@ class ClapEmbedder:
                 f"Underlying import error: {e}"
             ) from e
 
+        # Fail closed before the path reaches torch.load (unpickling).
+        self._checkpoint_sha256 = verify_checkpoint(
+            checkpoint_path,
+            sha256_env=_CHECKPOINT_SHA256_ENV,
+            label="CLAP checkpoint",
+        )
+
         logger.info("loading CLAP checkpoint from %s", checkpoint_path)
         self._model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
-        self._model.load_ckpt(checkpoint_path)
+        # laion_clap.load_ckpt calls torch.load without weights_only; force
+        # it on so a checkpoint can't execute pickled code during load.
+        with _torch_load_weights_only():
+            self._model.load_ckpt(checkpoint_path)
         self._model_version = model_version or _derive_version(checkpoint_path)
         self._loaded = True
         self._device = _detect_device()
+        self._lock = threading.Lock()
         logger.info("CLAP loaded on device=%s", self._device)
 
     @property
@@ -68,56 +91,76 @@ class ClapEmbedder:
     def device(self) -> str:
         return self._device
 
+    @property
+    def dim(self) -> int:
+        return self.DIM
+
     def embed_audio(self, raw_bytes: bytes) -> EmbedResult:
         import soundfile  # type: ignore[import-not-found]
         import librosa  # type: ignore[import-not-found]
 
-        stages: dict[str, float] = {}
+        with self._lock:
+            stages: dict[str, float] = {}
 
-        # Decode to mono float32. soundfile (libsndfile) is the fast path —
-        # works for ~99% of MP3/FLAC/OGG/WAV. It can fail with
-        # `LibsndfileError: Format not recognised` on tracks where the
-        # truncated byte slice doesn't begin on a clean MPEG frame
-        # boundary, or on files with off-by-more-than-1% Xing/LAME headers
-        # (we see a stderr warning for those even when decode succeeds).
-        # Fall back to librosa.load(), which routes through audioread →
-        # ffmpeg and tolerates a much wider set of broken containers.
-        t0 = time.perf_counter()
-        audio, sr = _decode_audio(raw_bytes)
-        if audio.ndim == 2:
-            audio = audio.mean(axis=1)
-        stages["decode"] = (time.perf_counter() - t0) * 1000.0
-        del soundfile  # Imported only to surface ImportError early.
+            t0 = time.perf_counter()
+            audio, sr = _decode_audio(raw_bytes)
+            if audio.ndim == 2:
+                audio = audio.mean(axis=1)
+            stages["decode"] = (time.perf_counter() - t0) * 1000.0
+            del soundfile
 
-        # Resample to 48 kHz if needed.
-        t0 = time.perf_counter()
-        if sr != self.SAMPLE_RATE:
-            audio = librosa.resample(audio, orig_sr=sr, target_sr=self.SAMPLE_RATE)
-        stages["resample"] = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            if sr != self.SAMPLE_RATE:
+                audio = librosa.resample(audio, orig_sr=sr, target_sr=self.SAMPLE_RATE)
+            stages["resample"] = (time.perf_counter() - t0) * 1000.0
 
-        # GPU forward pass. (CPU when CUDA isn't available — same code path.)
-        t0 = time.perf_counter()
-        batch = audio[np.newaxis, :].astype(np.float32)
-        emb = self._model.get_audio_embedding_from_data(x=batch, use_tensor=False)
-        vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
-        stages["gpu_forward"] = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            batch = audio[np.newaxis, :].astype(np.float32)
+            emb = self._model.get_audio_embedding_from_data(x=batch, use_tensor=False)
+            vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+            stages["gpu_forward"] = (time.perf_counter() - t0) * 1000.0
 
-        return EmbedResult(vector=vec, stages_ms=stages)
+            return EmbedResult(vector=vec, stages_ms=stages)
 
     def embed_text(self, text: str) -> EmbedResult:
-        t0 = time.perf_counter()
-        emb = self._model.get_text_embedding([text], use_tensor=False)
-        vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return EmbedResult(vector=vec, stages_ms={"gpu_forward": elapsed_ms})
+        with self._lock:
+            t0 = time.perf_counter()
+            emb = self._model.get_text_embedding([text], use_tensor=False)
+            vec = _l2_normalize(np.asarray(emb[0], dtype=np.float32))
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return EmbedResult(vector=vec, stages_ms={"gpu_forward": elapsed_ms})
 
 
 def _derive_version(checkpoint_path: str) -> str:
     """Best-effort: take the checkpoint filename without extension."""
-    import os
-
     base = os.path.basename(checkpoint_path)
     return base.rsplit(".", 1)[0] or "clap"
+
+
+@contextlib.contextmanager
+def _torch_load_weights_only():
+    """Force ``weights_only=True`` for every ``torch.load`` inside the block.
+
+    ``laion_clap.load_ckpt`` calls ``torch.load`` without the flag; on
+    torch < 2.6 the default is ``weights_only=False`` — full unpickling,
+    i.e. remote code execution on a hostile checkpoint. Injecting the flag
+    restricts loading to plain tensors / state-dicts, which is exactly the
+    shape of a CLAP checkpoint. Restored on exit so the patch is scoped to
+    the load.
+    """
+    import torch
+
+    original = torch.load
+
+    def guarded(*args, **kwargs):
+        kwargs.setdefault("weights_only", True)
+        return original(*args, **kwargs)
+
+    torch.load = guarded
+    try:
+        yield
+    finally:
+        torch.load = original
 
 
 def _detect_device() -> str:

@@ -15,6 +15,8 @@ pub mod storage;
 pub use session::{IssuedSession, Session};
 pub use setup::SetupToken;
 pub use storage::{
-    AccessToken, AuthCode, Error, IssuedAccessToken, IssuedAuthCode, IssuedRefreshToken,
-    NewAuthCode, NewClient, NewRefreshToken, OauthClient, OauthStore, RefreshToken, Result,
+    AccessToken, AuthCode, DeviceCodeRow, DevicePollState, Error, GuestCodeRow, IssuedAccessToken,
+    IssuedAuthCode, IssuedDeviceCode, IssuedGuestCode, IssuedRefreshToken, LoginUser, NewAuthCode,
+    NewClient, NewDeviceCode, NewGuestCode, NewRefreshToken, NewUser, OauthClient, OauthStore,
+    RedeemOutcome, RefreshToken, Result, UserSummary,
 };

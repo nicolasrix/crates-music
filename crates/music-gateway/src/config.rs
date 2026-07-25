@@ -8,19 +8,57 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
     pub cache: CacheConfig,
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Recommender knobs that have to be known at boot — chiefly the ANN
+    /// vector dim, which the ANN index commits to at open time.
+    #[serde(default)]
+    pub recommend: RecommendConfig,
     /// Optional Python embedder sidecar. Absent / unreachable = degraded mode.
     #[serde(default)]
     pub embedder: Option<EmbedderConfigSection>,
+    /// Typo-tolerant `/v1/search` fuzzy index. On by default; degrades to
+    /// proxied Navidrome `search3` when disabled or still building.
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
+/// `[search]` — the fuzzy catalog index behind `GET /v1/search`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchConfig {
+    /// Master switch. When false the endpoint always falls back to
+    /// Navidrome `search3` (no typo tolerance).
+    #[serde(default = "default_search_enabled")]
+    pub enabled: bool,
+    /// How often to rebuild the index from Navidrome so new/renamed tracks
+    /// become searchable. `0` builds once at boot and never refreshes.
+    #[serde(default = "default_search_refresh_seconds")]
+    pub refresh_interval_seconds: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_search_enabled(),
+            refresh_interval_seconds: default_search_refresh_seconds(),
+        }
+    }
+}
+
+fn default_search_enabled() -> bool {
+    true
+}
+
+fn default_search_refresh_seconds() -> u64 {
+    900
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Address the gateway binds to (e.g. `0.0.0.0:8443`).
     pub listen: SocketAddr,
@@ -30,14 +68,46 @@ pub struct ServerConfig {
     pub tls_key: PathBuf,
     /// Single shared bearer token. Static for P1; OAuth in a later phase.
     pub bearer_token: String,
+    /// Optional directory of built web SPA assets (`apps/web/dist`). When
+    /// set, the gateway serves it as a same-origin static site with SPA
+    /// fallback to `index.html`. Defaults to `None` — leave unset in
+    /// dev where Vite serves the SPA itself.
+    #[serde(default)]
+    pub static_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Hand-rolled `Debug` so the shared bearer token never lands in logs or a
+// panic dump. The derived impl would print it verbatim; this redacts it
+// while leaving the non-secret fields visible for diagnostics.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("listen", &self.listen)
+            .field("tls_cert", &self.tls_cert)
+            .field("tls_key", &self.tls_key)
+            .field("bearer_token", &"[REDACTED]")
+            .field("static_dir", &self.static_dir)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpstreamConfig {
     /// Base URL of the Navidrome instance (e.g. `http://nav.lan:4533`).
     pub navidrome_url: String,
     pub username: String,
     pub password: String,
+}
+
+// Hand-rolled `Debug` so the upstream Navidrome password is never printed.
+impl std::fmt::Debug for UpstreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamConfig")
+            .field("navidrome_url", &self.navidrome_url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +138,27 @@ pub struct OauthConfig {
     /// requiring a separate admin endpoint for the simple cases.
     #[serde(default, rename = "clients")]
     pub clients: Vec<OauthClientConfig>,
+    /// How long a redeemed guest session lasts (seconds). Both the guest
+    /// account row's `expires_at` and the guest access token's TTL are set
+    /// to this — a guest gets one long-lived access token (no refresh) that
+    /// is hard-capped by the account expiry. Default 12 hours: long enough
+    /// for a party, short enough to self-clean. (PR D.)
+    #[serde(default = "default_guest_session_ttl_secs")]
+    pub guest_session_ttl_seconds: u64,
+    /// How often (seconds) the background sweep reaps expired guest
+    /// accounts (cascading their tokens). `0` disables the loop — lapsed
+    /// guests are still rejected at auth time by `resolve_principal`, so
+    /// disabling only forgoes the row cleanup. Default 1 hour.
+    #[serde(default = "default_guest_sweep_interval_secs")]
+    pub guest_sweep_interval_seconds: u64,
+}
+
+fn default_guest_session_ttl_secs() -> u64 {
+    12 * 60 * 60
+}
+
+fn default_guest_sweep_interval_secs() -> u64 {
+    60 * 60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,17 +172,284 @@ pub struct OauthClientConfig {
 /// degraded mode and never tries to embed. If present but unreachable
 /// at boot, same outcome — a warning is logged and recommend endpoints
 /// fall back to tag-only similarity.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmbedderConfigSection {
+    /// Primary embedder endpoint, tried first on every probe. Kept as a
+    /// single `url` for back-compat with existing configs.
     pub url: String,
+    /// Additional endpoints tried in order *after* `url` when the primary
+    /// is unreachable — e.g. a CPU fallback sidecar on the gateway host
+    /// that a watchdog brings up when the GPU box goes down. All endpoints
+    /// must serve the **same** `model_version` + `dim` (same checkpoint),
+    /// otherwise their embeddings are not comparable in the shared ANN.
+    #[serde(default)]
+    pub fallback_urls: Vec<String>,
+    /// How often (seconds) the gateway re-probes the endpoints in the
+    /// background and switches the active one to the first healthy. `0`
+    /// disables the loop (boot-time probe only — the legacy behaviour).
+    /// Defaults to 20.
+    #[serde(default = "default_probe_interval_secs")]
+    pub probe_interval_seconds: u64,
     /// Per-request timeout in seconds. Defaults to 30 — embedding a
     /// 120-second audio clip on CPU can take 10+ seconds.
     #[serde(default = "default_embedder_timeout_secs")]
     pub timeout_seconds: u64,
+    /// Optional bearer token for split-host deployments. When set,
+    /// every outgoing request to the embedder carries
+    /// `Authorization: Bearer <token>`. Must match the embedder's
+    /// `EMBEDDER_BEARER_TOKEN`. Omit (or leave null) for same-host
+    /// deployments where the docker bridge is the trust boundary. Shared
+    /// across the primary and all `fallback_urls`.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+}
+
+impl Default for EmbedderConfigSection {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            fallback_urls: Vec::new(),
+            probe_interval_seconds: default_probe_interval_secs(),
+            timeout_seconds: default_embedder_timeout_secs(),
+            bearer_token: None,
+        }
+    }
+}
+
+impl EmbedderConfigSection {
+    /// The full endpoint list in priority order: primary first, then each
+    /// fallback. Blank entries are dropped so a stray trailing comma or an
+    /// unset env-substituted value can't inject an empty URL.
+    pub fn effective_urls(&self) -> Vec<String> {
+        std::iter::once(self.url.clone())
+            .chain(self.fallback_urls.iter().cloned())
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect()
+    }
+}
+
+// Hand-rolled `Debug` so the embedder bearer token never lands in logs.
+// Distinguishes "set" from "unset" without revealing the value.
+impl std::fmt::Debug for EmbedderConfigSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbedderConfigSection")
+            .field("url", &self.url)
+            .field("fallback_urls", &self.fallback_urls)
+            .field("probe_interval_seconds", &self.probe_interval_seconds)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 fn default_embedder_timeout_secs() -> u64 {
     30
+}
+
+fn default_probe_interval_secs() -> u64 {
+    20
+}
+
+/// Recommender configuration. The embedding dim has to be fixed at boot
+/// because the ANN index commits to its dim on open — a mismatch between
+/// the config and the on-disk ANN file will fail loudly at startup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecommendConfig {
+    /// Shared dim of the audio + text embedding space. Must match what
+    /// the embedder sidecar produces. LAION-CLAP is 512; CLaMP 3 is 768.
+    /// Changing this requires deleting the ANN sidecar so it can be
+    /// rebuilt from SQLite at the new dim.
+    #[serde(default = "default_embedding_dim")]
+    pub embedding_dim: usize,
+
+    /// All-but-the-Top whitening of the content ANN. When true, the
+    /// gateway fits (or loads) a per-model whitening transform at boot and
+    /// the ANN stores + queries de-coned vectors — fixing CLaMP 3's
+    /// embedding anisotropy that made text-query stations cluster. When
+    /// false, the ANN holds raw vectors (legacy behaviour). Toggling this
+    /// triggers a one-time ANN rebuild at the next boot.
+    #[serde(default = "default_whitening_enabled")]
+    pub whitening_enabled: bool,
+
+    /// User-preference re-scoring. When true, the MMR relevance term is
+    /// tilted by each candidate's affinity (likes/plays raise it,
+    /// dislikes/skips lower it) — see `music_recommend::preference`.
+    /// Default false: the feature ships dark until explicitly enabled,
+    /// and a fresh install with no listening history is a no-op anyway
+    /// (every affinity is 0).
+    #[serde(default = "default_preference_enabled")]
+    pub preference_enabled: bool,
+
+    /// Weight `β` on the affinity bonus: `relevance += β · affinity`,
+    /// with `affinity ∈ [-1, 1]`. Kept on the order of the artist
+    /// penalty (~0.15) so preference reorders near-ties without
+    /// overriding a clear acoustic-relevance gap. Clamped `>= 0` at use.
+    #[serde(default = "default_preference_weight")]
+    pub preference_weight: f32,
+
+    /// Half-life (days) of the affinity decayed counter. Older signal
+    /// fades toward zero with this half-life, so taste can drift.
+    #[serde(default = "default_affinity_half_life_days")]
+    pub affinity_half_life_days: f32,
+
+    /// Additive relevance bonus a *liked* track earns when rescoring
+    /// recommendations (`relevance += like_bonus`). Unlike
+    /// `preference_weight` this is always-on — durable likes/dislikes are
+    /// an explicit signal that applies regardless of `preference_enabled`.
+    /// Same order as the preference weight: enough to pull a liked track in
+    /// from just outside the raw top-N without swamping acoustic similarity.
+    #[serde(default = "default_like_bonus")]
+    pub like_bonus: f32,
+
+    /// Additive relevance bonus a candidate earns for belonging to a
+    /// *liked album*. Always-on, same channel as `like_bonus`. Lower than
+    /// `like_bonus` so a directly-liked track always outranks a same-album
+    /// sibling — the track > album > artist contribution hierarchy.
+    #[serde(default = "default_like_bonus_album")]
+    pub like_bonus_album: f32,
+
+    /// Additive relevance bonus a candidate earns for belonging to a
+    /// *liked artist*. The smallest of the three (broadest signal).
+    /// `like_bonus_album + like_bonus_artist` is kept below `like_bonus`.
+    #[serde(default = "default_like_bonus_artist")]
+    pub like_bonus_artist: f32,
+
+    /// Anchor-leash radius `τ` (cosine, whitened space). A `/from-seeds`
+    /// candidate whose nearest-anchor similarity is `>= τ` pays no leash
+    /// penalty; below it the penalty grows quadratically — keeping a
+    /// *travelling* autoplay station within a soft boundary of the user's
+    /// anchored tracks. Only takes effect when the request supplies
+    /// `anchor_track_ids`; the per-request `leash_tau` overrides this default.
+    #[serde(default = "default_leash_tau")]
+    pub leash_tau: f32,
+
+    /// Anchor-leash strength `λ`. Scales the quadratic penalty past `τ`;
+    /// higher = tighter leash. `<= 0` disables the leash entirely. The
+    /// per-request `leash_lambda` overrides this default.
+    #[serde(default = "default_leash_lambda")]
+    pub leash_lambda: f32,
+
+    /// Recommendation provenance logging. When true, every served
+    /// recommendation (the request context + the ordered slate + per-item
+    /// scores) is persisted to the `recommendation` / `recommendation_item`
+    /// tables — the training substrate for future learning-to-rank /
+    /// supervised-metric models. Default on: it is pure append-only data
+    /// capture with no effect on what gets recommended. Set false to stop
+    /// capturing (e.g. to bound disk on a long-running deploy).
+    #[serde(default = "default_log_provenance")]
+    pub log_provenance: bool,
+
+    /// Autoplay recency exclusion (hours). Tracks the listener played within
+    /// this many hours are hard-excluded from recommendation candidate
+    /// generation, so a song heard minutes ago doesn't resurface in the next
+    /// refill. This is the primary fix for autoplay over-serving — a
+    /// deterministic pipeline otherwise re-picks the same head of the
+    /// catalogue. `0` disables. Sourced from `play_history`.
+    #[serde(default = "default_recently_played_exclude_hours")]
+    pub recently_played_exclude_hours: f32,
+
+    /// Autoplay serve-cooldown (hours). Tracks *served* by a track-valued
+    /// recommendation within this many hours — whether or not they were
+    /// played — are suppressed from the next refills, breaking the loop where
+    /// the station keeps re-offering a track the listener skips past. `0`
+    /// disables. Reads the `recommendation` log, so it is a no-op when
+    /// `log_provenance` is false (no data to read). Kept shorter than
+    /// `recently_played_exclude_hours` since serving is more frequent than
+    /// playing.
+    #[serde(default = "default_served_cooldown_hours")]
+    pub served_cooldown_hours: f32,
+
+    /// Exploration temperature for the final autoplay pick. Adds
+    /// `temperature · Gumbel(0,1)` noise to candidate relevance scores so the
+    /// top pick is sampled from `softmax(score / temperature)` rather than a
+    /// deterministic argmax — widening the served pool without abandoning
+    /// relevance (a clearly-better candidate still usually wins). Applied to
+    /// `/from-seeds` (the autoplay path). `0` disables (deterministic). Kept
+    /// on the order of the leash/preference scales so it only reshuffles
+    /// near-ties.
+    #[serde(default = "default_explore_temperature")]
+    pub explore_temperature: f32,
+}
+
+impl Default for RecommendConfig {
+    fn default() -> Self {
+        Self {
+            embedding_dim: default_embedding_dim(),
+            whitening_enabled: default_whitening_enabled(),
+            preference_enabled: default_preference_enabled(),
+            preference_weight: default_preference_weight(),
+            affinity_half_life_days: default_affinity_half_life_days(),
+            like_bonus: default_like_bonus(),
+            like_bonus_album: default_like_bonus_album(),
+            like_bonus_artist: default_like_bonus_artist(),
+            leash_tau: default_leash_tau(),
+            leash_lambda: default_leash_lambda(),
+            log_provenance: default_log_provenance(),
+            recently_played_exclude_hours: default_recently_played_exclude_hours(),
+            served_cooldown_hours: default_served_cooldown_hours(),
+            explore_temperature: default_explore_temperature(),
+        }
+    }
+}
+
+fn default_embedding_dim() -> usize {
+    512
+}
+
+fn default_whitening_enabled() -> bool {
+    true
+}
+
+fn default_preference_enabled() -> bool {
+    false
+}
+
+fn default_preference_weight() -> f32 {
+    0.15
+}
+
+fn default_affinity_half_life_days() -> f32 {
+    30.0
+}
+
+fn default_like_bonus() -> f32 {
+    music_recommend::LIKE_BONUS
+}
+
+fn default_like_bonus_album() -> f32 {
+    music_recommend::LIKE_BONUS_ALBUM
+}
+
+fn default_like_bonus_artist() -> f32 {
+    music_recommend::LIKE_BONUS_ARTIST
+}
+
+fn default_leash_tau() -> f32 {
+    music_recommend::DEFAULT_LEASH_TAU
+}
+
+fn default_leash_lambda() -> f32 {
+    music_recommend::DEFAULT_LEASH_LAMBDA
+}
+
+fn default_log_provenance() -> bool {
+    true
+}
+
+fn default_recently_played_exclude_hours() -> f32 {
+    4.0
+}
+
+fn default_served_cooldown_hours() -> f32 {
+    2.0
+}
+
+fn default_explore_temperature() -> f32 {
+    0.15
 }
 
 impl Default for OauthConfig {
@@ -99,6 +457,8 @@ impl Default for OauthConfig {
         Self {
             state_db: PathBuf::from("gateway-state.sqlite"),
             clients: Vec::new(),
+            guest_session_ttl_seconds: default_guest_session_ttl_secs(),
+            guest_sweep_interval_seconds: default_guest_sweep_interval_secs(),
         }
     }
 }
@@ -114,11 +474,128 @@ pub enum ConfigError {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path)?;
+        // The config holds the bearer token and the upstream Navidrome
+        // password in cleartext, so it should be owner-only (chmod 600).
+        // Warn — but don't refuse to boot — if it's group/world-accessible;
+        // failing hard here would be a footgun on a fresh deploy.
+        #[cfg(unix)]
+        warn_if_world_readable(path);
         let cfg = toml::from_str(&raw)?;
         Ok(cfg)
     }
 
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         Ok(toml::from_str(s)?)
+    }
+}
+
+/// True if any group or "other" permission bit is set — i.e. the file is
+/// readable (or worse) by someone other than its owner. `0o077` masks the
+/// group+other rwx bits; owner bits (`0o700`) are intentionally ignored.
+#[cfg(unix)]
+fn mode_is_group_or_world_accessible(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// Log a warning if the config file is accessible beyond its owner. Best
+/// effort: a stat failure is downgraded to debug rather than escalated,
+/// since the file was just read successfully.
+#[cfg(unix)]
+fn warn_if_world_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode();
+            if mode_is_group_or_world_accessible(mode) {
+                tracing::warn!(
+                    path = %path.display(),
+                    mode = format!("{:o}", mode & 0o777),
+                    "gateway config is group/world-accessible but holds the \
+                     bearer token and upstream password in cleartext; \
+                     restrict it with: chmod 600 {}",
+                    path.display(),
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "could not stat gateway config for a permission check",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let server = ServerConfig {
+            listen: "0.0.0.0:8443".parse().unwrap(),
+            tls_cert: PathBuf::from("/etc/cert.pem"),
+            tls_key: PathBuf::from("/etc/key.pem"),
+            bearer_token: "super-secret-bearer".to_string(),
+            static_dir: None,
+        };
+        let upstream = UpstreamConfig {
+            navidrome_url: "http://nav.lan:4533".to_string(),
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let embedder = EmbedderConfigSection {
+            url: "http://gpu.lan:9000".to_string(),
+            timeout_seconds: 30,
+            bearer_token: Some("embedder-secret".to_string()),
+            ..Default::default()
+        };
+
+        let server_dbg = format!("{server:?}");
+        assert!(!server_dbg.contains("super-secret-bearer"));
+        assert!(server_dbg.contains("[REDACTED]"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(server_dbg.contains("/etc/cert.pem"));
+
+        let upstream_dbg = format!("{upstream:?}");
+        assert!(!upstream_dbg.contains("hunter2"));
+        assert!(upstream_dbg.contains("[REDACTED]"));
+        assert!(upstream_dbg.contains("alice"));
+
+        let embedder_dbg = format!("{embedder:?}");
+        assert!(!embedder_dbg.contains("embedder-secret"));
+        assert!(embedder_dbg.contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_predicate_flags_group_and_world_access() {
+        // Owner-only is fine.
+        assert!(!mode_is_group_or_world_accessible(0o600));
+        assert!(!mode_is_group_or_world_accessible(0o400));
+        assert!(!mode_is_group_or_world_accessible(0o700));
+        // Any group or other bit trips it.
+        assert!(mode_is_group_or_world_accessible(0o640)); // group read
+        assert!(mode_is_group_or_world_accessible(0o604)); // other read
+        assert!(mode_is_group_or_world_accessible(0o644));
+        assert!(mode_is_group_or_world_accessible(0o660));
+        assert!(mode_is_group_or_world_accessible(0o666));
+    }
+
+    #[test]
+    fn debug_distinguishes_unset_embedder_token() {
+        let embedder = EmbedderConfigSection {
+            url: "http://gpu.lan:9000".to_string(),
+            timeout_seconds: 30,
+            bearer_token: None,
+            ..Default::default()
+        };
+        // Unset reads as `None`, not `[REDACTED]`, so the absence of a
+        // token stays diagnosable.
+        let dbg = format!("{embedder:?}");
+        assert!(dbg.contains("None"));
+        assert!(!dbg.contains("[REDACTED]"));
     }
 }

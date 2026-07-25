@@ -1,0 +1,162 @@
+# syntax=docker/dockerfile:1.7
+#
+# Embedder sidecar — CLAP variant, AMD ROCm GPU inference.
+#
+# Phase B step 2: same image shape as Dockerfile.clap but with the
+# PyTorch ROCm 6.4 wheels instead of CPU wheels. Targets the
+# native RDNA4 / gfx1201 support but
+# any ROCm-supported GPU works — gfx1201 coverage in rocm6.4 wheels
+# is sufficient that no HSA_OVERRIDE_GFX_VERSION is needed on this
+# hardware. Set it at runtime if your card needs spoofing.
+#
+# Build from the repo root:
+#
+#   docker build -f docker/embedder/Dockerfile.clap-rocm \
+#                -t crates-music/embedder-clap-rocm .
+#
+# The image is ~23 GB. The rocm6.4 torch wheel is ~3.5 GB
+# compressed but unpacks the entire ROCm runtime (MIOpen kernel
+# binaries, hipBLAS, rccl, etc.) for every supported gfx target,
+# inflating dramatically on disk. Build time on a fast link is
+# ~10-15 minutes — most of it is `pip install torch`.
+#
+# Runtime: needs /dev/kfd + /dev/dri/render* passthrough and the
+# container user in the `render` (and optionally `video`) group.
+# See docker-compose.clap-rocm.yml for the wiring.
+
+ARG PYTHON_VERSION=3.12
+
+# ─── Stage 1: resolve & install deps into site-packages ───────────────
+FROM python:${PYTHON_VERSION}-slim AS deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY services/embedder/pyproject.toml services/embedder/README.md ./
+
+# Same base FastAPI/uvicorn/pydantic deps as the stub + CPU CLAP
+# variants — no GPU surface here yet.
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        'fastapi>=0.115' \
+        'uvicorn[standard]>=0.32' \
+        'pydantic>=2.9' \
+        'numpy>=1.26' \
+        'python-multipart>=0.0.20'
+
+# PyTorch ROCm 6.4 wheels. Use the ROCm index *exclusively* for this
+# install — adding `--extra-index-url https://pypi.org/simple` lets
+# PyPI's CUDA-flavoured torch (currently 2.x with 13.0.x cuda-toolkit
+# pulled in) outrank rocm6.4's 2.9.x, and pip silently picks the
+# higher version. The result on a previous build attempt was nvidia-*
+# wheels ballooning the image by ~5 GB while still failing on AMD
+# hardware at runtime. Pin to the rocm6.4 index's current stable head
+# (2.9.x torch) and let pip resolve torchaudio/torchvision/triton
+# alongside it from the same index — they all coexist there.
+#
+# pytorch-triton-rocm is a hard transitive dep on Linux. PyPI does
+# not host it, so we list it explicitly so the resolver knows to
+# grab it from the same index.
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        --index-url https://download.pytorch.org/whl/rocm6.4 \
+        'torch==2.9.*' \
+        'torchaudio==2.9.*' \
+        'torchvision==0.24.*' \
+        'pytorch-triton-rocm'
+
+# Remaining audio stack — same as the CPU variant. `umap-learn`
+# powers `embedder.reduce` / the `/reduce` endpoint; numba/scipy/
+# sklearn arrive transitively via librosa so this is a cheap add.
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        'laion-clap>=1.1.6' \
+        'librosa>=0.10' \
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
+
+COPY services/embedder/embedder ./embedder
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 --no-deps .
+
+# ─── Stage 2: slim runtime ────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Runtime system deps. Same as the CPU variant — ROCm runtime
+# libraries ship inside the torch wheel, so we don't install
+# rocm-libs/hip-runtime via apt. This keeps the image free of
+# `rocm/dev-ubuntu` lineage and lets us upgrade ROCm versions by
+# bumping the wheel index alone.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libsndfile1 \
+        ffmpeg \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uid/gid pinned to 10001 (matches gateway + stub + CPU CLAP
+# embedder, so the shared `gw-data` volume's file ownership lines
+# up across all four images). The container additionally needs the
+# host's `render` (and sometimes `video`) GIDs to access /dev/kfd
+# and /dev/dri/render*; that's added at runtime via compose's
+# `group_add:`, not baked into the image, because the GIDs are
+# host-specific.
+RUN groupadd --system --gid 10001 embedder \
+ && useradd --system --uid 10001 --gid embedder \
+        --home-dir /var/empty --shell /usr/sbin/nologin embedder
+
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+
+# HuggingFace cache prebake — same rationale as Dockerfile.clap.
+# laion-clap pulls bert-base-uncased's tokenizer at import time and
+# the full roberta-base model inside `CLAP_Module(...)`. Without
+# baking these in, every boot would crash with a PermissionError on
+# /var/empty.
+ENV HF_HOME=/opt/huggingface \
+    TRANSFORMERS_OFFLINE=1
+RUN mkdir -p ${HF_HOME} \
+ && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python -c \
+        "from transformers import BertTokenizer, RobertaModel; \
+         BertTokenizer.from_pretrained('bert-base-uncased'); \
+         RobertaModel.from_pretrained('roberta-base')" \
+ && chmod -R a+rX ${HF_HOME}
+
+RUN mkdir -p /models && chown embedder:embedder /models
+
+# MIOpen (AMD's deep-learning kernel library) JIT-compiles conv
+# kernels for the local GPU at first use and caches the compiled
+# result on disk. The default cache location is $HOME/.cache/miopen,
+# but our `embedder` user has HOME=/var/empty (non-writable), so the
+# cache write fails with the catch-all `miopenStatusUnknownError` —
+# every audio embed crashes the first time it touches a conv layer.
+# Point MIOpen at a writable path baked into the image so the cache
+# Just Works without runtime env wiring. /var/cache/miopen lives in
+# the container's writable layer; a `docker compose down` discards
+# it and the next boot eats the ~2.5 s cold-cache penalty once.
+RUN mkdir -p /var/cache/miopen && chown embedder:embedder /var/cache/miopen
+
+USER embedder
+
+ENV EMBEDDER_BACKEND=clap \
+    CLAP_CHECKPOINT=/models/clap.pt \
+    PYTHONUNBUFFERED=1 \
+    MIOPEN_USER_DB_PATH=/var/cache/miopen \
+    MIOPEN_CUSTOM_CACHE_DIR=/var/cache/miopen
+    # NOTE: HSA_OVERRIDE_GFX_VERSION intentionally NOT set here.
+    # rocm6.4 wheels already cover gfx1201 (RDNA4) on the reference
+    # RDNA4, and an unconditional override would silently mis-route
+    # kernels on cards that *don't* need it. Operators whose hardware
+    # falls outside the wheel's stable set should pass it in via
+    # compose env or `-e`.
+
+EXPOSE 9000
+
+# start_period bumped to 60 s. ROCm CLAP load is faster than CPU
+# (~5–10 s on an RDNA4 GPU once the device is initialised) but the
+# first call to torch.cuda.is_available() inside the wheel does a
+# noticeable amount of device probing — keep some headroom.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl --silent --fail http://localhost:9000/healthz || exit 1
+
+CMD ["uvicorn", "embedder.app:app", "--host", "0.0.0.0", "--port", "9000"]

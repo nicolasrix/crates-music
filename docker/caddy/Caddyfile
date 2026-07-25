@@ -1,0 +1,99 @@
+# Caddy reverse proxy for the crates-music gateway.
+#
+# Terminates public TLS with a Let's Encrypt certificate (auto-renewed
+# every 60 days via DNS-01 against Cloudflare), then forwards to the
+# gateway container over the internal docker network.
+#
+# Required runtime env:
+#   CLOUDFLARE_API_TOKEN   — scoped Zone:DNS:Edit on example.com only
+#   GATEWAY_PUBLIC_HOST    — e.g. crates.example.com (the public name)
+#   GATEWAY_UPSTREAM       — e.g. gateway:8443 (the internal service:port)
+#   LE_CONTACT_EMAIL       — registration email for LE expiry warnings
+#
+# Switch to LE staging while testing by setting:
+#   ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory
+# (LE production rate-limits at 5 duplicate certs per week; staging
+# certs are not browser-trusted but exercise the same code path.)
+{
+	email {$LE_CONTACT_EMAIL}
+	# Default ACME endpoint is LE production. Override to staging via
+	# ACME_DIRECTORY=… in .env while iterating on the issuance flow.
+	acme_ca {$ACME_DIRECTORY:https://acme-v02.api.letsencrypt.org/directory}
+
+	# Override the HTTPS port when 443 is unavailable (e.g. many NAS platforms
+	# where Traefik already binds :443). Cert issuance is unaffected —
+	# DNS-01 challenge is port-independent, and certs are scoped to
+	# hostnames, not ports. Default 443 keeps local dev unchanged.
+	https_port {$CADDY_HTTPS_PORT:443}
+
+	# Skip the automatic :80 HTTP-redirect listener. With a non-default
+	# HTTPS port Caddy doesn't know where to redirect *to*, and on
+	# port 80 is often taken anyway. Clients use the explicit https://…
+	# URL with port, including the OAuth redirect_uri.
+	auto_https disable_redirects
+}
+
+{$GATEWAY_PUBLIC_HOST} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	# Gateway speaks HTTPS internally with a mkcert-issued self-signed
+	# cert. Skip verification on this hop — the connection lives
+	# entirely inside the docker network (gateway is `expose`d, not
+	# published to the host), so it's not exposed to the LAN. The
+	# public TLS guarantee lives at *this* boundary, not the loopback.
+	reverse_proxy https://{$GATEWAY_UPSTREAM} {
+		transport http {
+			tls_insecure_skip_verify
+		}
+
+		# X-Forwarded-For and X-Forwarded-Proto are set by reverse_proxy
+		# by default — don't restate them. X-Real-IP isn't a default,
+		# so we add it for the gateway's tracing layer (which prefers
+		# a single-IP field over parsing the XFF list).
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		# Don't leak the Caddy version in 4xx/5xx error pages.
+		-Server
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# Clickjacking defence: refuse to be framed. `frame-ancestors`
+		# (in the CSP below) covers modern browsers; X-Frame-Options is
+		# the legacy fallback for older ones.
+		X-Frame-Options "DENY"
+
+		# HSTS: force HTTPS for a year. Enabled now that public-trust LE
+		# issuance + DNS-01 auto-renewal is established (prod cutover
+		# done). No `preload` — that's a separate, hard-to-undo commitment
+		# requiring submission to the browser preload list. Caveat that
+		# motivated the earlier caution: once a client has seen this header
+		# it refuses plain-HTTP fallback to this host for `max-age`
+		# seconds, so a prolonged cert outage locks clients out. The
+		# renewal cycle has been observed succeeding, so that's acceptable.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# Content-Security-Policy, tuned to exactly what the SPA loads:
+		#   - script-src 'self': all JS is hashed, same-origin Vite assets
+		#     — the production index.html emits no inline script, so this
+		#     stays strict (real XSS protection, no 'unsafe-inline').
+		#   - style-src adds 'unsafe-inline' (React inline style attrs +
+		#     runtime <style> injection) and the Google Fonts CSS host.
+		#   - font-src adds the Google Fonts file host (gstatic).
+		#   - connect-src 'self' covers the gateway API and the
+		#     same-origin wss:// sync socket.
+		#   - img/media allow data:/blob: for placeholders + audio.
+		#   - object-src 'none', base-uri 'self', form-action 'self',
+		#     frame-ancestors 'none' lock down the remaining vectors.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}

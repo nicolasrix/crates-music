@@ -87,6 +87,7 @@ fn build_embedder_for(server: &MockServer) -> EmbedderClient {
     EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().unwrap(),
         timeout: Duration::from_secs(2),
+        bearer_token: None,
     })
     .unwrap()
 }

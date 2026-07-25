@@ -24,8 +24,35 @@ clap = [
     # deps). Linux-gated because non-Linux platforms get CPU torch
     # without this triton variant.
     "pytorch-triton-rocm; sys_platform == 'linux'",
-    "laion-clap>=1.1.6",
+    # Upper-bounded so a surprise major/minor can't silently change the
+    # checkpoint-loading path (torch.load unpickles). Bump deliberately.
+    "laion-clap>=1.1.6,<1.2",
     "librosa>=0.10",
+    "soundfile>=0.12",
+]
+# Real CLaMP 3 backend — MERT-v1-95M frontend + CLaMP 3 audio encoder over
+# the vendored `embedder._clamp3` package. Same ROCm wheel routing as `clap`
+# (the [tool.uv.sources] overrides below are package-level, so torch /
+# torchaudio resolve from the ROCm index for this extra too). Kept optional
+# so the dev/test loop — which uses the stub backend — never pulls torch.
+clamp3 = [
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    # See the clap extra: direct-listed so the rocm-index override fires;
+    # Linux-gated so non-Linux dev installs get CPU torch.
+    "pytorch-triton-rocm; sys_platform == 'linux'",
+    # MERT (HuBERT-style) + the CLaMP 3 / MusicHuBERT model classes all come
+    # from transformers. Pinned >=4.40 to match upstream CLaMP 3's tested
+    # version (Hubert + Wav2Vec2FeatureExtractor APIs are stable from there).
+    "transformers>=4.40",
+    # xlm-roberta-base (the CLaMP 3 text branch) is a SentencePiece tokenizer.
+    # Without this package transformers silently falls back to a 5-token vocab
+    # (every word → <unk>), which collapses every text/station query to an
+    # identical embedding. MUST be present for embed_text to mean anything.
+    "sentencepiece>=0.2",
+    # nnAudio backs the vendored MusicHubertModel's spectrogram frontend; it
+    # is imported unconditionally via `embedder._clamp3.__init__`.
+    "nnAudio>=0.3",
     "soundfile>=0.12",
 ]
 dev = [

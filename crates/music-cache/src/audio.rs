@@ -15,6 +15,8 @@
 //! truncated-but-canonical blob.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -107,8 +109,12 @@ pub struct AudioCacheStats {
 pub struct AudioCache {
     root: PathBuf,
     pool: SqlitePool,
-    regular_budget_bytes: u64,
-    pinned_budget_bytes: u64,
+    // Budgets are `Arc<AtomicU64>` (not plain `u64`) so the running TUI's
+    // Settings view can lower them at runtime through a shared `AudioCache`
+    // handle — `set_budgets` takes `&self`, and every `.clone()` of the cache
+    // observes the change (shared atomics, not per-clone copies).
+    regular_budget_bytes: Arc<AtomicU64>,
+    pinned_budget_bytes: Arc<AtomicU64>,
 }
 
 impl AudioCache {
@@ -135,17 +141,28 @@ impl AudioCache {
         Ok(Self {
             root: root.to_path_buf(),
             pool,
-            regular_budget_bytes,
-            pinned_budget_bytes,
+            regular_budget_bytes: Arc::new(AtomicU64::new(regular_budget_bytes)),
+            pinned_budget_bytes: Arc::new(AtomicU64::new(pinned_budget_bytes)),
         })
     }
 
     pub fn regular_budget_bytes(&self) -> u64 {
-        self.regular_budget_bytes
+        self.regular_budget_bytes.load(Ordering::Relaxed)
     }
 
     pub fn pinned_budget_bytes(&self) -> u64 {
+        self.pinned_budget_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Change the budgets on a live cache. The lowered regular budget takes
+    /// effect on the next `put`; call [`Self::evict_lru_to_fit`] afterwards to
+    /// reclaim space immediately. The pinned budget only gates future pins —
+    /// already-pinned entries are never LRU-evicted.
+    pub fn set_budgets(&self, regular_budget_bytes: u64, pinned_budget_bytes: u64) {
+        self.regular_budget_bytes
+            .store(regular_budget_bytes, Ordering::Relaxed);
         self.pinned_budget_bytes
+            .store(pinned_budget_bytes, Ordering::Relaxed);
     }
 
     fn blob_path_for(&self, key: &AudioKey) -> PathBuf {
@@ -159,6 +176,25 @@ impl AudioCache {
              FROM audio_entries WHERE key = ?",
         )
         .bind(&canonical)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_entry))
+    }
+
+    /// Find any cached entry for a track id, regardless of `(bitrate, codec)`.
+    /// A pinned entry wins, then the most-recently-accessed. Lets callers that
+    /// only hold a track id (offline playback, quality-agnostic unpin) locate
+    /// a blob that was cached under a *different* quality than the one they'd
+    /// derive today — otherwise a track pinned at one quality becomes invisible
+    /// (unplayable offline, unable to be unpinned) after the quality setting
+    /// changes.
+    pub async fn find_by_track(&self, track_id: &str) -> Result<Option<AudioEntry>, Error> {
+        let row = sqlx::query(
+            "SELECT key, track_id, bitrate, codec, blob_path, bytes, last_accessed_at, pinned \
+             FROM audio_entries WHERE track_id = ? \
+             ORDER BY pinned DESC, last_accessed_at DESC LIMIT 1",
+        )
+        .bind(track_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.as_ref().map(row_to_entry))
@@ -282,8 +318,9 @@ impl AudioCache {
         .fetch_one(&self.pool)
         .await?;
         let projected = i64_to_u64(pinned_total).saturating_add(entry_bytes);
-        if projected > self.pinned_budget_bytes {
-            let over_by = projected - self.pinned_budget_bytes;
+        let pinned_budget = self.pinned_budget_bytes();
+        if projected > pinned_budget {
+            let over_by = projected - pinned_budget;
             return Ok(PinOutcome::WouldExceedBudget { over_by });
         }
 
@@ -347,10 +384,10 @@ impl AudioCache {
         Ok(AudioCacheStats {
             regular_count: i64_to_u64(reg_count),
             regular_bytes: i64_to_u64(reg_bytes),
-            regular_budget_bytes: self.regular_budget_bytes,
+            regular_budget_bytes: self.regular_budget_bytes(),
             pinned_count: i64_to_u64(pin_count),
             pinned_bytes: i64_to_u64(pin_bytes),
-            pinned_budget_bytes: self.pinned_budget_bytes,
+            pinned_budget_bytes: self.pinned_budget_bytes(),
         })
     }
 
@@ -368,7 +405,7 @@ impl AudioCache {
                     .fetch_one(&self.pool)
                     .await?;
             let total_u64 = i64_to_u64(total);
-            if total_u64 <= self.regular_budget_bytes || count <= 1 {
+            if total_u64 <= self.regular_budget_bytes() || count <= 1 {
                 return Ok(total_u64);
             }
 

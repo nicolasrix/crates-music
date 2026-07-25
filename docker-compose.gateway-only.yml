@@ -1,0 +1,59 @@
+# Split-host deployment — gateway-only side.
+#
+# Use this *instead of* docker-compose.yml when the embedder runs on a
+# different machine (typically the GPU box). The gateway here points
+# at a remote EMBEDDER_URL and carries a shared bearer token.
+#
+# Bring up:
+#
+#   cp docker/.env.example .env
+#   # Fill in NAVIDROME_*, EMBEDDER_URL=https://gpu-box.lan:9000,
+#   # and EMBEDDER_BEARER_TOKEN=<a long random string>.
+#   docker compose -f docker-compose.gateway-only.yml up --build
+#
+# The token must match the EMBEDDER_BEARER_TOKEN set on the embedder
+# host (see docker-compose.embedder-only.yml). Generate one with
+#   openssl rand -hex 32
+# and share it between the two hosts via your usual secrets path.
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    image: crates-music/gateway:dev
+    container_name: crates-gateway
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL:?set NAVIDROME_URL in .env}
+      NAVIDROME_USERNAME: ${NAVIDROME_USERNAME:?set NAVIDROME_USERNAME in .env}
+      NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD:?set NAVIDROME_PASSWORD in .env}
+      # Remote embedder URL — required in split-host mode. Use http://
+      # over the LAN, https:// only if you front the embedder with a
+      # reverse proxy that terminates TLS.
+      EMBEDDER_URL: ${EMBEDDER_URL:?set EMBEDDER_URL in .env (split-host mode)}
+      # Shared secret authenticating the gateway → embedder hop. REQUIRED
+      # in split-host mode: the remote embedder enforces it (see
+      # docker-compose.embedder-only.yml), so an unset token here means the
+      # gateway gets 401s and silently drops to degraded mode. Must match
+      # the value on the embedder host.
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:?set EMBEDDER_BEARER_TOKEN in .env — must match the embedder host (docker-compose.embedder-only.yml)}
+      OAUTH_WEB_REDIRECT_URIS: ${OAUTH_WEB_REDIRECT_URIS:-https://gateway.local:8443/oauth/callback}
+      GATEWAY_HOSTNAME: ${GATEWAY_HOSTNAME:-gateway.local}
+      RUST_LOG: ${RUST_LOG:-info,music_gateway=info,sqlx=warn}
+    volumes:
+      - gw-data:/data
+    ports:
+      - "${GATEWAY_PORT:-8443}:8443"
+    # No depends_on — the embedder is on a different host. The boot
+    # probe inside the gateway logs a warning and degrades gracefully
+    # if the remote embedder is unreachable at start time.
+    restart: unless-stopped
+    mem_limit: ${GATEWAY_MEM_LIMIT:-1g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
+
+volumes:
+  gw-data:

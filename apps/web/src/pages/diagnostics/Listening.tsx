@@ -14,7 +14,6 @@ import {
   RecentlyPlayedEntry,
   fetchRecentlyPlayed,
 } from "../../api/diagnostics";
-import { Layout } from "../../components/Layout";
 import { Link } from "../../router";
 import { fmtRelativePast } from "../../utils/format";
 import { DiagSection, ErrorLine, REFRESH_MS, fmtRecentTime } from "./shared";
@@ -31,18 +30,16 @@ const WINDOW_OPTIONS: ReadonlyArray<{ label: string; ms: number | null }> = [
 
 export function Listening() {
   return (
-    <Layout breadcrumb="diagnostics / listening">
-      <div className="section">
-        <div className="section-head">
-          <h2>listening</h2>
-          <span className="count">refresh {REFRESH_MS / 1000}s</span>
-        </div>
-
-        <DiagSection title="recently played">
-          <RecentlyPlayedSection />
-        </DiagSection>
+    <div className="section">
+      <div className="section-head">
+        <h2>listening</h2>
+        <span className="count">refresh {REFRESH_MS / 1000}s</span>
       </div>
-    </Layout>
+
+      <DiagSection title="recently played">
+        <RecentlyPlayedSection />
+      </DiagSection>
+    </div>
   );
 }
 

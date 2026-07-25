@@ -1,0 +1,172 @@
+# syntax=docker/dockerfile:1.7
+#
+# Embedder sidecar — CLaMP 3 variant, AMD ROCm GPU inference.
+#
+# GPU twin of Dockerfile.clamp3 (CPU): same CLaMP 3 pipeline (MERT-v1-95M
+# frontend + CLaMP 3 audio encoder over the vendored `embedder._clamp3`
+# package, 768-dim), but on the rocm6.4 PyTorch wheels instead of CPU.
+# Targets RDNA4 / gfx1201; any
+# ROCm-supported card works.
+#
+# Build from the repo root:
+#
+#   docker build -f docker/embedder/Dockerfile.clamp3-rocm \
+#                -t crates-music/embedder-clamp3-rocm .
+#
+# The image is large (~23 GB) — the rocm6.4 torch wheel unpacks the full
+# ROCm runtime for every supported gfx target. Build time ~10-15 min,
+# most of it `pip install torch`.
+#
+# Runtime: needs /dev/kfd + /dev/dri passthrough and the container user
+# in the `render` (and optionally `video`) group. See
+# docker-compose.clamp3-rocm.yml for the wiring.
+#
+# The saas checkpoint is NOT baked — bind-mounted at runtime. MERT-v1-95M
+# and the xlm-roberta-base text branch ARE baked into the HF cache (the
+# CLaMP3Model constructor loads the text model even for audio-only, and
+# the unprivileged runtime user has no writable HF cache).
+
+ARG PYTHON_VERSION=3.12
+
+# ─── Stage 1: resolve & install deps into site-packages ───────────────
+FROM python:${PYTHON_VERSION}-slim AS deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY services/embedder/pyproject.toml services/embedder/README.md ./
+
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        'fastapi>=0.115' \
+        'uvicorn[standard]>=0.32' \
+        'pydantic>=2.9' \
+        'numpy>=1.26' \
+        'python-multipart>=0.0.20'
+
+# PyTorch ROCm 6.4 wheels — same index discipline as Dockerfile.clap-rocm:
+# use the ROCm index *exclusively* (no --extra-index-url to PyPI) or the
+# resolver silently prefers PyPI's CUDA-flavoured torch and balloons the
+# image with unusable nvidia-* wheels. No torchvision (unlike the CLAP
+# image, nothing in the CLaMP 3 path imports it). pytorch-triton-rocm is a
+# hard transitive on Linux and is not on PyPI, so list it explicitly.
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        --index-url https://download.pytorch.org/whl/rocm6.4 \
+        'torch==2.9.*' \
+        'torchaudio==2.9.*' \
+        'pytorch-triton-rocm'
+
+# Remaining stack from PyPI (same as the CPU clamp3 variant):
+#   - transformers: MERT (HuBERT) + CLaMP 3 / MusicHuBERT classes +
+#     the xlm-roberta-base text branch.
+#   - nnAudio: spectrogram frontend imported via _clamp3.__init__.
+#   - soundfile: in-memory decode (needs libsndfile1 at runtime).
+#   - umap-learn: powers embedder.reduce / the /reduce endpoint.
+RUN pip install --no-cache-dir --default-timeout=300 --retries=5 \
+        'transformers>=4.40' \
+        'sentencepiece>=0.2' \
+        'nnAudio>=0.3' \
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
+
+COPY services/embedder/embedder ./embedder
+RUN pip install --no-cache-dir --no-deps .
+
+# ─── Stage 2: slim runtime ────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Runtime system deps. ROCm runtime libraries ship inside the torch wheel,
+# so no rocm-libs/hip-runtime via apt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libsndfile1 \
+        ffmpeg \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uid/gid 10001 — matches gateway + other embedders for the shared
+# gw-data volume. The host's render/video GIDs for /dev/kfd + /dev/dri
+# are added at runtime via compose `group_add`, not baked (host-specific).
+RUN groupadd --system --gid 10001 embedder \
+ && useradd --system --uid 10001 --gid embedder \
+        --home-dir /var/empty --shell /usr/sbin/nologin embedder
+
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+
+# HuggingFace cache prebake — same rationale as Dockerfile.clamp3.
+# CLaMP3Model loads xlm-roberta-base (text branch) at construction; MERT
+# loads via MusicHubertModel.from_pretrained(MERT_FOLDER). Baking both lets
+# MERT_FOLDER be the hub id with TRANSFORMERS_OFFLINE=1, and validates the
+# MERT weights load into the vendored architecture at build time. Runs
+# before EMBEDDER_BACKEND is set, so the package import falls back to the
+# stub and never touches the not-yet-mounted checkpoint.
+ENV HF_HOME=/opt/huggingface \
+    TRANSFORMERS_OFFLINE=1
+RUN mkdir -p ${HF_HOME} \
+ && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python -c \
+        "from transformers import AutoModel, AutoTokenizer; \
+         AutoModel.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         from embedder._clamp3.musichubert_model import MusicHubertModel; \
+         MusicHubertModel.from_pretrained('m-a-p/MERT-v1-95M')" \
+ && python -c \
+        "from transformers import AutoTokenizer; \
+         t=AutoTokenizer.from_pretrained('FacebookAI/xlm-roberta-base'); \
+         assert t('death metal')['input_ids']!=t('smooth jazz')['input_ids'], \
+           'tokenizer vocab not baked: distinct text tokenizes identically'; \
+         assert t.vocab_size>1000, f'tokenizer vocab too small: {t.vocab_size}'" \
+ && chmod -R a+rX ${HF_HOME}
+
+RUN mkdir -p /models && chown embedder:embedder /models
+
+# MIOpen JIT-compiles conv kernels for the local GPU on first use and
+# caches them on disk. Default is $HOME/.cache/miopen, but our embedder
+# user has HOME=/var/empty (non-writable) → the cache write fails with
+# miopenStatusUnknownError and every audio embed crashes on its first
+# conv layer. Point MIOpen at a writable baked path. Same fix as
+# Dockerfile.clap-rocm.
+RUN mkdir -p /var/cache/miopen && chown embedder:embedder /var/cache/miopen
+
+# numba (pulled in by umap-learn, which powers /reduce) JIT-compiles its
+# @njit(cache=True) kernels and tries to write the cache next to the
+# read-only site-packages — with no writable HOME it raises
+# "cannot cache function 'rdist': no locator available" at *import* time,
+# crashing `import umap` (and as a RuntimeError it bypasses /reduce's
+# graceful ImportError→503 path). Point numba at a writable baked dir so
+# the projection endpoint works. Same class of fix as MIOpen above.
+RUN mkdir -p /var/cache/numba && chown embedder:embedder /var/cache/numba
+
+USER embedder
+
+# CLAMP3_CHECKPOINT defaults to the canonical upstream saas filename. The
+# filename is the embedding model_version (Clamp3Embedder._derive_version)
+# and the gateway content-addresses embeddings by it — do NOT rename the
+# checkpoint. Bind-mount the real file at this path (see compose).
+ENV EMBEDDER_BACKEND=clamp3 \
+    CLAMP3_CHECKPOINT=/models/weights_clamp3_saas_h_size_768_t_model_FacebookAI_xlm-roberta-base_t_length_128_a_size_768_a_layers_12_a_length_128_s_size_768_s_layers_12_p_size_64_p_length_512.pth \
+    MERT_FOLDER=m-a-p/MERT-v1-95M \
+    PYTHONUNBUFFERED=1 \
+    MIOPEN_USER_DB_PATH=/var/cache/miopen \
+    MIOPEN_CUSTOM_CACHE_DIR=/var/cache/miopen \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMBA_NUM_THREADS=4 \
+    NUMBA_CACHE_DIR=/var/cache/numba
+    # NOTE: HSA_OVERRIDE_GFX_VERSION intentionally NOT set — rocm6.4 wheels
+    # cover gfx1201 (RDNA4). Pass it via compose
+    # env if your card needs ISA spoofing.
+
+EXPOSE 9000
+
+# start_period 120 s: GPU device init + loading the saas checkpoint + MERT
+# + xlm-roberta (several GB). Faster than CPU but the first
+# torch.cuda.is_available() probe + MIOpen warmup add latency. The
+# gateway's depends_on health gate waits on this.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD curl --silent --fail http://localhost:9000/healthz || exit 1
+
+CMD ["uvicorn", "embedder.app:app", "--host", "0.0.0.0", "--port", "9000"]

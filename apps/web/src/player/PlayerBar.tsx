@@ -4,6 +4,7 @@
 // fill tints to match the page the user is on.
 
 import {
+  Cast,
   ListMusic,
   Pause,
   Play,
@@ -11,12 +12,16 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Speaker,
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { useArtwork } from "../components/ArtworkPalette";
+import { artAttrs, useCoverPalette } from "../components/ArtworkPalette";
+import { coverArtUrl } from "../api/client";
+import { beginTrackDrag, usePointerFine } from "../dnd/trackDrag";
 import { Cover } from "../components/Cover";
+import { EntityRating } from "../components/EntityRating";
 import { TrackRowMenu } from "../components/TrackRowMenu";
 import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
@@ -27,12 +32,34 @@ import { useRecommendationFeedback } from "./useRecommendationFeedback";
 import { VolumeControl } from "./VolumeControl";
 
 export function PlayerBar() {
-  const { nowPlaying, isPlaying, togglePlay, next, prev, hasNext, hasPrev, queueLength } =
-    usePlayer();
-  const { palette } = useArtwork();
+  const {
+    nowPlaying,
+    isPlaying,
+    togglePlay,
+    next,
+    prev,
+    hasNext,
+    hasPrev,
+    queueLength,
+    outputEnabled,
+    setOutputEnabled,
+  } = usePlayer();
+  // Tint the bar from the *playing* track's cover — not the page being
+  // browsed. Same 600px URL as the detail pages, so the palette query
+  // cache is shared with them.
+  const palette = useCoverPalette(
+    nowPlaying
+      ? coverArtUrl(nowPlaying.coverArt, 600, nowPlaying.album ?? nowPlaying.title)
+      : null,
+  );
   const { path } = useRoute();
   const { autoplay, setAutoplay } = useAutoplay();
   const onQueuePage = path === "/queue";
+  // Desktop-only: drag the now-playing card onto a sidebar playlist. Same
+  // pointer:fine gate as the tracklist rows.
+  const pointerFine = usePointerFine();
+  // Fade the card while it's the drag source (mirrors the tracklist rows).
+  const [dragging, setDragging] = useState(false);
 
   // Empty state — keep the chrome bar visible so the layout doesn't shift.
   if (!nowPlaying) {
@@ -47,11 +74,23 @@ export function PlayerBar() {
     );
   }
 
-  const artAccent = palette?.accent ?? "var(--accent)";
+  const art = artAttrs(palette);
 
   return (
-    <div className="player" style={{ ["--art-accent" as never]: artAccent }}>
-      <div className="np">
+    <div className={`player ${art.className}`} style={art.style}>
+      <div
+        className={`np${pointerFine ? " is-draggable" : ""}${dragging ? " is-dragging" : ""}`}
+        draggable={pointerFine}
+        onDragStart={
+          pointerFine
+            ? (e) => {
+                beginTrackDrag(e.dataTransfer, nowPlaying.id, nowPlaying.title);
+                setDragging(true);
+              }
+            : undefined
+        }
+        onDragEnd={pointerFine ? () => setDragging(false) : undefined}
+      >
         <div className="cover">
           <Cover
             coverArt={nowPlaying.coverArt}
@@ -64,7 +103,9 @@ export function PlayerBar() {
           <div className="title">{nowPlaying.title}</div>
           <div className="sub">
             {nowPlaying.artistId && nowPlaying.artist ? (
-              <Link to={`/artists/${nowPlaying.artistId}`}>
+              // draggable=false so a drag here moves the track (via the .np
+              // card's draggable), not the anchor's URL.
+              <Link to={`/artists/${nowPlaying.artistId}`} draggable={false}>
                 {nowPlaying.artist}
               </Link>
             ) : (
@@ -72,7 +113,7 @@ export function PlayerBar() {
             )}
             <span className="sep"> · </span>
             {nowPlaying.albumId && nowPlaying.album ? (
-              <Link to={`/albums/${nowPlaying.albumId}`}>
+              <Link to={`/albums/${nowPlaying.albumId}`} draggable={false}>
                 {nowPlaying.album}
               </Link>
             ) : (
@@ -140,7 +181,25 @@ export function PlayerBar() {
       </div>
 
       <div className="right-cluster">
+        <EntityRating kind="track" id={nowPlaying.id} />
         <RecommendationFeedback trackId={nowPlaying.id} />
+        <button
+          className={`icon-btn ${outputEnabled ? "is-on" : ""}`}
+          onClick={() => setOutputEnabled(!outputEnabled)}
+          aria-label={outputEnabled ? "audio plays on this device" : "remote control only (silent)"}
+          aria-pressed={outputEnabled}
+          title={
+            outputEnabled
+              ? "Audio output: this device. Tap to make this a silent remote — playback continues on your other device."
+              : "Remote control only — this device is silent. Tap to play audio here too."
+          }
+        >
+          {outputEnabled ? (
+            <Speaker size={18} strokeWidth={1.5} />
+          ) : (
+            <Cast size={18} strokeWidth={1.5} />
+          )}
+        </button>
         <VolumeControl />
         <Link
           to="/queue"

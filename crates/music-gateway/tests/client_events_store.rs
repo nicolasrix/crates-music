@@ -32,7 +32,12 @@ async fn insert_batch_round_trips_newest_first() {
     store
         .insert_client_events(vec![
             rec("web-vital.LCP", 1_700_000_000_500, Some(1234.5), "/albums"),
-            rec("playback.start", 1_700_000_001_000, Some(187.0), "/albums/abc"),
+            rec(
+                "playback.start",
+                1_700_000_001_000,
+                Some(187.0),
+                "/albums/abc",
+            ),
         ])
         .await
         .unwrap();
@@ -69,7 +74,41 @@ async fn name_filter_excludes_other_events() {
 async fn empty_batch_is_a_noop() {
     let store = TraceStore::open_in_memory().await.unwrap();
     store.insert_client_events(vec![]).await.unwrap();
-    assert!(store.recent_client_events(50, None).await.unwrap().is_empty());
+    assert!(
+        store
+            .recent_client_events(50, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn trim_to_capacity_evicts_oldest_rows() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    let batch: Vec<_> = (0..10)
+        .map(|i| rec("mark", i64::from(i), Some(f64::from(i)), "/"))
+        .collect();
+    store.insert_client_events(batch).await.unwrap();
+
+    // Keep only the newest 3.
+    store.trim_client_events_to_capacity(3).await.unwrap();
+    let got = store.recent_client_events(50, None).await.unwrap();
+    assert_eq!(got.len(), 3);
+    // Newest-first: occurred_ms 9, 8, 7 survive; 0..=6 evicted.
+    assert_eq!(got[0].occurred_ms, 9);
+    assert_eq!(got[2].occurred_ms, 7);
+}
+
+#[tokio::test]
+async fn trim_to_capacity_is_a_noop_under_capacity() {
+    let store = TraceStore::open_in_memory().await.unwrap();
+    store
+        .insert_client_events(vec![rec("mark", 1, None, "/")])
+        .await
+        .unwrap();
+    store.trim_client_events_to_capacity(100).await.unwrap();
+    assert_eq!(store.recent_client_events(50, None).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

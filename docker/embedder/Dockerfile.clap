@@ -1,0 +1,160 @@
+# syntax=docker/dockerfile:1.7
+#
+# Embedder sidecar — CLAP variant (CPU inference).
+#
+# Phase B step 1: real LAION CLAP, CPU only. Produces meaningful
+# acoustic embeddings instead of the stub's deterministic hash
+# vectors, but runs ~6x slower than the ROCm variant on an RDNA4 GPU.
+# Pick this when you can't or don't want to set up GPU passthrough.
+#
+# Build from the repo root:
+#
+#   docker build -f docker/embedder/Dockerfile.clap -t crates-music/embedder-clap .
+#
+# The image is ~3 GB (torch CPU wheel + librosa/numba + soundfile).
+# The CLAP checkpoint is NOT baked in — it's data, not code, and
+# operators bind-mount it at runtime (see docker-compose.clap.yml).
+
+ARG PYTHON_VERSION=3.12
+
+# ─── Stage 1: resolve & install deps into site-packages ───────────────
+FROM python:${PYTHON_VERSION}-slim AS deps
+
+# build-essential needed for any wheels that lack a manylinux build
+# (numba's llvmlite occasionally, depending on the version pin).
+# ffmpeg + libsndfile1 are runtime deps but we install them here to
+# keep the deps stage representative; runtime stage installs them
+# separately.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Base deps from pyproject (without the [clap] extra — that extra is
+# wired to the ROCm wheel index via `tool.uv.sources` and is only
+# meaningful for the native dev install. We list the CLAP-side
+# packages explicitly below using the CPU PyTorch index so this
+# image stays hermetic from uv source routing.)
+COPY services/embedder/pyproject.toml services/embedder/README.md ./
+
+RUN pip install --no-cache-dir \
+        'fastapi>=0.115' \
+        'uvicorn[standard]>=0.32' \
+        'pydantic>=2.9' \
+        'numpy>=1.26' \
+        'python-multipart>=0.0.20'
+
+# CLAP-specific deps. torch / torchaudio / torchvision pulled from
+# the official CPU wheel index so we don't drag in CUDA or ROCm
+# binaries. Pin major versions to match the [clap] extra's
+# `>=2.4` floor — any 2.4.x CPU wheel works.
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        'torch>=2.4,<3' \
+        'torchaudio>=2.4,<3' \
+        'torchvision>=0.19,<1'
+
+# The remaining audio stack — pulled from PyPI as normal. soundfile
+# needs libsndfile1 at runtime (installed in stage 2); librosa pulls
+# numba + scipy + sklearn transitively.
+#
+# `umap-learn` is the only piece of the `[reduce]` extra not already
+# present (scipy/sklearn/numba arrive via librosa). It powers
+# `embedder.reduce` and the `/reduce` HTTP endpoint — without it the
+# endpoint 503s with "reduce extra not installed". ~1 MB pure-Python,
+# no native compile, so the prod sidecar can carry it cheaply.
+RUN pip install --no-cache-dir \
+        'laion-clap>=1.1.6' \
+        'librosa>=0.10' \
+        'soundfile>=0.12' \
+        'umap-learn>=0.5'
+
+# Install the embedder package itself last, --no-deps so we don't
+# re-resolve the carefully-pinned torch wheels.
+COPY services/embedder/embedder ./embedder
+RUN pip install --no-cache-dir --no-deps .
+
+# ─── Stage 2: slim runtime ────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Runtime system deps:
+#   - ca-certificates: TLS for any outbound calls (huggingface_hub etc.)
+#   - libsndfile1: soundfile's libsndfile.so
+#   - ffmpeg: librosa.load's audioread fallback for compressed formats
+#   - libgomp1: OpenMP runtime linked by torch + librosa
+#   - curl: container HEALTHCHECK
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libsndfile1 \
+        ffmpeg \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uid/gid pinned to 10001 to match the gateway and stub embedder —
+# both containers share the `gw-data` volume so the embedder can
+# write UMAP projections into gateway-state.recommend.sqlite. Keep
+# this aligned with docker/gateway/Dockerfile and
+# docker/embedder/Dockerfile.
+RUN groupadd --system --gid 10001 embedder \
+ && useradd --system --uid 10001 --gid embedder \
+        --home-dir /var/empty --shell /usr/sbin/nologin embedder
+
+# Lift site-packages and the uvicorn launcher from the deps stage.
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+
+# Pre-download every HuggingFace artefact laion-clap touches during
+# import + CLAP_Module construction. Without this prebake the
+# container has to reach huggingface.co on every boot, and would
+# crash anyway because the unprivileged `embedder` user has
+# HOME=/var/empty (non-writable), so transformers' cache writes
+# fail. Bake the cache into the image and lock the runtime to
+# OFFLINE mode so a missing weight is a build-time error, not a
+# silent first-boot stall.
+#
+# What gets cached:
+#   - `bert-base-uncased` *tokenizer only* — laion_clap.training.data
+#     loads it at module import (top-level statement). ~1 MB.
+#   - `roberta-base` *full model* — instantiated inside the
+#     `CLAP_Module(amodel="HTSAT-base")` constructor as the text
+#     branch. ~500 MB of weights.
+ENV HF_HOME=/opt/huggingface \
+    TRANSFORMERS_OFFLINE=1
+RUN mkdir -p ${HF_HOME} \
+ && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python -c \
+        "from transformers import BertTokenizer, RobertaModel; \
+         BertTokenizer.from_pretrained('bert-base-uncased'); \
+         RobertaModel.from_pretrained('roberta-base')" \
+ && chmod -R a+rX ${HF_HOME}
+
+# /models is the expected bind-mount target for the checkpoint. We
+# pre-create the directory so a missing volume gives a clearer
+# error ("file not found") than a permission denied on mkdir.
+RUN mkdir -p /models && chown embedder:embedder /models
+
+USER embedder
+
+ENV EMBEDDER_BACKEND=clap \
+    CLAP_CHECKPOINT=/models/clap.pt \
+    PYTHONUNBUFFERED=1 \
+    # Cap threads — librosa/torch each spin up their own pools and
+    # over-subscribe small hosts. 4 is a reasonable default; override
+    # at runtime if you have headroom.
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMBA_NUM_THREADS=4
+
+EXPOSE 9000
+
+# start_period bumped to 120 s because the CLAP checkpoint load on
+# CPU runs 30–90 s (model: ~2 GB float32 weights), well past the
+# stub variant's 10 s. The gateway's
+# `depends_on: { embedder: { condition: service_healthy } }` gate
+# waits on this — keep it generous or boot races.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD curl --silent --fail http://localhost:9000/healthz || exit 1
+
+CMD ["uvicorn", "embedder.app:app", "--host", "0.0.0.0", "--port", "9000"]

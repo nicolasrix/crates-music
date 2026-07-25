@@ -1,11 +1,15 @@
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
 import { readTokens, TokenPair } from "./tokens";
-import { refreshTokens, startLogin, logout as doLogout } from "./oauth";
+import { joinAsGuest, refreshTokens, startLogin, logout as doLogout } from "./oauth";
 
 interface AuthState {
   tokens: TokenPair | null;
   loading: boolean;
-  login: () => void;
+  /** Begin the PKCE sign-in. `switchUser` forces the gateway login screen
+   *  (prompt=login) so a lingering session isn't silently reused. */
+  login: (options?: { switchUser?: boolean }) => void;
+  /** Redeem a guest code and enter the host's room (PR D). */
+  joinGuest: (code: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -27,6 +31,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTokens(t);
       return;
     }
+    // A lapsed guest session has no refresh path — drop it so the app
+    // returns to the sign-in / join screen.
+    if (!t.refreshToken) {
+      setTokens(null);
+      return;
+    }
     setLoading(true);
     refreshTokens(t.refreshToken)
       .then(() => setTokens(readTokens()))
@@ -37,8 +47,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthState = {
     tokens,
     loading,
-    login: () => {
-      void startLogin();
+    login: (options?: { switchUser?: boolean }) => {
+      void startLogin({ forceLogin: options?.switchUser ?? false });
+    },
+    joinGuest: async (code: string, displayName?: string) => {
+      await joinAsGuest(code, displayName);
+      setTokens(readTokens());
     },
     logout: async () => {
       await doLogout(tokens?.refreshToken ?? null);

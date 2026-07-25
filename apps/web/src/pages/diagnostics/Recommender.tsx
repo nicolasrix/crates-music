@@ -19,7 +19,6 @@ import {
   fetchRecommendSimilarity,
   fetchRecommendTopResults,
 } from "../../api/diagnostics";
-import { Layout } from "../../components/Layout";
 import { Link } from "../../router";
 import { DiagSection, ErrorLine, REFRESH_MS } from "./shared";
 
@@ -35,21 +34,19 @@ const WINDOW_OPTIONS: ReadonlyArray<{ label: string; ms: number | null }> = [
 
 export function Recommender() {
   return (
-    <Layout breadcrumb="diagnostics / recommender">
-      <div className="section">
-        <div className="section-head">
-          <h2>recommender</h2>
-          <span className="count">refresh {REFRESH_MS / 1000}s</span>
-        </div>
-
-        <DiagSection title="recommender">
-          <p className="text-sm" style={{ marginBottom: "var(--space-3)" }}>
-            <Link to="/diagnostics/latent">→ latent space (2-D UMAP scatter)</Link>
-          </p>
-          <RecommenderPanels />
-        </DiagSection>
+    <div className="section">
+      <div className="section-head">
+        <h2>recommender</h2>
+        <span className="count">refresh {REFRESH_MS / 1000}s</span>
       </div>
-    </Layout>
+
+      <DiagSection title="recommender">
+        <p className="text-sm" style={{ marginBottom: "var(--space-3)" }}>
+          <Link to="/settings/latent">→ latent space (2-D UMAP scatter)</Link>
+        </p>
+        <RecommenderPanels />
+      </DiagSection>
+    </div>
   );
 }
 

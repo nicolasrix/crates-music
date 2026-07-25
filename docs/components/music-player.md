@@ -4,17 +4,22 @@
 **Type:** library
 **Test count:** 8 (most playback skipped — no audio device in CI)
 
-Native audio playback. Two layers:
+Native audio playback. Three layers:
 
 1. **Cache resolution** — pure I/O glue: take a `TrackId`, return
    audio bytes from the L3 cache or download them.
-2. **Decoding + playback** — `rodio` + `symphonia`. Must run inside
-   `tokio::task::spawn_blocking` because `rodio::OutputStream` holds
-   a non-Send handle to the OS audio device.
+2. **Decoding + playback (blocking)** — `rodio` + `symphonia`. Must run
+   inside `tokio::task::spawn_blocking` because `rodio::OutputStream`
+   holds a non-Send handle to the OS audio device. Powers
+   `crates-cli play` (sample-accurate gapless).
+3. **Interactive playback** — [`Player`] (a handle to a dedicated audio
+   thread with pause/seek/volume/position) plus [`PlayQueue`] (a pure,
+   device-free transport-queue state machine). Powers the CLI's TUI.
 
-Used by the CLI. The web app uses the browser's `<audio>` element
-(MSE in a future phase). The mobile app will use Media3 directly.
-This crate is **CLI-only**.
+Used by the CLI. The web app — which is also the mobile client, as an
+installable PWA — uses the browser's `<audio>` element (MSE remains a
+deferred option). There is no native mobile app (P4 retired), so this
+crate is **CLI-only**.
 
 ## Public API
 
@@ -38,6 +43,33 @@ tokio::task::spawn_blocking(move || play_blocking(bytes))
     .await
     .unwrap()?;
 ```
+
+## Interactive playback: `Player` + `PlayQueue`
+
+The TUI needs transport controls the blocking API can't offer. Two new
+pieces (both in this crate so any future native client can reuse them):
+
+- **`Player::spawn(events) -> Result<Player, PlayError>`** starts a
+  dedicated audio thread that owns the `!Send` `OutputStream`/`Sink`.
+  The handle exposes fire-and-forget commands — `load(bytes, track_id,
+  duration)`, `toggle`/`pause`/`resume`, `seek_to`/`seek_by`,
+  `set_volume` (clamped 0–2), `stop` — plus `snapshot() ->
+  PlaybackSnapshot { track_id, position, duration, playing, volume }`,
+  republished by the thread every ~100 ms for per-frame polling.
+  Out-of-band `PlayerEvent::{TrackEnded, Error}` arrive on the tokio
+  channel passed to `spawn`. A deliberate-clear flag inside the thread
+  guarantees `TrackEnded` only fires on natural drain — `load`/`stop`
+  never emit it, so callers can't double-advance. `spawn` fails fast
+  (bootstrap channel) when there is no audio device; callers degrade to
+  browse-only instead of crashing.
+- **`PlayQueue`** holds the queue + cursor (`replace`, `enqueue`,
+  `enqueue_next`, `remove` (cursor-preserving), `advance`, `previous`,
+  `jump`, `next_up`). It is deliberately audio-free: all transport
+  logic is unit-tested in CI, and the audio thread stays dumb. The
+  player holds **one track at a time**; the caller drives handoff on
+  `TrackEnded` and prefetches `next_up()`'s bytes into RAM for
+  near-gapless starts (decode-from-RAM begins in milliseconds).
+  Sample-accurate gapless remains the blocking API's domain.
 
 ## Why blocking
 
@@ -132,12 +164,13 @@ development.
 
 ## Known gaps
 
-- **No volume control via the public API** — rodio supports it; the
-  CLI just doesn't expose a `music volume` command yet.
-- **No seek** — `Sink::skip_one` exists, but seeking *within* a
-  track requires re-creating the decoder at the right offset.
-  Symphonia supports this; we haven't wired it up.
-- **No event stream** — there's no callback for "track started",
-  "track ended", etc. The CLI infers state from the sink's `len()`.
-  Sync-aware playback (where the gateway broadcasts position
-  updates) needs this; planned with sync expansion.
+- **Interactive playback is near-gapless, not sample-accurate** — the
+  `Player` loads one track at a time; the boundary costs a decoder
+  start from RAM (milliseconds). Appending decoder N+1 to the sink
+  shortly before N drains would close even that; not wired yet.
+- **`Player` seek support depends on the container** —
+  `Sink::try_seek` works for the symphonia decoders that support it;
+  failures surface as a `PlayerEvent::Error` ("seek not supported"),
+  never a crash.
+- **Sync-aware playback** (driving the local player from the gateway's
+  shared queue state) still isn't wired — the TUI queue is local.

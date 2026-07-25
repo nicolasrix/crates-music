@@ -57,9 +57,35 @@
   --info:    var(--info-500);
 
   --art-bg:     var(--surface-0);
+  --art-bg2:    var(--art-bg);
+  --art-glow:   var(--surface-1);
+  --art-glow2:  var(--art-glow);
   --art-fg:     var(--fg);
   --art-mute:   var(--fg-muted);
   --art-accent: var(--accent);
+  --art-on-accent: var(--ink-50);
+
+  /* Artwork-tint guardrails: fixed lightness band + chroma ceiling per
+     role. The cover contributes only hue (+ a capped chroma); these pins
+     guarantee contrast — e.g. hero text at 93% L over a 24% L wash reads
+     identically whether the album is navy, neon pink, or beige.
+
+     Two tiers: the *wash/text* roles stay restrained (they sit under or
+     are body text), while the *glow* tier is the bold one — full cover
+     chroma up to a much higher ceiling, reserved for decoration surfaces
+     (hero band, hero cards, hover glows) where the only text on top is
+     pinned --art-fg/--art-mute. L 42% under 93% L text still clears
+     WCAG comfortably, so boldness costs no legibility. */
+  --art-l-bg:     24%;
+  --art-l-fg:     93%;
+  --art-l-mute:   76%;
+  --art-l-accent: 74%;
+  --art-l-glow:   42%;
+  --art-c-wash-max: 0.05;
+  --art-c-text-max: 0.04;
+  --art-c-accent-max: 0.15;
+  --art-c-glow-max: 0.13;
+  --art-backdrop-opacity: 0.55;
 }
 
 :root[data-theme="light"] {
@@ -90,9 +116,26 @@
   --info:    oklch(56% 0.15 230);
 
   --art-bg:     var(--surface-0);
+  --art-glow:   var(--surface-1);
+  --art-glow2:  var(--art-glow);
   --art-fg:     var(--fg);
   --art-mute:   var(--fg-muted);
   --art-accent: var(--accent);
+  --art-on-accent: oklch(98% 0.005 80);
+
+  /* Light theme flips the bands: dark text on a pale wash, deeper accent
+     so white-ish surfaces still get ~4.5:1 against it. Glow stays pale
+     (85% L) so 22% L text on it keeps high contrast. */
+  --art-l-bg:     91%;
+  --art-l-fg:     22%;
+  --art-l-mute:   45%;
+  --art-l-accent: 54%;
+  --art-l-glow:   85%;
+  --art-c-wash-max: 0.04;
+  --art-c-text-max: 0.05;
+  --art-c-accent-max: 0.17;
+  --art-c-glow-max: 0.10;
+  --art-backdrop-opacity: 0.5;
 }
 
 @media (prefers-color-scheme: light) {
@@ -113,7 +156,69 @@
     --accent-press: oklch(50% 0.17 60);
     --on-accent:    oklch(98% 0.005 80);
     --focus: oklch(60% 0.16 60);
+    --art-on-accent: oklch(98% 0.005 80);
+    --art-glow:  var(--surface-1);
+    --art-glow2: var(--art-glow);
+    --art-l-bg:     91%;
+    --art-l-fg:     22%;
+    --art-l-mute:   45%;
+    --art-l-accent: 54%;
+    --art-l-glow:   85%;
+    --art-c-wash-max: 0.04;
+    --art-c-text-max: 0.05;
+    --art-c-accent-max: 0.17;
+    --art-c-glow-max: 0.10;
+    --art-backdrop-opacity: 0.5;
   }
+}
+
+/* Compat aliases — a second vocabulary (--bg, --border, --muted, …) grew in
+   the inline-styled surfaces (settings/controls.tsx, Station, Downloads,
+   GuestsPanel, UsersAdmin, diagnostics, .now-playing-card) without ever being
+   defined, so those declarations were invalid-at-computed-value and rendered
+   borderless/transparent. These aliases make the names resolve to the
+   canonical tokens above. New code should use the canonical names directly;
+   call sites migrate over time, then this block dies. Declared once on :root:
+   var() substitution happens at computed-value time on the root element, so
+   the aliases track data-theme / prefers-color-scheme automatically. */
+:root {
+  --bg:          var(--surface-0);
+  --bg-elevated: var(--surface-2);
+  --border:      var(--border-subtle);
+  --text:        var(--fg);
+  --muted:       var(--fg-muted);
+  --radius-md:   var(--radius-2);
+  --radius-lg:   var(--radius-3);
+  --color-good:   var(--success);
+  --color-warn:   var(--warning);
+  --color-danger: var(--danger);
+  --font-serif:   var(--font-display);
+}
+
+/* Artwork tint — role synthesis. JS (ArtworkPalette.tsx) mounts only the
+   cover's identity: `--art-h` (hue), `--art-c` (chroma, pre-capped at 0.15),
+   `--art-h2` (a secondary hue admitted only when ≥50° from the primary —
+   either harmonious-by-sharing-a-hue or clearly distanced, never muddy).
+   Every visible role is rebuilt here at the theme's fixed lightness band
+   with a per-role chroma ceiling, so contrast and restraint are properties
+   of these formulas, not of whichever album happens to be open.
+
+   `has-art-accent` is separate: greyscale covers get neutral washes
+   (`has-art` with --art-c ≈ 0) while accent roles keep the brand amber —
+   a synthesized grey accent would just look broken. */
+.has-art {
+  --art-bg:   oklch(var(--art-l-bg)   min(calc(var(--art-c, 0) * 0.5),  var(--art-c-wash-max)) var(--art-h, 0));
+  --art-bg2:  oklch(var(--art-l-bg)   min(calc(var(--art-c, 0) * 0.5),  var(--art-c-wash-max)) var(--art-h2, var(--art-h, 0)));
+  /* Glow = the bold tier: full cover chroma (already pre-capped at 0.15
+     by the extractor), only the per-theme glow ceiling on top. Greyscale
+     covers degrade to a neutral band (--art-c ≈ 0), never a fake color. */
+  --art-glow:  oklch(var(--art-l-glow) min(var(--art-c, 0), var(--art-c-glow-max)) var(--art-h, 0));
+  --art-glow2: oklch(var(--art-l-glow) min(var(--art-c, 0), var(--art-c-glow-max)) var(--art-h2, var(--art-h, 0)));
+  --art-fg:   oklch(var(--art-l-fg)   min(calc(var(--art-c, 0) * 0.3),  var(--art-c-text-max)) var(--art-h, 0));
+  --art-mute: oklch(var(--art-l-mute) min(calc(var(--art-c, 0) * 0.45), var(--art-c-text-max)) var(--art-h, 0));
+}
+.has-art-accent {
+  --art-accent: oklch(var(--art-l-accent) min(var(--art-c, 0), var(--art-c-accent-max)) var(--art-h, 0));
 }
 
 :root {

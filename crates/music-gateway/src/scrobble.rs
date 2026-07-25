@@ -36,6 +36,7 @@ use music_core::TrackId;
 use music_recommend::{EventInput, EventType};
 use serde::Deserialize;
 
+use crate::principal::{AuthPrincipal, Role};
 use crate::proxy::proxy;
 use crate::state::AppState;
 
@@ -66,12 +67,19 @@ fn now_ms() -> i64 {
 pub async fn scrobble(
     State(state): State<AppState>,
     Query(q): Query<ScrobbleQuery>,
+    AuthPrincipal(principal): AuthPrincipal,
     request: Request,
 ) -> Response {
     let is_submission = parse_submission(q.submission.as_deref());
     tracing::Span::current().record("submission", is_submission);
 
-    if is_submission && let Some(id) = q.id.as_deref() {
+    // Guest plays are dropped from training (PR E taste sandboxing): a
+    // guest still plays through the proxy, but their listen never lands
+    // in the host's recency clock / event log / affinity counter.
+    if is_submission
+        && principal.role != Role::Guest
+        && let Some(id) = q.id.as_deref()
+    {
         tracing::Span::current().record("track_id", id);
         let track_id = TrackId::from(id.to_string());
         let occurred_at = q.time.unwrap_or_else(now_ms);
@@ -79,7 +87,7 @@ pub async fn scrobble(
         // Fast-path recency clock for the MMR penalty.
         if let Err(err) = state
             .play_history()
-            .record_submission(&track_id, occurred_at)
+            .record_submission(principal.user_id, &track_id, occurred_at)
             .await
         {
             tracing::warn!(error = %err, "play_history write failed; continuing with forward");
@@ -87,17 +95,41 @@ pub async fn scrobble(
 
         // Durable signal for diagnostics + future behavioural index.
         // Stamp with the active recommend-session so per-session
-        // reconstruction queries can find this scrobble.
-        let session_id = state.sync().active_session_id().await;
+        // reconstruction queries can find this scrobble. Read the
+        // session from the caller's room (a guest scrobbles into their
+        // host's room session).
+        let session_id = state.sync().active_session_id(principal.room_id()).await;
         let event = EventInput {
             event_type: EventType::Scrobble,
-            track_id,
+            track_id: track_id.clone(),
             occurred_at,
             metadata: None,
             session_id,
         };
-        if let Err(err) = state.event_store().append_batch(&[event]).await {
+        if let Err(err) = state
+            .event_store()
+            .append_batch(principal.user_id, &[event])
+            .await
+        {
             tracing::warn!(error = %err, "event log append failed; continuing with forward");
+        }
+
+        // Fold a completed play into the preference affinity counter. A
+        // *submission* scrobble means the listen counted (Navidrome only
+        // submits past its threshold), so credit it as a full-completion
+        // play. Best-effort, like the writes above.
+        if let Err(err) = state
+            .track_affinity()
+            .apply_event(
+                principal.user_id,
+                &track_id,
+                music_recommend::AffinityEvent::Play { completion: 1.0 },
+                occurred_at,
+                state.affinity_half_life_ms(),
+            )
+            .await
+        {
+            tracing::warn!(error = %err, "affinity play update failed; continuing with forward");
         }
     }
 

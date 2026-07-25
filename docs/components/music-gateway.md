@@ -24,6 +24,7 @@ crates/music-gateway/
 │   ├── proxy.rs                 # /rest/* → Navidrome; L2 + cover-art proxy
 │   ├── recommend.rs             # /v1/recommend/{next, from-any, from-seeds, station, enqueue}
 │   ├── recommend_feedback.rs    # POST /v1/recommend/feedback (thumbs up/down)
+│   ├── library_rating.rs        # PUT/GET /v1/library/rating(s) — durable like/dislike
 │   ├── scrobble.rs              # /rest/scrobble interceptor → play_history + event log
 │   ├── events.rs                # POST /v1/events
 │   ├── embedder.rs              # EmbedderHandle + degraded-mode boot probe
@@ -85,13 +86,14 @@ every handler cheaply. The current fields (see `state.rs`):
 | `cache` | L2 metadata cache. |
 | `oauth` | OAuth 2.1 state pool. |
 | `setup_token` | One-time first-run token (gated by absence of master password). |
-| `sync` | In-memory `SyncStore` — queue + playback + likes. |
+| `sync` | In-memory `SyncStore` — **per-room** queue + playback, keyed by `principal.room_id()` (see [music-sync → Rooms](./music-sync.md#rooms-per-user-partition)). |
 | `embedder` | `EmbedderHandle`. Either an HTTP client to the sidecar or a "disabled" sentinel. |
 | `embedding_store` | `track_embeddings` table + ingest queue. |
 | `metadata_store` | `track_metadata` cache (filter inputs). |
 | `event_store` | Append-only event log. |
 | `play_history` | MMR recency clock. |
 | `feedback` | Per-session thumbs-up/down store. |
+| `ratings` | Durable per-entity like/dislike store (`RatingStore`; track/album/artist). |
 | `projection` | UMAP 2D projection store. |
 | `ann` | `usearch` HNSW index (Arc — shared with the ingest worker). |
 | `recommend_model_version` | Stamp for new embeddings + ANN queries. Sourced from the embedder's last health probe. |
@@ -117,6 +119,33 @@ Failure modes:
 - Setup mode (no master password set) → 401 (with the setup URL in
   the gateway logs).
 
+## Per-user taste isolation (PR E)
+
+Gateway-owned taste state partitions by `user_id` (the resolved
+`Principal`). The `music-recommend` stores (`events`, `play_history`,
+`recommend_feedback`, `track_affinity`, `entity_rating`,
+`recommendation`) each carry a `user_id` column (recommend migrations
+`0017–0022`, backfilled to the owner `id=1`), and every store method
+takes a `user_id`.
+
+How handlers resolve it:
+
+- **Writes** (`/v1/events`, `/rest/scrobble`, `/v1/recommend/feedback`,
+  `PUT /v1/library/rating`) attribute to the caller's `principal.user_id`.
+- **Recommendation scoring reads** (dislike-exclusion, like-boost,
+  decayed affinity, provenance) are scoped to `principal.room_id()` —
+  the room's **host** user — so a guest scores against and reads the
+  host's taste profile read-only.
+- **`GET /v1/library/ratings`** reads the caller's own `user_id` (a guest
+  sees their own empty partition, not the host's library).
+
+**Guest taste sandboxing:** a guest is a transient participant in a
+host's room and must never reshape anyone's taste. Their events and
+scrobbles are dropped from training (accepted, persisted nowhere), their
+recommendation thumbs are dropped, and `PUT /v1/library/rating` returns
+**403**. Diagnostics reads (admin-only) stay cross-user — the admin
+observability surface is intentionally not partitioned.
+
 ## OAuth 2.1 server (`oauth/`)
 
 Hand-rolled. Single-tenant. The implementation is in `oauth/`:
@@ -140,6 +169,30 @@ Tables:
 | `refresh_tokens` | long-lived, per-device, individually revocable |
 | `access_tokens` | short-lived (1 h), looked up by sha256 |
 | `sessions` | login sessions (cookie-based, separate from access tokens) |
+| `guest_codes` | shareable room-join codes (PR D); `sha256(code)`, host-owned, optional expiry/max-uses |
+
+### Guest rooms (PR D)
+
+A host (any real account) mints a **guest code**; a visitor redeems it for
+an ephemeral guest principal that joins the host's sync room — a shared
+jukebox (D5). The surface:
+
+- `POST /oauth/guest` (public, in `oauth/handlers.rs`) — redeem a code.
+  No PKCE, no password: the code is the credential. Mints a **single
+  access token, no refresh** (guests are transient and hard-capped by the
+  guest account row's `expires_at`, which `resolve_principal` also
+  enforces). The minted `users` row is `role='guest'` with
+  `host_user_id = code.host`, so `Principal::room_id()` routes the guest
+  into the host's room with zero handler changes.
+- `GET/POST /v1/guest_codes` + `DELETE /v1/guest_codes/:id`
+  (`guest_codes.rs`, any-authenticated tier) — host-side management. Codes
+  are always owned by the caller (`host_user_id = principal.user_id`), so
+  a User manages their own and nobody touches another host's; the handlers
+  403 a `Role::Guest`.
+- Background reaper (`spawn_guest_sweep`) deletes expired guest rows on an
+  interval, cascading their tokens via the schema's `ON DELETE CASCADE`.
+  Config: `[oauth] guest_session_ttl_seconds` (default 12 h),
+  `guest_sweep_interval_seconds` (default 1 h, `0` disables).
 
 Refresh tokens **rotate** on every refresh: the old one is invalidated
 and a new one is issued in the same response. This bounds replay
@@ -196,6 +249,34 @@ See per-component docs:
   `sync/ws.rs`.
 - Events handler in `events.rs` is small: validate input, batch, call
   `EventStore::append_batch`.
+
+## Gateway-owned playlists (`playlists/`)
+
+Decision D6 of the user-system plan moved playlists off Navidrome's
+`/rest/*` onto `/v1/playlists/*` so membership can be **private per-user**.
+One Navidrome account backs the whole gateway, so per-user privacy can only
+live on our side; the *catalog* (the tracks) stays shared on Navidrome.
+
+- `store.rs` — `PlaylistStore`, a pure id-plumbing layer over two tables in
+  the **OAuth pool** (`gateway-state.sqlite`, migration `0007_playlists.sql`):
+  `playlists` (owner, name, `visibility`, timestamps) and `playlist_tracks`
+  (ordered `(playlist_id, position) → track_id`). It shares the OAuth pool
+  (built from `OauthStore::pool()` in `AppState::new`) so `owner_user_id`'s
+  foreign key and `ON DELETE CASCADE` work without a cross-file reference. It
+  stores Navidrome **track ids only** and never touches catalog metadata.
+- `handlers.rs` — the `/v1/playlists/*` CRUD. Authorization is two-layer:
+  reads are any-authenticated (own + others' `shared`; a private playlist the
+  caller doesn't own is **404**, not 403, so existence isn't leaked), and the
+  mutating verbs self-gate on the `WritePlaylist` capability (a **guest** gets
+  **403**) and then on ownership (non-owner → 404). `GET /v1/playlists/:id`
+  returns the row plus ordered `track_ids`; clients hydrate those against
+  `/rest/getSong`.
+
+The endpoint surface is in [API.md](../API.md#playlists). Existing Navidrome
+playlists are copied into the owner (`user_id=1`) once by
+`scripts/import_navidrome_playlists.py` — idempotent by playlist name; it
+reads through the verbatim `/rest/*` proxy and writes through the new
+endpoints, so it needs only a gateway bearer.
 
 ## Diagnostics
 
@@ -259,8 +340,8 @@ embedding store, and ANN — so every test runs against a fresh state.
   cache.
 - **No rate limiting.** Single-user, local network — not yet
   needed.
-- **CLI uses static bearer**. Will move to OAuth Device Authorization
-  Grant (RFC 8628) at P4.
+- ~~**CLI uses static bearer**~~. **Done** — the CLI now uses the OAuth
+  Device Authorization Grant (RFC 8628); the static bearer was removed.
 - **No Prometheus `/metrics`.** The M0 trace ring covers the same
   ground for now and the `/diagnostics` page is enough for a single
   operator; we'll add `/metrics` if external scraping ever matters.

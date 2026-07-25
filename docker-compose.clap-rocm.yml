@@ -1,0 +1,61 @@
+# CLAP-variant compose override — AMD ROCm GPU inference.
+#
+# Use:
+#   cp docker/.env.example .env
+#   $EDITOR .env                       # set NAVIDROME_*, CLAP_CHECKPOINT_PATH,
+#                                      # and optionally RENDER_GID / VIDEO_GID
+#                                      # if your host's groups differ from
+#                                      # the Arch/Cachy defaults.
+#   docker compose -f docker-compose.yml -f docker-compose.clap-rocm.yml up --build
+#
+# Stacks on top of the base docker-compose.yml — only the `embedder`
+# service is replaced. The gateway image, gw-data volume, networks,
+# and Navidrome wiring all carry over unchanged.
+
+services:
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clap-rocm
+    image: crates-music/embedder-clap-rocm:dev
+    environment:
+      EMBEDDER_BACKEND: clap
+      CLAP_CHECKPOINT: /models/clap.pt
+      # HSA_OVERRIDE_GFX_VERSION: only set this if `rocm-smi` shows your
+      # card but torch reports `cuda.is_available() == False` inside the
+      # container. The override spoofs the card's gfx ISA so older ROCm
+      # kernels load — e.g. set to `11.0.0` to use RDNA3 kernels on
+      # RDNA4 hardware. Unnecessary on gfx1201 with the
+      # rocm6.4 wheels baked in.
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+    devices:
+      # GPU compute interface (single device, the ROCm kernel driver
+      # entry point) and render nodes (per-GPU). /dev/dri/card* is
+      # deliberately *not* passed through — those are for display
+      # output and the embedder doesn't need them.
+      - /dev/kfd
+      - /dev/dri
+    # Host group memberships needed to access the devices above. The
+    # defaults match Arch / Cachy / Fedora (988/984); Debian uses
+    # different GIDs (typically render=109, video=44). Check with
+    # `getent group render video` on the host and override in .env.
+    #
+    # If both /dev/kfd and /dev/dri/renderD* on the host are mode
+    # 666 (as on some hosts), these add-on groups are belt-and-
+    # braces — the container user can already open the devices.
+    # They're kept here so the same compose file works on hosts
+    # with the stricter 660 default.
+    group_add:
+      - "${RENDER_GID:-988}"
+      - "${VIDEO_GID:-984}"
+    volumes:
+      # Bind-mount the checkpoint read-only — same shape as the CPU
+      # variant's override. The checkpoint is data; we don't redistribute it.
+      - type: bind
+        source: ${CLAP_CHECKPOINT_PATH:?set CLAP_CHECKPOINT_PATH in .env to the host path of the .pt file}
+        target: /models/clap.pt
+        read_only: true
+    # The model lives on the GPU, but torch still keeps a sizeable CPU
+    # mirror for staging tensors + the MIOpen JIT pipeline. 6 GB
+    # observed safe; tighten once you've watched a sustained ingest run.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-6g}

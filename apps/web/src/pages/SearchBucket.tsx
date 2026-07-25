@@ -2,12 +2,12 @@
 // Reached via the "see all N →" link on the main /search page when a
 // bucket has more results than the compact overview shows.
 //
-// Same data pipeline as <Search> (searchAll → rankResults), but with
-// raised search3 caps so larger libraries actually return more than
-// the 20/40/60 the overview uses. The bucket pages intentionally
-// don't paginate beyond what one search3 call returns — searching is
-// already a typo-tolerance / discovery surface, not a way to browse
-// the whole library; that's what /albums, /tracks, /artists are for.
+// Same data pipeline as <Search> (searchAll → server-ranked results,
+// hydrated), but with raised caps so larger libraries actually return
+// more than the 20/40/60 the overview uses. The bucket pages
+// intentionally don't paginate beyond what one /v1/search call returns —
+// searching is already a typo-tolerance / discovery surface, not a way to
+// browse the whole library; that's what /albums, /tracks, /artists are for.
 
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
@@ -18,7 +18,6 @@ import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import { useRoute } from "../router";
 import { usePlayback } from "../sync/usePlayback";
-import { rankResults } from "./searchRanking";
 
 export type BucketKind = "artists" | "albums" | "tracks";
 
@@ -40,7 +39,7 @@ const EXPANDED_OPTS = {
 export function SearchBucket({ bucket }: { bucket: BucketKind }) {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle } = usePlayback();
+  const { playSingle, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query, "expanded"],
@@ -52,25 +51,28 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
 
   // Same canonical-artist registry as the overview. Without this,
   // derived artists (those synthesized from track/album hits) show
-  // "—" for albumCount because search3 only returns it on the
-  // artist bucket — and our derived ones aren't in that bucket.
+  // "—" for albumCount because the search response only carries it on
+  // named artist hits — and derived ones aren't among those.
   const knownArtistsQ = useQuery({
     queryKey: ["artists"],
     queryFn: listArtists,
     staleTime: 5 * 60_000,
   });
 
-  const ranked = useMemo(
-    () =>
-      q.data
-        ? rankResults(
-            q.data,
-            query,
-            knownArtistsQ.data ? { knownArtists: knownArtistsQ.data } : {}
-          )
-        : null,
-    [q.data, query, knownArtistsQ.data]
-  );
+  // Render the gateway's server-ranked order as-is (re-ranking here would
+  // re-drop the typo hits /v1/search recovered); only hydrate artists from
+  // the canonical registry to fill fields the response omits (albumCount).
+  const ranked = useMemo(() => {
+    if (!q.data) return null;
+    const known = new Map((knownArtistsQ.data ?? []).map((a) => [a.id, a]));
+    return {
+      ...q.data,
+      artists: q.data.artists.map((a) => {
+        const k = known.get(a.id);
+        return k ? { ...k, ...a } : a;
+      }),
+    };
+  }, [q.data, knownArtistsQ.data]);
 
   if (query.length === 0) {
     return (
@@ -120,7 +122,10 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
 
       {bucket === "albums" && items.length > 0 && (
         <div className="section">
-          <AlbumTable albums={ranked!.albums} />
+          <AlbumTable
+            albums={ranked!.albums}
+            onPlayAlbum={(a) => void playAlbum(a.id)}
+          />
         </div>
       )}
 

@@ -1,0 +1,204 @@
+# Production deploy behind a reverse proxy — Caddy reverse-proxies the gateway,
+# terminating public-trust TLS with a Let's Encrypt cert obtained via
+# Cloudflare DNS-01. The gateway is `expose`d (network-internal only),
+# never published to the host: all external traffic flows through Caddy.
+#
+# This is a SIBLING of docker-compose.gateway-only.yml, not an overlay.
+# Use one or the other, not both:
+#
+#   docker compose -f docker-compose.prod.yml up -d              # this file
+#   docker compose -f docker-compose.gateway-only.yml up -d      # dev / self-signed
+#
+# Single-host by default: a CLAP-CPU embedder runs alongside the gateway
+# and serves recommendations over the internal compose network. For
+# split-host deployments (GPU on a separate box) override EMBEDDER_URL
+# to the remote address and bring up only the embedder via
+# docker-compose.embedder-only.yml on that host.
+#
+# Required env (in .env alongside this file, mode 0600):
+#   NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD
+#   GATEWAY_PUBLIC_HOST     — bare public hostname (e.g. crates.example.com),
+#                             used as the Caddy site address + TLS SNI
+#   GATEWAY_PUBLIC_BASE_URL — full URL clients use, including port if non-443
+#                             (e.g. https://crates.example.com:8443).
+#                             Drives the OAuth redirect_uri.
+#   CLOUDFLARE_API_TOKEN    — scoped Zone:DNS:Edit on the parent zone only
+#   LE_CONTACT_EMAIL        — LE registration + expiry-warning recipient
+#
+# Optional env:
+#   CADDY_HTTPS_PORT        — alt HTTPS port when 443 is taken (common on NAS platforms).
+#                             Defaults to 443. Whatever you pick must
+#                             also appear in GATEWAY_PUBLIC_BASE_URL.
+#   EMBEDDER_URL            — override the embedder address. Defaults
+#                             to http://embedder:9000 (the in-compose
+#                             sidecar). Point at a remote host for
+#                             split-host deployments.
+#   EMBEDDER_BEARER_TOKEN   — shared secret enforced on /embed/*.
+#                             Optional for the default single-host deploy
+#                             (the embedder is compose-internal); REQUIRED
+#                             for split-host (see docker-compose.embedder-only.yml).
+#   EMBEDDER_MODELS_DIR     — host path or named volume holding the
+#                             CLAP checkpoint as clap.pt. Defaults to
+#                             a named volume; override with an absolute
+#                             path on the NAS for ZFS snapshotting.
+#   ACME_DIRECTORY          — set to staging while iterating on the flow
+
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/caddy/Dockerfile
+    image: crates-music/caddy:dev
+    container_name: crates-caddy
+    restart: unless-stopped
+    ports:
+      # HTTPS port is env-driven: default 443 for local dev, override
+      # via CADDY_HTTPS_PORT=8443 on hosts where :443 is taken by
+      # an existing reverse proxy (Traefik in our homelab). The same
+      # value is also exposed inside the container — Caddyfile reads
+      # CADDY_HTTPS_PORT to know what to bind.
+      #
+      # NOTE: we no longer publish :80. With DNS-01 issuance the HTTP-01
+      # fallback is unused, and without :80 there's no HTTP→HTTPS
+      # redirect — clients must use the explicit https://host:port URL.
+      # That's reflected in OAUTH_WEB_REDIRECT_URIS below.
+      #
+      # NOTE: HTTP/3 / QUIC is omitted. UDP doesn't help when we're
+      # already on a non-default port (clients fall back to TCP for
+      # the first connection anyway); revisit if mobile clients ship.
+      - "${CADDY_HTTPS_PORT:-443}:${CADDY_HTTPS_PORT:-443}"
+    volumes:
+      # Caddyfile is baked into the image (see docker/caddy/Dockerfile)
+      # so no bind mount needed. Behaviour is parametrized by env vars.
+      #
+      # CRITICAL: caddy-data holds the LE account key and issued cert.
+      # If you lose this volume Caddy re-registers with LE (new account
+      # key, fresh issuance counter against rate limits). Worth backing
+      # up; not catastrophic to rebuild, but you'll burn ~5 minutes and
+      # one of LE's weekly issuance allowances.
+      #
+      # Volume source is env-driven so the same compose works locally
+      # (named volume default) and on NAS app platforms (override with an
+      # absolute path to a ZFS-snapshottable dataset, e.g.
+      # CADDY_DATA_DIR=/mnt/<pool>/crates-music-state/caddy-data).
+      - ${CADDY_DATA_DIR:-caddy-data}:/data
+      - ${CADDY_CONFIG_DIR:-caddy-config}:/config
+    environment:
+      GATEWAY_PUBLIC_HOST: ${GATEWAY_PUBLIC_HOST:?set GATEWAY_PUBLIC_HOST in .env}
+      GATEWAY_UPSTREAM: gateway:8443
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env}
+      LE_CONTACT_EMAIL: ${LE_CONTACT_EMAIL:?set LE_CONTACT_EMAIL in .env}
+      ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+      CADDY_HTTPS_PORT: ${CADDY_HTTPS_PORT:-443}
+    depends_on:
+      gateway:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
+
+  embedder:
+    build:
+      context: .
+      dockerfile: docker/embedder/Dockerfile.clap
+    image: crates-music/embedder-clap:dev
+    container_name: crates-embedder
+    restart: unless-stopped
+    environment:
+      EMBEDDER_BACKEND: clap
+      CLAP_CHECKPOINT: /models/clap.pt
+      # Optional here: this embedder is `expose`-only (compose-internal,
+      # never published — see below), so the docker network is the trust
+      # boundary. For split-host (embedder on a separate box via
+      # docker-compose.embedder-only.yml) the token is REQUIRED on both
+      # hosts — that file enforces it with `:?`.
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+    volumes:
+      # Shared with the gateway. /reduce writes UMAP projections
+      # back into gateway-state.recommend.sqlite, so the embedder
+      # must see the same SQLite file. uid 10001 is pinned in both
+      # Dockerfiles to make that work.
+      - ${GATEWAY_DATA_DIR:-gw-data}:/data
+      # CLAP checkpoint lives in its own volume. ~2 GB, mostly cold.
+      # Operators provide the .pt file (research-licensed, not in
+      # git) — drop it in as `clap.pt` at the mount root. On a NAS,
+      # set EMBEDDER_MODELS_DIR to an absolute path so the file is on
+      # a ZFS-snapshottable dataset and survives `docker volume rm`.
+      - ${EMBEDDER_MODELS_DIR:-embedder-models}:/models:ro
+    # Embedder is reachable only via the compose-internal DNS name
+    # `embedder` — never published to the host.
+    expose:
+      - "9000"
+    # CLAP holds ~2 GB of float32 weights plus working memory; 4 GB
+    # is the observed working default. Tighten via env on small hosts.
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-4g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    image: crates-music/gateway:dev
+    container_name: crates-gateway
+    # Wait for the embedder to come up healthy before booting. The
+    # gateway only probes the embedder *at startup* — if it starts
+    # before the embedder is reachable, it enters permanent
+    # degraded mode (no recommendations) until restarted. The CLAP
+    # checkpoint takes 30–90 s to load on CPU, so the embedder
+    # Dockerfile sets start_period=120s.
+    depends_on:
+      embedder:
+        condition: service_healthy
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL:?set NAVIDROME_URL in .env}
+      NAVIDROME_USERNAME: ${NAVIDROME_USERNAME:?set NAVIDROME_USERNAME in .env}
+      NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD:?set NAVIDROME_PASSWORD in .env}
+      # In-compose sidecar by default. Override to a remote URL for
+      # split-host deployments where the GPU box runs the embedder.
+      EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:9000}
+      # Match the embedder's token. Optional single-host (the in-compose
+      # sidecar has none); set it when EMBEDDER_URL points at a remote
+      # split-host embedder that enforces a token, or the gateway can't
+      # authenticate and drops to degraded mode.
+      EMBEDDER_BEARER_TOKEN: ${EMBEDDER_BEARER_TOKEN:-}
+      # OAuth redirect must match the URL the browser actually loads,
+      # *including the port* when it isn't the default 443. The base
+      # URL is a separate env var (rather than derived from HOST+PORT)
+      # because doing the omit-port-when-443 conditional inside compose
+      # interpolation is fiddly — spelling it out once is clearer.
+      OAUTH_WEB_REDIRECT_URIS: ${GATEWAY_PUBLIC_BASE_URL:?set GATEWAY_PUBLIC_BASE_URL in .env}/oauth/callback
+      GATEWAY_HOSTNAME: ${GATEWAY_PUBLIC_HOST}
+      RUST_LOG: ${RUST_LOG:-info,music_gateway=info,sqlx=warn}
+    volumes:
+      # Same env-driven pattern as caddy-data — local default is a
+      # named volume, override on a NAS via GATEWAY_DATA_DIR=
+      # /mnt/<pool>/crates-music-state/gw-data so ZFS snapshots cover it.
+      - ${GATEWAY_DATA_DIR:-gw-data}:/data
+    # NOTE: no `ports:` — gateway is reachable only via Caddy on the
+    # internal compose network. Publishing :8443 to the host would
+    # bypass TLS termination (clients could hit the mkcert cert
+    # directly) and circumvent Caddy's logs / future rate-limiting.
+    expose:
+      - "8443"
+    restart: unless-stopped
+    mem_limit: ${GATEWAY_MEM_LIMIT:-1g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"
+
+volumes:
+  # Named volumes only used when *_DIR env vars are unset (i.e., local
+  # dev/test deploys). On NAS app platforms these declarations are inert —
+  # the env-driven absolute paths bypass the named-volume mechanism.
+  gw-data:
+  caddy-data:
+  caddy-config:
+  embedder-models:

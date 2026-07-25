@@ -55,7 +55,10 @@ async fn build_mock_server() -> MockServer {
     });
     let template = ResponseTemplate::new(200)
         .set_body_json(body.clone())
-        .insert_header("Server-Timing", "decode;dur=12.3, resample;dur=4.5, gpu_forward;dur=2480");
+        .insert_header(
+            "Server-Timing",
+            "decode;dur=12.3, resample;dur=4.5, gpu_forward;dur=2480",
+        );
 
     // Two mounts (one per path). wiremock matches mounts by predicate;
     // a single Mock with no path filter would also work but the
@@ -78,6 +81,7 @@ fn build_client(server: &MockServer) -> EmbedderClient {
     EmbedderClient::new(EmbedderConfig {
         url: server.uri().parse().expect("server uri"),
         timeout: Duration::from_secs(5),
+        bearer_token: None,
     })
     .expect("client builds")
 }
@@ -100,7 +104,10 @@ fn bench_embed_audio(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &payload, |b, p| {
             b.iter(|| {
                 rt.block_on(async {
-                    let r = client.embed_audio(black_box(p.clone())).await.expect("embed");
+                    let r = client
+                        .embed_audio(black_box(p.clone()))
+                        .await
+                        .expect("embed");
                     black_box(r);
                 });
             });
@@ -123,7 +130,10 @@ fn bench_embed_text(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(len), &text, |b, t| {
             b.iter(|| {
                 rt.block_on(async {
-                    let r = client.embed_text(black_box(t.as_str())).await.expect("embed");
+                    let r = client
+                        .embed_text(black_box(t.as_str()))
+                        .await
+                        .expect("embed");
                     black_box(r);
                 });
             });

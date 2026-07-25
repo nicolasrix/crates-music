@@ -4,10 +4,21 @@
 //! artist_key)`, greedily picks `top_n` of them maximising
 //!
 //! ```text
-//! score(c | admitted) = λ * sim(c, seed)
+//! relevance(c)        = sim(c, seed) + relevance_bonus(c)
+//! score(c | admitted) = λ * relevance(c)
 //!                     - (1 - λ) * max_{a ∈ admitted} sim(c, a)
 //!                     - μ * artist_count(c.artist)
 //! ```
+//!
+//! `relevance_bonus` is an additive, caller-supplied adjustment to the
+//! relevance term — today it carries the user-preference signal
+//! (`preference_weight · affinity(c)`, see [`crate::preference`]): a
+//! candidate the listener has liked / replayed is nudged up, one they've
+//! disliked / skipped is nudged down. It defaults to `0.0` (no
+//! adjustment), so the formula degrades to plain MMR for callers that
+//! don't compute it. The bonus only touches relevance — the diversity
+//! term still uses raw `sim(c, a)` over the embedding vectors, so
+//! preference reorders near-ties without distorting the novelty geometry.
 //!
 //! - `λ = 1.0`: pure similarity (preserves the ANN's relevance order).
 //! - `λ = 0.0`: pure novelty (after an initial relevance-driven pick, each
@@ -64,6 +75,10 @@ pub struct Candidate {
     /// (`"id:<artist_id>"` when available, `"name:<lowercased>"`
     /// otherwise). `None` opts the candidate out of the penalty.
     pub artist_key: Option<String>,
+    /// Additive adjustment to the relevance term — the user-preference
+    /// affinity bonus (`preference_weight · affinity`). `0.0` = no
+    /// adjustment (plain MMR). See the module doc's score formula.
+    pub relevance_bonus: f32,
 }
 
 /// Greedy MMR selection. Returns indices into `candidates` in
@@ -108,6 +123,13 @@ pub fn mmr_rerank(
     // and pay a heavier penalty.
     let mut artist_counts: HashMap<String, u32> = initial_artist_counts.clone();
 
+    // Relevance = raw seed-similarity plus the caller's additive bonus
+    // (preference affinity). The diversity term deliberately does NOT use
+    // this — it operates on the embedding vectors directly.
+    let relevance = |cand_idx: usize| -> f32 {
+        candidates[cand_idx].sim_to_seed + candidates[cand_idx].relevance_bonus
+    };
+
     let artist_penalty = |cand_idx: usize, counts: &HashMap<String, u32>| -> f32 {
         if mu == 0.0 {
             return 0.0;
@@ -124,13 +146,12 @@ pub fn mmr_rerank(
             // First slot: relevance + artist penalty, no novelty term
             // (max_sim_to_admitted is uniformly 0 here anyway).
             argmax_by(&remaining, |&cand_idx| {
-                candidates[cand_idx].sim_to_seed - artist_penalty(cand_idx, &artist_counts)
+                relevance(cand_idx) - artist_penalty(cand_idx, &artist_counts)
             })
         } else {
             argmax_by(&remaining, |&cand_idx| {
-                let relevance = candidates[cand_idx].sim_to_seed;
                 let novelty_penalty = max_sim_to_admitted[cand_idx];
-                lambda * relevance
+                lambda * relevance(cand_idx)
                     - (1.0 - lambda) * novelty_penalty
                     - artist_penalty(cand_idx, &artist_counts)
             })
@@ -190,6 +211,9 @@ where
 /// empty inputs, or zero vectors — keeps the caller's loop simple
 /// without forcing a Result. CLAP outputs are unit-norm so the divide
 /// is purely defensive.
+///
+/// Shared with the [`crate::leash`] module (anchor leash penalty), which
+/// computes candidate-vs-anchor cosines over the same whitened vectors.
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -208,8 +232,8 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)] // exact-equality is intentional: the helper
-                            // returns literal 0.0 / 1.0 in the cases we
-                            // assert on.
+// returns literal 0.0 / 1.0 in the cases we
+// assert on.
 mod tests {
     use super::*;
 
@@ -219,6 +243,7 @@ mod tests {
             sim_to_seed: sim,
             vector: Some(vec),
             artist_key: None,
+            relevance_bonus: 0.0,
         }
     }
 
@@ -228,6 +253,7 @@ mod tests {
             sim_to_seed: sim,
             vector: None,
             artist_key: None,
+            relevance_bonus: 0.0,
         }
     }
 
@@ -240,6 +266,18 @@ mod tests {
             sim_to_seed: sim,
             vector: Some(vec),
             artist_key: Some(artist.to_string()),
+            relevance_bonus: 0.0,
+        }
+    }
+
+    /// Candidate with an explicit preference bonus on the relevance term.
+    fn cand_with_bonus(id: &str, sim: f32, vec: Vec<f32>, bonus: f32) -> Candidate {
+        Candidate {
+            track_id: TrackId::from(id),
+            sim_to_seed: sim,
+            vector: Some(vec),
+            artist_key: None,
+            relevance_bonus: bonus,
         }
     }
 
@@ -417,10 +455,7 @@ mod tests {
         //   a: 0.5*0.5 - 0.5*0 (b has no vector) = 0.25
         //   No other candidates.
         // → a wins.
-        let cs = vec![
-            cand("a", 0.5, vec![1.0, 0.0]),
-            cand_no_vec("b", 0.9),
-        ];
+        let cs = vec![cand("a", 0.5, vec![1.0, 0.0]), cand_no_vec("b", 0.9)];
         let out = no_penalty(&cs, 0.5, 2);
         assert_eq!(out, vec![1, 0]);
     }
@@ -585,6 +620,79 @@ mod tests {
         counts.insert("duke".to_string(), 1);
         let out = mmr_rerank(&cs, 0.7, 1, 0.15, &counts);
         assert_eq!(out, vec![0]);
+    }
+
+    // --- relevance bonus (user-preference affinity) ---
+
+    #[test]
+    fn zero_bonus_matches_the_unadjusted_path() {
+        // A bonus of 0 everywhere must produce identical output to plain
+        // candidates — the cold-start / preference-disabled guarantee.
+        let plain = vec![
+            cand("a", 0.9, vec![1.0, 0.0]),
+            cand("b", 0.7, vec![0.0, 1.0]),
+            cand("c", 0.5, vec![0.5, 0.5]),
+        ];
+        let zeroed = vec![
+            cand_with_bonus("a", 0.9, vec![1.0, 0.0], 0.0),
+            cand_with_bonus("b", 0.7, vec![0.0, 1.0], 0.0),
+            cand_with_bonus("c", 0.5, vec![0.5, 0.5], 0.0),
+        ];
+        assert_eq!(no_penalty(&plain, 0.7, 3), no_penalty(&zeroed, 0.7, 3));
+    }
+
+    #[test]
+    fn positive_bonus_promotes_a_liked_candidate() {
+        // λ=1 (pure relevance). b is less similar (0.7 vs 0.9) but a
+        // strong preference bonus lifts its relevance above a's.
+        //   a: 0.9 + 0.0  = 0.9
+        //   b: 0.7 + 0.25 = 0.95  → b wins the first slot
+        let cs = vec![
+            cand_with_bonus("a", 0.9, vec![1.0, 0.0], 0.0),
+            cand_with_bonus("b", 0.7, vec![0.0, 1.0], 0.25),
+        ];
+        let out = mmr_rerank(&cs, 1.0, 1, 0.0, &HashMap::new());
+        assert_eq!(out, vec![1], "liked-but-less-similar b should win");
+    }
+
+    #[test]
+    fn negative_bonus_demotes_a_disliked_candidate() {
+        // λ=1. a is most similar but a disliked penalty sinks it below b.
+        //   a: 0.9 - 0.3 = 0.6
+        //   b: 0.7 + 0.0 = 0.7  → b wins
+        let cs = vec![
+            cand_with_bonus("a", 0.9, vec![1.0, 0.0], -0.3),
+            cand_with_bonus("b", 0.7, vec![0.0, 1.0], 0.0),
+        ];
+        let out = mmr_rerank(&cs, 1.0, 2, 0.0, &HashMap::new());
+        assert_eq!(out, vec![1, 0], "disliked a demoted below b");
+    }
+
+    #[test]
+    fn small_bonus_does_not_override_a_large_relevance_gap() {
+        // The bonus is a tilt, not an override: a modest bonus can't drag
+        // a far-less-relevant track to the top.
+        //   a: 0.95 + 0.0  = 0.95
+        //   b: 0.40 + 0.15 = 0.55  → a still wins
+        let cs = vec![
+            cand_with_bonus("a", 0.95, vec![1.0, 0.0], 0.0),
+            cand_with_bonus("b", 0.40, vec![0.0, 1.0], 0.15),
+        ];
+        let out = mmr_rerank(&cs, 1.0, 1, 0.0, &HashMap::new());
+        assert_eq!(out, vec![0]);
+    }
+
+    #[test]
+    fn bonus_feeds_relevance_not_the_diversity_term() {
+        // Two identical-direction vectors so the diversity term is the
+        // same for both; the bonus only shifts relevance. At λ=0.5 the
+        // first pick is relevance+penalty-driven → the bonus decides it.
+        let cs = vec![
+            cand_with_bonus("a", 0.8, vec![1.0, 0.0], 0.0),
+            cand_with_bonus("b", 0.8, vec![1.0, 0.0], 0.2),
+        ];
+        let out = mmr_rerank(&cs, 0.5, 1, 0.0, &HashMap::new());
+        assert_eq!(out, vec![1], "bonus breaks the relevance tie");
     }
 
     #[test]

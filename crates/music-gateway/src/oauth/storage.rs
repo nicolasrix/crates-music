@@ -20,6 +20,10 @@ pub struct NewAuthCode {
     pub client_id: String,
     pub redirect_uri: String,
     pub code_challenge: String,
+    /// The logged-in user the authorizing session belongs to. Carried
+    /// onto the minted token pair so the access token resolves to the
+    /// right principal (PR B).
+    pub user_id: i64,
     pub ttl: Duration,
 }
 
@@ -39,6 +43,7 @@ pub struct AuthCode {
     pub client_id: String,
     pub redirect_uri: String,
     pub code_challenge: String,
+    pub user_id: i64,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
 }
@@ -46,8 +51,16 @@ pub struct AuthCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRefreshToken {
     pub client_id: String,
+    /// The owning user. Preserved across rotation so a refreshed pair
+    /// keeps the same identity (PR B).
+    pub user_id: i64,
     /// `None` = no expiry; rotation is the revocation path.
     pub ttl: Option<Duration>,
+    /// Rotation-chain family (sec review 1.5). `None` starts a new family
+    /// (a fresh grant from an auth code / device code); on rotation the
+    /// caller threads the parent's `family_id` so the whole chain shares
+    /// one id and reuse of any member can revoke the family.
+    pub family_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +74,12 @@ pub struct IssuedRefreshToken {
 pub struct RefreshToken {
     pub token_hash: String,
     pub client_id: String,
+    pub user_id: i64,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: Option<i64>,
+    /// Rotation-chain family id (sec review 1.5). Shared by every token
+    /// in the chain; the rotation path threads this into the successor.
+    pub family_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +98,57 @@ pub struct AccessToken {
     pub expires_at_unix_ms: i64,
 }
 
+/// Input for `create_device_code`. Issued-at is filled in by the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDeviceCode {
+    pub client_id: String,
+    pub ttl: Duration,
+    /// Polling interval handed back to the client (RFC 8628 §3.2).
+    pub interval: Duration,
+}
+
+/// Plaintext-bearing return value from `create_device_code`. Both codes
+/// are returned once: the `device_code` goes to the polling client (only
+/// its hash is stored), the `user_code` is shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedDeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub expires_at_unix_ms: i64,
+    pub interval_secs: i64,
+}
+
+/// A device-code row looked up by `user_code` (for the approval page).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCodeRow {
+    pub user_code: String,
+    pub client_id: String,
+    pub issued_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub approved_at_unix_ms: Option<i64>,
+    pub denied_at_unix_ms: Option<i64>,
+    pub consumed_at_unix_ms: Option<i64>,
+}
+
+/// Outcome of a token-endpoint poll against a device code (RFC 8628 §3.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevicePollState {
+    /// User hasn't decided yet → `authorization_pending`.
+    Pending,
+    /// User approved; tokens were just minted for `client_id` (the consume
+    /// is atomic, so this is returned exactly once). `user_id` is the
+    /// approving browser session's user — `None` for a pre-PR-B row whose
+    /// approval predates identity threading (resolves to the owner).
+    Approved {
+        client_id: String,
+        user_id: Option<i64>,
+    },
+    /// User denied → `access_denied`.
+    Denied,
+    /// Unknown, expired, or already-consumed code → `expired_token`.
+    Expired,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("sqlx: {0}")]
@@ -89,9 +157,91 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("malformed redirect_uris JSON in DB: {0}")]
     DecodeRedirectUris(serde_json::Error),
+    #[error("username already taken")]
+    UsernameTaken,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Input for `create_guest_code`. `created_at` is stamped by the store;
+/// the code itself is minted by the store (never client-supplied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewGuestCode {
+    pub host_user_id: i64,
+    pub label: Option<String>,
+    /// Absolute expiry (unix-ms). `None` = until revoked.
+    pub expires_at_unix_ms: Option<i64>,
+    /// Cap on redemptions. `None` = unlimited.
+    pub max_uses: Option<i64>,
+}
+
+/// Plaintext-bearing return value from `create_guest_code`. The plaintext
+/// is shown to the host once; the row holds only its hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedGuestCode {
+    pub id: i64,
+    pub code: String,
+    pub expires_at_unix_ms: Option<i64>,
+    pub max_uses: Option<i64>,
+}
+
+/// A guest-code row for the host's management UI. No plaintext (it's
+/// unrecoverable once minted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestCodeRow {
+    pub id: i64,
+    pub host_user_id: i64,
+    pub label: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: Option<i64>,
+    pub max_uses: Option<i64>,
+    pub uses: i64,
+    pub revoked_at_unix_ms: Option<i64>,
+}
+
+/// Result of `redeem_guest_code`. Splits the failure space so the caller
+/// can return an actionable error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedeemOutcome {
+    /// Valid redemption; the guest attaches to this host's room.
+    Ok { host_user_id: i64 },
+    /// Code exists but is revoked, expired, or out of uses.
+    Spent,
+    /// No such code.
+    Unknown,
+}
+
+/// Input for `insert_user`. `created_at` is stamped by the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUser {
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    /// `'admin' | 'user' | 'guest'` — validated by the schema CHECK.
+    pub role: String,
+    pub password_hash: Option<String>,
+    pub host_user_id: Option<i64>,
+    pub expires_at_unix_ms: Option<i64>,
+}
+
+/// Credentials needed by the login flow: the row's id, its Argon2 hash
+/// (absent for guests, who can't password-login), and its role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginUser {
+    pub id: i64,
+    pub password_hash: Option<String>,
+    pub role: String,
+}
+
+/// Public-facing user row for the admin list. Deliberately omits
+/// `password_hash` — the provisioning UI never sees credential material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSummary {
+    pub id: i64,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub created_at_unix_ms: i64,
+}
 
 /// Input shape for `register_client`. Created-at timestamp is filled in by
 /// the store so callers can't forge it.
@@ -144,6 +294,15 @@ impl OauthStore {
         Ok(Self { pool })
     }
 
+    /// The underlying pool, so sibling gateway-state stores (e.g. the
+    /// playlist store, PR F) can share the same `gateway-state.sqlite`
+    /// connection pool and its migrated schema rather than opening a second
+    /// pool to the same file.
+    #[must_use]
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn register_client(&self, client: NewClient) -> Result<OauthClient> {
         let now = unix_ms_now();
         let uris_json = serde_json::to_string(&client.redirect_uris)
@@ -175,14 +334,19 @@ impl OauthStore {
         Ok(row.map(|r| r.get::<String, _>("password_hash")))
     }
 
-    /// Insert the master-password hash for the (single) user. Errors if a
-    /// row already exists — changing the master password is a separate
-    /// admin flow, not yet implemented.
+    /// Insert the owner row + master-password hash at bootstrap. Errors if a
+    /// row already exists — rotating the master password is a separate admin
+    /// flow (`set_user_password` on id=1).
+    ///
+    /// Seeds the owner as `id=1, username='owner', role='admin'` so the
+    /// multi-user login path (which looks accounts up by username) can find
+    /// it. A fresh `/oauth/setup` and an existing deployment migrated by
+    /// `0004` therefore agree on the owner's identity shape.
     pub async fn set_master_password_hash(&self, phc: &str) -> Result<()> {
         let now = unix_ms_now();
         sqlx::query(
-            "INSERT INTO users (id, password_hash, created_at) \
-             VALUES (1, ?, ?)",
+            "INSERT INTO users (id, username, display_name, role, password_hash, created_at) \
+             VALUES (1, 'owner', 'Owner', 'admin', ?, ?)",
         )
         .bind(phc)
         .bind(now)
@@ -211,21 +375,24 @@ impl OauthStore {
         }))
     }
 
-    /// Mint a new browser session, store its hash, return the plaintext
-    /// token (to put in `Set-Cookie`) plus its metadata.
-    pub async fn create_session(&self, ttl: Duration) -> Result<IssuedSession> {
+    /// Mint a new browser session bound to `user_id`, store its hash, and
+    /// return the plaintext token (to put in `Set-Cookie`) plus its
+    /// metadata. The `user_id` rides through every authorization this
+    /// session grants (auth codes, device approvals) into the issued tokens.
+    pub async fn create_session(&self, user_id: i64, ttl: Duration) -> Result<IssuedSession> {
         let token = session::mint_token();
         let token_hash = session::hash_token(&token);
         let issued_at = unix_ms_now();
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         let expires_at = issued_at.saturating_add(ttl_ms);
         sqlx::query(
-            "INSERT INTO sessions (token_hash, issued_at, expires_at) \
-             VALUES (?, ?, ?)",
+            "INSERT INTO sessions (token_hash, issued_at, expires_at, user_id) \
+             VALUES (?, ?, ?, ?)",
         )
         .bind(&token_hash)
         .bind(issued_at)
         .bind(expires_at)
+        .bind(user_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedSession {
@@ -243,7 +410,7 @@ impl OauthStore {
         let token_hash = session::hash_token(token);
         let now = unix_ms_now();
         let row = sqlx::query(
-            "SELECT token_hash, issued_at, expires_at \
+            "SELECT token_hash, user_id, issued_at, expires_at \
              FROM sessions \
              WHERE token_hash = ? \
                AND expires_at > ? \
@@ -255,6 +422,8 @@ impl OauthStore {
         .await?;
         Ok(row.map(|r| Session {
             token_hash: r.get("token_hash"),
+            // NULL only on a legacy/pre-PR-B row; treat as the owner.
+            user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
         }))
@@ -276,6 +445,51 @@ impl OauthStore {
         Ok(())
     }
 
+    /// Revoke every active session for a user. Returns the number of
+    /// sessions revoked. Used on admin password reset (sec review 1.4): a
+    /// recovered/compromised account must lose all its browser sessions,
+    /// not just its password.
+    pub async fn revoke_all_sessions_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let res = sqlx::query(
+            "UPDATE sessions SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke every active refresh **and** access token for a user, in one
+    /// transaction. Returns the total rows revoked. Paired with
+    /// `revoke_all_sessions_for_user` on password reset so a compromised
+    /// account is fully cut off — not left with live access tokens for the
+    /// remainder of their 1 h TTL, nor able to refresh.
+    pub async fn revoke_all_tokens_for_user(&self, user_id: i64) -> Result<u64> {
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        let refresh = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        let access = sqlx::query(
+            "UPDATE access_tokens SET revoked_at = ? \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(refresh.rows_affected() + access.rows_affected())
+    }
+
     /// Mint and store a fresh authorization code. The plaintext is in
     /// the return value (goes into the redirect URL); the row holds only
     /// its sha256.
@@ -288,8 +502,8 @@ impl OauthStore {
         sqlx::query(
             "INSERT INTO auth_codes \
                 (code_hash, client_id, redirect_uri, code_challenge, \
-                 code_challenge_method, issued_at, expires_at) \
-             VALUES (?, ?, ?, ?, 'S256', ?, ?)",
+                 code_challenge_method, issued_at, expires_at, user_id) \
+             VALUES (?, ?, ?, ?, 'S256', ?, ?, ?)",
         )
         .bind(&code_hash)
         .bind(&input.client_id)
@@ -297,6 +511,7 @@ impl OauthStore {
         .bind(&input.code_challenge)
         .bind(issued_at)
         .bind(expires_at)
+        .bind(input.user_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedAuthCode {
@@ -322,7 +537,7 @@ impl OauthStore {
                AND consumed_at IS NULL \
                AND expires_at > ? \
              RETURNING code_hash, client_id, redirect_uri, code_challenge, \
-                       issued_at, expires_at",
+                       issued_at, expires_at, user_id",
         )
         .bind(now)
         .bind(&code_hash)
@@ -334,6 +549,7 @@ impl OauthStore {
             client_id: r.get("client_id"),
             redirect_uri: r.get("redirect_uri"),
             code_challenge: r.get("code_challenge"),
+            user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
         }))
@@ -346,15 +562,20 @@ impl OauthStore {
         let expires_at = input
             .ttl
             .map(|t| issued_at.saturating_add(i64::try_from(t.as_millis()).unwrap_or(i64::MAX)));
+        // A new grant starts its own family (id = the token's own hash);
+        // rotation threads the parent's id so the whole chain matches.
+        let family_id = input.family_id.unwrap_or_else(|| token_hash.clone());
         sqlx::query(
             "INSERT INTO refresh_tokens \
-                (token_hash, client_id, issued_at, expires_at) \
-             VALUES (?, ?, ?, ?)",
+                (token_hash, client_id, issued_at, expires_at, user_id, family_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&token_hash)
         .bind(&input.client_id)
         .bind(issued_at)
         .bind(expires_at)
+        .bind(input.user_id)
+        .bind(&family_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedRefreshToken {
@@ -370,7 +591,7 @@ impl OauthStore {
         let token_hash = session::hash_token(token);
         let now = unix_ms_now();
         let row = sqlx::query(
-            "SELECT token_hash, client_id, issued_at, expires_at \
+            "SELECT token_hash, client_id, user_id, issued_at, expires_at, family_id \
              FROM refresh_tokens \
              WHERE token_hash = ? \
                AND revoked_at IS NULL \
@@ -383,9 +604,141 @@ impl OauthStore {
         Ok(row.map(|r| RefreshToken {
             token_hash: r.get("token_hash"),
             client_id: r.get("client_id"),
+            user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
             issued_at_unix_ms: r.get("issued_at"),
             expires_at_unix_ms: r.get("expires_at"),
+            family_id: r.get("family_id"),
         }))
+    }
+
+    /// Atomic single-use redemption for rotation: revoke the refresh
+    /// token (and every access token derived from it) and return its row
+    /// **exactly once**, scoped to `client_id`. Returns `None` for a
+    /// token that is missing, expired, already revoked, or registered to
+    /// a different client.
+    ///
+    /// The single-row `UPDATE ... RETURNING` is the concurrency gate
+    /// (mirrors `consume_auth_code`): two simultaneous refreshes of the
+    /// same token can't both win because only the row whose `revoked_at`
+    /// was still NULL is updated and returned — the loser matches no rows
+    /// and gets `None`. SQLite serialises the write transactions, so the
+    /// access-token cascade in the winning transaction is consistent.
+    /// A non-matching `client_id` leaves the token untouched (the WHERE
+    /// doesn't match), so a wrong-client attempt can't burn a valid token.
+    pub async fn consume_refresh_token(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> Result<Option<RefreshToken>> {
+        let token_hash = session::hash_token(token);
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE token_hash = ? \
+               AND client_id = ? \
+               AND revoked_at IS NULL \
+               AND (expires_at IS NULL OR expires_at > ?) \
+             RETURNING token_hash, client_id, user_id, issued_at, expires_at, family_id",
+        )
+        .bind(now)
+        .bind(&token_hash)
+        .bind(client_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        // Cascade-revoke derived access tokens only when we actually
+        // consumed the refresh (otherwise a no-op).
+        if row.is_some() {
+            sqlx::query(
+                "UPDATE access_tokens SET revoked_at = ? \
+                 WHERE refresh_token_hash = ? AND revoked_at IS NULL",
+            )
+            .bind(now)
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        Ok(row.map(|r| RefreshToken {
+            token_hash: r.get("token_hash"),
+            client_id: r.get("client_id"),
+            user_id: r.get::<Option<i64>, _>("user_id").unwrap_or(1),
+            issued_at_unix_ms: r.get("issued_at"),
+            expires_at_unix_ms: r.get("expires_at"),
+            family_id: r.get("family_id"),
+        }))
+    }
+
+    /// Reuse detection (OAuth 2.1 §4.3.1, sec review 1.5). Given a token
+    /// that [`consume_refresh_token`] just rejected, decide whether the
+    /// rejection is a *replay of an already-rotated* token — the
+    /// fingerprint of theft — and if so return its `family_id` so the
+    /// caller can revoke the whole chain.
+    ///
+    /// Only a row that exists, matches `client_id`, is revoked, **and was
+    /// revoked longer than `grace` ago** counts as reuse. The grace window
+    /// suppresses the benign race where two near-simultaneous refreshes of
+    /// the same live token both fire (the loser sees a just-revoked token —
+    /// see the web singleflight gap, sec review 1.7): those are
+    /// milliseconds apart, so they fall inside `grace` and are treated as a
+    /// plain `invalid_grant`, not a family-killing reuse. A genuine
+    /// exfiltrated-token replay happens far later and trips detection.
+    /// Unknown / wrong-client / expired-never-revoked tokens return `None`.
+    pub async fn detect_refresh_reuse(
+        &self,
+        token: &str,
+        client_id: &str,
+        grace: Duration,
+    ) -> Result<Option<String>> {
+        let token_hash = session::hash_token(token);
+        let cutoff = unix_ms_now()
+            .saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        let row = sqlx::query(
+            "SELECT family_id FROM refresh_tokens \
+             WHERE token_hash = ? \
+               AND client_id = ? \
+               AND revoked_at IS NOT NULL \
+               AND revoked_at <= ?",
+        )
+        .bind(&token_hash)
+        .bind(client_id)
+        .bind(cutoff)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<String, _>("family_id")))
+    }
+
+    /// Revoke every refresh token in a rotation family plus every access
+    /// token derived from any of them, in one transaction. The blunt
+    /// response to reuse detection: a stolen token means the attacker and
+    /// the legitimate client share a chain, so the whole family dies.
+    /// Returns the number of refresh-token rows revoked.
+    pub async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        let now = unix_ms_now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE access_tokens SET revoked_at = ? \
+             WHERE revoked_at IS NULL \
+               AND refresh_token_hash IN \
+                 (SELECT token_hash FROM refresh_tokens WHERE family_id = ?)",
+        )
+        .bind(now)
+        .bind(family_id)
+        .execute(&mut *tx)
+        .await?;
+        let refresh = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = ? \
+             WHERE family_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(family_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(refresh.rows_affected())
     }
 
     /// Revoke a refresh token plus every access token derived from it.
@@ -414,11 +767,29 @@ impl OauthStore {
         Ok(())
     }
 
+    /// Mint an access token with no explicit user attribution. The bearer
+    /// middleware resolves a NULL `user_id` to the owner — see
+    /// `resolve_principal`. PR B threads the real user via
+    /// `mint_access_token_for_user`.
     pub async fn mint_access_token(
         &self,
         client_id: &str,
         refresh_token_hash: Option<&str>,
         ttl: Duration,
+    ) -> Result<IssuedAccessToken> {
+        self.mint_access_token_for_user(client_id, refresh_token_hash, ttl, None)
+            .await
+    }
+
+    /// Mint an access token attributed to `user_id` (or unattributed when
+    /// `None`). Once PR B's multi-user login lands, the token endpoint
+    /// passes the logged-in user's id here.
+    pub async fn mint_access_token_for_user(
+        &self,
+        client_id: &str,
+        refresh_token_hash: Option<&str>,
+        ttl: Duration,
+        user_id: Option<i64>,
     ) -> Result<IssuedAccessToken> {
         let token = session::mint_token();
         let token_hash = session::hash_token(&token);
@@ -427,14 +798,15 @@ impl OauthStore {
             issued_at.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX));
         sqlx::query(
             "INSERT INTO access_tokens \
-                (token_hash, client_id, refresh_token_hash, issued_at, expires_at) \
-             VALUES (?, ?, ?, ?, ?)",
+                (token_hash, client_id, refresh_token_hash, issued_at, expires_at, user_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&token_hash)
         .bind(client_id)
         .bind(refresh_token_hash)
         .bind(issued_at)
         .bind(expires_at)
+        .bind(user_id)
         .execute(&self.pool)
         .await?;
         Ok(IssuedAccessToken {
@@ -484,6 +856,527 @@ impl OauthStore {
         }))
     }
 
+    /// Insert a user row and return its assigned id. Roles are validated
+    /// at the schema level (`CHECK (role IN ...)`). `password_hash` is the
+    /// Argon2id PHC string for real accounts and `None` for guests;
+    /// `host_user_id`/`expires_at` are guest-only.
+    ///
+    /// This is the low-level row insert; the admin-facing provisioning
+    /// endpoint and guest-code redemption (PR B / PR D) call it after
+    /// their own validation. Exposed in PR A so the authorization layer
+    /// can be tested against real non-admin principals.
+    pub async fn insert_user(&self, user: NewUser) -> Result<i64> {
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "INSERT INTO users \
+                (username, display_name, role, password_hash, host_user_id, expires_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&user.username)
+        .bind(&user.display_name)
+        .bind(user.role)
+        .bind(&user.password_hash)
+        .bind(user.host_user_id)
+        .bind(user.expires_at_unix_ms)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    /// Fetch a user's display fields for `whoami`. Returns
+    /// `(username, display_name)` (both nullable — guests have neither).
+    /// `None` if the id doesn't exist.
+    pub async fn user_profile(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let row = sqlx::query("SELECT username, display_name FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| {
+            (
+                r.get::<Option<String>, _>("username"),
+                r.get::<Option<String>, _>("display_name"),
+            )
+        }))
+    }
+
+    /// Insert a real account (admin/user), translating a username-uniqueness
+    /// collision into the typed [`Error::UsernameTaken`] so the provisioning
+    /// handler can map it to a 409 rather than a 500. Thin wrapper over
+    /// [`insert_user`](Self::insert_user).
+    pub async fn create_account(&self, user: NewUser) -> Result<i64> {
+        match self.insert_user(user).await {
+            Ok(id) => Ok(id),
+            Err(Error::Sqlx(e)) if is_unique_violation(&e) => Err(Error::UsernameTaken),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Look up the credentials for a login attempt. `None`/empty username
+    /// defaults to the owner (id=1), so the bootstrap "master password only"
+    /// login keeps working with no username typed. A real username resolves
+    /// that account. Returns `None` when no such row exists — the caller
+    /// still burns a dummy verify so the timing doesn't leak existence.
+    pub async fn find_login_user(&self, username: Option<&str>) -> Result<Option<LoginUser>> {
+        let row = match username {
+            Some(u) if !u.is_empty() => {
+                sqlx::query("SELECT id, password_hash, role FROM users WHERE username = ?")
+                    .bind(u)
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            _ => {
+                sqlx::query("SELECT id, password_hash, role FROM users WHERE id = 1")
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+        };
+        Ok(row.map(|r| LoginUser {
+            id: r.get("id"),
+            password_hash: r.get::<Option<String>, _>("password_hash"),
+            role: r.get("role"),
+        }))
+    }
+
+    /// List the real accounts (admin + user), newest-row last. Guests are
+    /// excluded — they're ephemeral and managed by the guest-code flow
+    /// (PR D), not the user-provisioning UI. No credential material.
+    pub async fn list_users(&self) -> Result<Vec<UserSummary>> {
+        let rows = sqlx::query(
+            "SELECT id, username, display_name, role, created_at \
+             FROM users WHERE role IN ('admin', 'user') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| UserSummary {
+                id: r.get("id"),
+                username: r.get::<Option<String>, _>("username"),
+                display_name: r.get::<Option<String>, _>("display_name"),
+                role: r.get("role"),
+                created_at_unix_ms: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    /// Delete a user by id and cascade their tokens/sessions (FK
+    /// `ON DELETE CASCADE`, enabled per-connection by sqlx). Returns
+    /// `true` if a row was removed. The caller must refuse to delete the
+    /// owner (id=1) — this method does not, so it stays reusable for guest
+    /// reaping (PR D).
+    pub async fn delete_user(&self, id: i64) -> Result<bool> {
+        let res = sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Rewrite a real account's password hash in place. Used by the admin
+    /// password-reset endpoint and the host-only `reset-master-password`
+    /// subcommand (id=1). Returns `true` if a row was updated. Refuses
+    /// guests (they have no password). The row is never deleted/recreated,
+    /// so dependent data is preserved — see D8 in the plan.
+    pub async fn set_user_password(&self, id: i64, phc: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE users SET password_hash = ? \
+             WHERE id = ? AND role IN ('admin', 'user')",
+        )
+        .bind(phc)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Resolve an active access token to its owning principal. Returns
+    /// `(user_id, role_str, host_user_id)`.
+    ///
+    /// Identity rules (the `users` join is a LEFT JOIN so we can tell the
+    /// two cases apart):
+    ///   * **NULL `user_id`** — a legacy token (pre-multi-user) or a PR-A
+    ///     token whose mint path doesn't set `user_id` yet. Resolves to the
+    ///     owner/admin (id=1), mirroring the static-bearer fallback. We do
+    ///     *not* require a `users` row for this case, so it works even on a
+    ///     not-yet-bootstrapped store.
+    ///   * **Explicit `user_id`** — must map to a live `users` row. A
+    ///     missing row (deleted user) or an elapsed `expires_at` (lapsed
+    ///     guest) yields `None`, so a token can't outlive its account even
+    ///     while its own short TTL is unspent.
+    ///
+    /// Returns `None` for missing, expired, or revoked tokens — the
+    /// identity-aware companion to `find_access_token`.
+    pub async fn resolve_principal(
+        &self,
+        token: &str,
+    ) -> Result<Option<(i64, String, Option<i64>)>> {
+        let token_hash = session::hash_token(token);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "SELECT a.user_id AS raw_user_id, u.role AS role, \
+                    u.host_user_id AS host_user_id, u.expires_at AS user_expires_at \
+             FROM access_tokens a \
+             LEFT JOIN users u ON u.id = a.user_id \
+             WHERE a.token_hash = ? \
+               AND a.revoked_at IS NULL \
+               AND a.expires_at > ?",
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let raw_user_id: Option<i64> = row.get("raw_user_id");
+        match raw_user_id {
+            // Legacy / PR-A token → owner/admin, no users row required.
+            None => Ok(Some((1, "admin".to_string(), None))),
+            Some(user_id) => {
+                // LEFT JOIN miss => user deleted out from under the token.
+                let Some(role) = row.get::<Option<String>, _>("role") else {
+                    return Ok(None);
+                };
+                let user_expires_at: Option<i64> = row.get("user_expires_at");
+                if user_expires_at.is_some_and(|e| e <= now) {
+                    return Ok(None); // lapsed guest account
+                }
+                let host_user_id: Option<i64> = row.get("host_user_id");
+                Ok(Some((user_id, role, host_user_id)))
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Device Authorization Grant (RFC 8628)
+    // -----------------------------------------------------------------
+
+    /// Mint and store a fresh device code + user code. The plaintext
+    /// `device_code` is in the return value (goes to the polling client);
+    /// the row holds only its sha256. `user_code` is stored in plaintext
+    /// for the approval-page lookup.
+    pub async fn create_device_code(&self, input: NewDeviceCode) -> Result<IssuedDeviceCode> {
+        let device_code = session::mint_token();
+        let device_code_hash = session::hash_token(&device_code);
+        let user_code = session::mint_user_code();
+        let issued_at = unix_ms_now();
+        let ttl_ms = i64::try_from(input.ttl.as_millis()).unwrap_or(i64::MAX);
+        let expires_at = issued_at.saturating_add(ttl_ms);
+        let interval_secs = i64::try_from(input.interval.as_secs()).unwrap_or(5).max(1);
+        sqlx::query(
+            "INSERT INTO device_codes \
+                (device_code_hash, user_code, client_id, issued_at, expires_at, interval_secs) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&device_code_hash)
+        .bind(&user_code)
+        .bind(&input.client_id)
+        .bind(issued_at)
+        .bind(expires_at)
+        .bind(interval_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(IssuedDeviceCode {
+            device_code,
+            user_code,
+            expires_at_unix_ms: expires_at,
+            interval_secs,
+        })
+    }
+
+    /// Look up a device code by its (plaintext, user-typed) `user_code`,
+    /// for the browser approval page. Returns `None` for an unknown code.
+    pub async fn find_device_by_user_code(&self, user_code: &str) -> Result<Option<DeviceCodeRow>> {
+        let row = sqlx::query(
+            "SELECT user_code, client_id, issued_at, expires_at, \
+                    approved_at, denied_at, consumed_at \
+             FROM device_codes WHERE user_code = ?",
+        )
+        .bind(user_code)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| DeviceCodeRow {
+            user_code: r.get("user_code"),
+            client_id: r.get("client_id"),
+            issued_at_unix_ms: r.get("issued_at"),
+            expires_at_unix_ms: r.get("expires_at"),
+            approved_at_unix_ms: r.get("approved_at"),
+            denied_at_unix_ms: r.get("denied_at"),
+            consumed_at_unix_ms: r.get("consumed_at"),
+        }))
+    }
+
+    /// Record the user's approve/deny decision for a `user_code`. Only
+    /// affects a row that is still pending (no decision, not consumed, not
+    /// expired). Returns `true` if a decision was recorded, `false` if the
+    /// code was unknown, already decided, consumed, or expired.
+    ///
+    /// On approval the approving browser session's `approver_user_id` is
+    /// stamped onto the row so the device's minted tokens carry the real
+    /// identity (PR B). Denials leave `user_id` untouched.
+    pub async fn set_device_decision(
+        &self,
+        user_code: &str,
+        approve: bool,
+        approver_user_id: Option<i64>,
+    ) -> Result<bool> {
+        let now = unix_ms_now();
+        // Approval additionally records who approved; denial only stamps the
+        // timestamp. Two static SQL strings keep binding order unambiguous.
+        let result = if approve {
+            sqlx::query(
+                "UPDATE device_codes SET approved_at = ?, user_id = ? \
+                 WHERE user_code = ? \
+                   AND approved_at IS NULL \
+                   AND denied_at IS NULL \
+                   AND consumed_at IS NULL \
+                   AND expires_at > ?",
+            )
+            .bind(now)
+            .bind(approver_user_id)
+            .bind(user_code)
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE device_codes SET denied_at = ? \
+                 WHERE user_code = ? \
+                   AND approved_at IS NULL \
+                   AND denied_at IS NULL \
+                   AND consumed_at IS NULL \
+                   AND expires_at > ?",
+            )
+            .bind(now)
+            .bind(user_code)
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Poll a device code from the token endpoint. Classifies the row, and
+    /// — only when it's approved-and-unspent — atomically stamps
+    /// `consumed_at` so tokens mint exactly once (the `UPDATE … RETURNING`
+    /// is the concurrency gate, mirroring `consume_auth_code`). Unknown,
+    /// expired, and already-consumed codes all collapse to `Expired`.
+    pub async fn consume_device_code(&self, device_code: &str) -> Result<DevicePollState> {
+        let device_code_hash = session::hash_token(device_code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "SELECT expires_at, approved_at, denied_at, consumed_at \
+             FROM device_codes WHERE device_code_hash = ?",
+        )
+        .bind(&device_code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(DevicePollState::Expired);
+        };
+        let expires_at: i64 = row.get("expires_at");
+        let approved_at: Option<i64> = row.get("approved_at");
+        let denied_at: Option<i64> = row.get("denied_at");
+        let consumed_at: Option<i64> = row.get("consumed_at");
+
+        if consumed_at.is_some() || expires_at <= now {
+            return Ok(DevicePollState::Expired);
+        }
+        if denied_at.is_some() {
+            return Ok(DevicePollState::Denied);
+        }
+        if approved_at.is_none() {
+            return Ok(DevicePollState::Pending);
+        }
+
+        // Approved and unspent: atomically claim it. The WHERE re-checks
+        // every precondition, so a concurrent poll can't double-mint — the
+        // loser matches no row and falls through to `Expired`.
+        let claimed = sqlx::query(
+            "UPDATE device_codes SET consumed_at = ? \
+             WHERE device_code_hash = ? \
+               AND approved_at IS NOT NULL \
+               AND denied_at IS NULL \
+               AND consumed_at IS NULL \
+               AND expires_at > ? \
+             RETURNING client_id, user_id",
+        )
+        .bind(now)
+        .bind(&device_code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        match claimed {
+            Some(r) => Ok(DevicePollState::Approved {
+                client_id: r.get("client_id"),
+                user_id: r.get::<Option<i64>, _>("user_id"),
+            }),
+            None => Ok(DevicePollState::Expired),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Guest codes (PR D) — a host User mints a shareable code; redeeming
+    // it creates an ephemeral guest attached to the host's room.
+    // -----------------------------------------------------------------
+
+    /// Mint a guest code owned by `host_user_id`. The plaintext is returned
+    /// once (to show the host); only its sha256 is stored. `label` is a
+    /// free-text reminder ("Party Saturday"); `expires_at`/`max_uses` bound
+    /// the code (either may be `None` for unbounded-on-that-axis).
+    pub async fn create_guest_code(&self, input: NewGuestCode) -> Result<IssuedGuestCode> {
+        let code = session::mint_user_code();
+        let code_hash = session::hash_token(&code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "INSERT INTO guest_codes \
+                (code_hash, host_user_id, label, created_at, expires_at, max_uses) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&code_hash)
+        .bind(input.host_user_id)
+        .bind(&input.label)
+        .bind(now)
+        .bind(input.expires_at_unix_ms)
+        .bind(input.max_uses)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(IssuedGuestCode {
+            id: row.get::<i64, _>("id"),
+            code,
+            expires_at_unix_ms: input.expires_at_unix_ms,
+            max_uses: input.max_uses,
+        })
+    }
+
+    /// Atomically redeem a guest code: validate it (not revoked, not
+    /// expired, under `max_uses`) and bump `uses` in a single guarded
+    /// `UPDATE ... RETURNING`. Returns the owning `host_user_id` on
+    /// success, or a typed reason on failure.
+    ///
+    /// The single-row update is the concurrency gate (same pattern as
+    /// `consume_refresh_token`): two simultaneous redemptions of the last
+    /// remaining use can't both win, because the `uses < max_uses` guard
+    /// is evaluated inside the atomic write — the loser matches no row.
+    /// We distinguish "invalid" from "exhausted" with a follow-up read so
+    /// the host UI / joining guest gets an actionable message.
+    pub async fn redeem_guest_code(&self, code: &str) -> Result<RedeemOutcome> {
+        let code_hash = session::hash_token(code);
+        let now = unix_ms_now();
+        let row = sqlx::query(
+            "UPDATE guest_codes SET uses = uses + 1 \
+             WHERE code_hash = ? \
+               AND revoked_at IS NULL \
+               AND (expires_at IS NULL OR expires_at > ?) \
+               AND (max_uses IS NULL OR uses < max_uses) \
+             RETURNING host_user_id",
+        )
+        .bind(&code_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok(RedeemOutcome::Ok {
+                host_user_id: row.get::<i64, _>("host_user_id"),
+            });
+        }
+        // The guarded UPDATE matched nothing — figure out why for a useful
+        // error. A row that exists but failed the guard is revoked/expired/
+        // exhausted; no row at all is an unknown code.
+        let existing = sqlx::query(
+            "SELECT revoked_at, expires_at, max_uses, uses \
+             FROM guest_codes WHERE code_hash = ?",
+        )
+        .bind(&code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match existing {
+            None => RedeemOutcome::Unknown,
+            Some(r) => {
+                let revoked = r.get::<Option<i64>, _>("revoked_at").is_some();
+                let expired = r
+                    .get::<Option<i64>, _>("expires_at")
+                    .is_some_and(|e| e <= now);
+                let exhausted = match r.get::<Option<i64>, _>("max_uses") {
+                    Some(max) => r.get::<i64, _>("uses") >= max,
+                    None => false,
+                };
+                if revoked || expired || exhausted {
+                    RedeemOutcome::Spent
+                } else {
+                    // Shouldn't happen (guard and re-read disagree) — treat
+                    // as unknown rather than silently succeed.
+                    RedeemOutcome::Unknown
+                }
+            }
+        })
+    }
+
+    /// List a host's guest codes, newest first. Never includes the
+    /// plaintext (it's unrecoverable — only the hash is stored).
+    pub async fn list_guest_codes(&self, host_user_id: i64) -> Result<Vec<GuestCodeRow>> {
+        let rows = sqlx::query(
+            "SELECT id, host_user_id, label, created_at, expires_at, \
+                    max_uses, uses, revoked_at \
+             FROM guest_codes WHERE host_user_id = ? ORDER BY id DESC",
+        )
+        .bind(host_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| GuestCodeRow {
+                id: r.get("id"),
+                host_user_id: r.get("host_user_id"),
+                label: r.get("label"),
+                created_at_unix_ms: r.get("created_at"),
+                expires_at_unix_ms: r.get("expires_at"),
+                max_uses: r.get("max_uses"),
+                uses: r.get("uses"),
+                revoked_at_unix_ms: r.get("revoked_at"),
+            })
+            .collect())
+    }
+
+    /// Revoke a guest code, scoped to its host so one user can't kill
+    /// another's code. Idempotent; returns `true` if a not-yet-revoked row
+    /// owned by `host_user_id` was revoked. Already-issued guest tokens
+    /// stay valid until they (or the guest row) expire — revoking only
+    /// stops *new* redemptions.
+    pub async fn revoke_guest_code(&self, host_user_id: i64, id: i64) -> Result<bool> {
+        let now = unix_ms_now();
+        let res = sqlx::query(
+            "UPDATE guest_codes SET revoked_at = ? \
+             WHERE id = ? AND host_user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(id)
+        .bind(host_user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Reap guest accounts whose `expires_at` has passed. `ON DELETE
+    /// CASCADE` on the token tables drops their access/refresh tokens with
+    /// them. Returns the number of guests deleted. Safe to call on a
+    /// schedule; `resolve_principal` already rejects a lapsed guest, so
+    /// this is housekeeping, not a security boundary.
+    pub async fn delete_expired_guests(&self, now_unix_ms: i64) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM users \
+             WHERE role = 'guest' AND expires_at IS NOT NULL AND expires_at <= ?",
+        )
+        .bind(now_unix_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Diagnostic: list every table in the DB. Used by tests to verify the
     /// migration applied; also useful for an admin/debug endpoint later.
     pub async fn table_names(&self) -> Result<Vec<String>> {
@@ -500,6 +1393,13 @@ impl OauthStore {
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
+}
+
+/// Whether a sqlx error is a SQLite UNIQUE-constraint violation — used to
+/// translate a duplicate `users.username` into [`Error::UsernameTaken`].
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
 }
 
 fn unix_ms_now() -> i64 {

@@ -57,23 +57,55 @@ async fn get_login_renders_form() {
 }
 
 #[tokio::test]
-async fn post_login_without_master_password_returns_503() {
-    // Gateway not bootstrapped → can't accept logins.
-    let oauth = OauthStore::open_in_memory().await.unwrap();
-    let state =
-        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
-    let app = build_router(state);
+async fn post_login_without_master_password_returns_401_like_wrong_password() {
+    // Bootstrap state must not leak: an un-configured gateway answers a
+    // login attempt with the *same* 401 + body as a wrong password, so a
+    // caller can't tell whether setup has happened.
+    let unconfigured = {
+        let oauth = OauthStore::open_in_memory().await.unwrap();
+        let state =
+            common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+        build_router(state)
+            .oneshot(
+                Request::post("/oauth/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("password=anything-very-long"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
 
-    let resp = app
-        .oneshot(
-            Request::post("/oauth/login")
-                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from("password=anything-very-long"))
-                .unwrap(),
-        )
+    let wrong_password = {
+        let oauth = OauthStore::open_in_memory().await.unwrap();
+        bootstrap(&oauth, "the-real-password").await;
+        let state =
+            common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+        build_router(state)
+            .oneshot(
+                Request::post("/oauth/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("password=anything-very-long"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(unconfigured.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+
+    let unconfigured_body = unconfigured.into_body().collect().await.unwrap().to_bytes();
+    let wrong_password_body = wrong_password
+        .into_body()
+        .collect()
         .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        unconfigured_body, wrong_password_body,
+        "the two failure modes must be byte-identical"
+    );
 }
 
 #[tokio::test]
@@ -94,6 +126,44 @@ async fn post_login_with_wrong_password_returns_401_and_no_cookie() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(extract_set_cookie(resp.headers()).is_none());
+}
+
+#[tokio::test]
+async fn repeated_wrong_passwords_lock_out_with_429() {
+    let oauth = OauthStore::open_in_memory().await.unwrap();
+    bootstrap(&oauth, "right-password-here").await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+    let app = build_router(state);
+
+    let bad = || {
+        Request::post("/oauth/login")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("password=nope"))
+            .unwrap()
+    };
+
+    // Five failures are each answered 401 (the limiter trips ON the
+    // fifth but doesn't block the request that caused it).
+    for _ in 0..5 {
+        let resp = app.clone().oneshot(bad()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // The sixth attempt is locked out — even with the *correct* password,
+    // proving the gate runs before password verification.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/oauth/login")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=right-password-here"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(extract_set_cookie(resp.headers()).is_none());
 }
 

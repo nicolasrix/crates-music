@@ -1,0 +1,37 @@
+# Build artifacts (multi-stage builds rebuild them inside the image).
+target/
+**/node_modules/
+apps/web/dist/
+
+# Local dev state — never wanted inside an image, sometimes large.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.ann
+*.ann.keys
+gateway-cache.sqlite*
+gateway-state.*
+audio-cache/
+models/
+certs/
+bench-results/
+**/.benchmarks/
+
+# Editor / VCS noise.
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+.DS_Store
+
+# Test caches.
+.pytest_cache/
+**/__pycache__/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Markdown/docs unrelated to deploy.
+*.md
+!docker/**/*.md
+!services/embedder/README.md

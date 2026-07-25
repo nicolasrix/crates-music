@@ -63,7 +63,7 @@ async fn submission_scrobble_writes_play_history_and_forwards_to_navidrome() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-1".to_string()))
+        .last_played(1, &TrackId::from("track-1".to_string()))
         .await
         .unwrap();
     assert!(last.is_some(), "play_history row should exist");
@@ -99,7 +99,7 @@ async fn now_playing_ping_does_not_bump_recency_clock() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-1".to_string()))
+        .last_played(1, &TrackId::from("track-1".to_string()))
         .await
         .unwrap();
     assert_eq!(last, None, "now-playing pings must not write a row");
@@ -135,7 +135,7 @@ async fn submission_default_when_param_omitted() {
 
     let last = state
         .play_history()
-        .last_played(&TrackId::from("track-default".to_string()))
+        .last_played(1, &TrackId::from("track-default".to_string()))
         .await
         .unwrap();
     assert!(last.is_some());
@@ -167,7 +167,7 @@ async fn second_submission_advances_recency_clock() {
         .unwrap();
     let after_first = state
         .play_history()
-        .last_played(&TrackId::from("t1".to_string()))
+        .last_played(1, &TrackId::from("t1".to_string()))
         .await
         .unwrap()
         .expect("first scrobble wrote a row");
@@ -189,7 +189,7 @@ async fn second_submission_advances_recency_clock() {
         .unwrap();
     let after_second = state
         .play_history()
-        .last_played(&TrackId::from("t1".to_string()))
+        .last_played(1, &TrackId::from("t1".to_string()))
         .await
         .unwrap()
         .expect("second scrobble keeps a row");
@@ -233,11 +233,7 @@ async fn submission_scrobble_appends_event_log_with_client_time() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let recent = state
-        .event_store()
-        .recently_played(10, None)
-        .await
-        .unwrap();
+    let recent = state.event_store().recently_played(10, None).await.unwrap();
     assert_eq!(recent.len(), 1, "exactly one scrobble event should land");
     assert_eq!(recent[0].track_id.as_str(), "track-evt");
     assert_eq!(
@@ -275,11 +271,7 @@ async fn now_playing_ping_does_not_append_event_log() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let recent = state
-        .event_store()
-        .recently_played(10, None)
-        .await
-        .unwrap();
+    let recent = state.event_store().recently_played(10, None).await.unwrap();
     assert!(recent.is_empty(), "now-playing pings must not log");
 }
 
@@ -306,7 +298,8 @@ async fn submission_scrobble_during_active_session_stamps_session_id() {
     let sid = music_core::SessionId::from("sess-scrobble-1".to_string());
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        // Owner room — the scrobble request below authenticates as the owner.
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: TrackId::from("track-in-session".to_string()),
@@ -330,7 +323,11 @@ async fn submission_scrobble_during_active_session_stamps_session_id() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let by_sess = state.event_store().by_session(&sid, 10).await.unwrap();
-    assert_eq!(by_sess.len(), 1, "scrobble must be tagged with the active session");
+    assert_eq!(
+        by_sess.len(),
+        1,
+        "scrobble must be tagged with the active session"
+    );
     assert_eq!(by_sess[0].track_id.as_str(), "track-in-session");
 }
 

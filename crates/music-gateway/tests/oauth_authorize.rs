@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::header::{COOKIE, LOCATION};
+use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use music_gateway::build_router;
 use music_gateway::oauth::{
@@ -25,7 +25,7 @@ async fn store_with_session_and_client() -> (OauthStore, String) {
     let oauth = OauthStore::open_in_memory().await.unwrap();
     let phc = password::hash("right-password-here").unwrap();
     oauth.set_master_password_hash(&phc).await.unwrap();
-    let issued = oauth.create_session(Duration::from_hours(1)).await.unwrap();
+    let issued = oauth.create_session(1, Duration::from_hours(1)).await.unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -48,6 +48,11 @@ fn cookie_header(token: &str) -> String {
 #[tokio::test]
 async fn create_auth_code_returns_plaintext_and_stores_hash() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -58,6 +63,7 @@ async fn create_auth_code_returns_plaintext_and_stores_hash() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "challenge".to_string(),
@@ -72,6 +78,11 @@ async fn create_auth_code_returns_plaintext_and_stores_hash() {
 #[tokio::test]
 async fn consume_auth_code_returns_row_then_refuses_replay() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -82,6 +93,7 @@ async fn consume_auth_code_returns_row_then_refuses_replay() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "abc123".to_string(),
@@ -116,6 +128,11 @@ async fn consume_unknown_auth_code_returns_none() {
 #[tokio::test]
 async fn consume_expired_auth_code_returns_none() {
     let oauth = OauthStore::open_in_memory().await.unwrap();
+    // Auth codes now FK-reference users(id); seed the owner (id=1).
+    oauth
+        .set_master_password_hash("$argon2id$dummy")
+        .await
+        .unwrap();
     oauth
         .register_client(NewClient {
             client_id: "web".to_string(),
@@ -126,6 +143,7 @@ async fn consume_expired_auth_code_returns_none() {
         .unwrap();
     let issued = oauth
         .create_auth_code(NewAuthCode {
+            user_id: 1,
             client_id: "web".to_string(),
             redirect_uri: "http://x".to_string(),
             code_challenge: "c".to_string(),
@@ -208,6 +226,122 @@ async fn authorize_with_session_redirects_to_client_with_code_and_state() {
     assert_eq!(
         consumed.code_challenge,
         "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    );
+}
+
+#[tokio::test]
+async fn authorize_with_prompt_login_forces_login_despite_session() {
+    // A valid session would normally short-circuit to the client with a
+    // code. `prompt=login` must override that and send the user to the
+    // login screen so they can switch accounts.
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await;
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}&prompt=login"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(
+        location.starts_with("/oauth/login?next="),
+        "prompt=login with a session must still go to login: {location}"
+    );
+    // The embedded next= URL must NOT carry prompt forward — otherwise the
+    // post-login bounce-back would re-force login and loop forever.
+    let next = extract_query_param(location, "next").unwrap();
+    assert!(
+        !next.contains("prompt"),
+        "next= must drop prompt to avoid a redirect loop: {next}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_prompt_login_revokes_the_old_session_server_side() {
+    // prompt=login must not merely ignore the cookie — it must revoke the
+    // session server-side (sec 1.4), or a second tab / back-button keeps
+    // authorizing as the switched-away user for the full TTL.
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth.clone(), SetupToken::none())
+            .await;
+    let app = build_router(state);
+
+    // First: a prompt=login authorize (bounces to login, kills the session).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}&prompt=login"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The session is dead in storage.
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_none(),
+        "prompt=login must revoke the old session"
+    );
+
+    // And presenting the same cookie to a normal authorize now goes to
+    // login (no code minted) — before the fix it would authorize.
+    let resp2 = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{VALID_QS}"))
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
+    let loc = resp2.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(
+        loc.starts_with("/oauth/login?next="),
+        "a revoked session must not authorize: {loc}"
+    );
+}
+
+#[tokio::test]
+async fn logout_revokes_session_and_clears_cookie() {
+    let (oauth, token) = store_with_session_and_client().await;
+    let state =
+        common::build_state_with_oauth(common::test_config(), oauth.clone(), SetupToken::none())
+            .await;
+    let app = build_router(state);
+
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_some(),
+        "session valid before logout"
+    );
+
+    let resp = app
+        .oneshot(
+            Request::post("/oauth/logout")
+                .header(COOKIE, cookie_header(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let set_cookie = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+    assert!(set_cookie.contains("gw_session="), "clears the cookie: {set_cookie}");
+    assert!(set_cookie.contains("Max-Age=0"), "expires the cookie: {set_cookie}");
+
+    assert!(
+        oauth.find_session(&token).await.unwrap().is_none(),
+        "session revoked server-side after logout"
     );
 }
 

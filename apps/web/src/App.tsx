@@ -1,13 +1,14 @@
-import { useEffect } from "react";
+import { ComponentType, useEffect } from "react";
 
 import { useAuth } from "./auth/AuthContext";
-import { ArtworkProvider } from "./components/ArtworkPalette";
+import { AudioCacheProvider } from "./cache/AudioCacheContext";
 import { Album } from "./pages/Album";
 import { Albums } from "./pages/Albums";
 import { Artist } from "./pages/Artist";
 import { Artists } from "./pages/Artists";
 import { Callback } from "./pages/Callback";
-import { DiagnosticsHome } from "./pages/diagnostics/DiagnosticsHome";
+import { Crates } from "./pages/Crates";
+import { Downloads } from "./pages/Downloads";
 import { Ingest } from "./pages/diagnostics/Ingest";
 import { Listening } from "./pages/diagnostics/Listening";
 import { Recommender } from "./pages/diagnostics/Recommender";
@@ -15,6 +16,7 @@ import { Rum } from "./pages/diagnostics/Rum";
 import { Tracing } from "./pages/diagnostics/Tracing";
 import { Home } from "./pages/Home";
 import { LatentSpace } from "./pages/LatentSpace";
+import { LikedSongs } from "./pages/LikedSongs";
 import { Playlist } from "./pages/Playlist";
 import { Queue } from "./pages/Queue";
 import { Search } from "./pages/Search";
@@ -28,7 +30,18 @@ import { PlayerProvider } from "./player/PlayerContext";
 import { modeFromSlug } from "./pages/listMode";
 import { useRoute } from "./router";
 import { initRum } from "./rum";
+import { useIsAdmin } from "./auth/useWhoami";
+import { DEFAULT_PANEL, panelVisible } from "./settings/nav";
+import { AboutPanel } from "./settings/panels/AboutPanel";
+import { AccountPanel } from "./settings/panels/AccountPanel";
+import { AppearancePanel } from "./settings/panels/AppearancePanel";
+import { AutoplayPanel } from "./settings/panels/AutoplayPanel";
+import { GuestsPanel } from "./settings/panels/GuestsPanel";
+import { PlaybackPanel } from "./settings/panels/PlaybackPanel";
+import { StoragePanel } from "./settings/panels/StoragePanel";
+import { SettingsShell } from "./settings/SettingsShell";
 import { SyncProvider } from "./sync/SyncContext";
+import { ToastProvider } from "./toast/ToastContext";
 
 export function App() {
   const { path } = useRoute();
@@ -42,18 +55,22 @@ export function App() {
   if (!tokens) return <SignIn />;
 
   return (
-    <SyncProvider>
-      <PlayerProvider>
-        <AutoplayProvider>
-          <ArtworkProvider>
-            <div className="shell">
-              <Routed path={path} />
-              <PlayerBar />
-            </div>
-          </ArtworkProvider>
-        </AutoplayProvider>
-      </PlayerProvider>
-    </SyncProvider>
+    // ToastProvider sits outside SyncProvider so the sync layer can
+    // surface rejected ops (`op_error`) as toasts.
+    <ToastProvider>
+      <SyncProvider>
+        <AudioCacheProvider>
+          <PlayerProvider>
+            <AutoplayProvider>
+              <div className="shell">
+                <Routed path={path} />
+                <PlayerBar />
+              </div>
+            </AutoplayProvider>
+          </PlayerProvider>
+        </AudioCacheProvider>
+      </SyncProvider>
+    </ToastProvider>
   );
 }
 
@@ -82,18 +99,76 @@ function Routed({ path }: { path: string }) {
   m = path.match(/^\/playlists\/([^/]+)$/);
   if (m && m[1]) return <Playlist id={m[1]} />;
 
+  if (path === "/crates") return <Crates />;
   if (path === "/search") return <Search />;
   if (path === "/search/artists") return <SearchBucket bucket="artists" />;
   if (path === "/search/albums") return <SearchBucket bucket="albums" />;
   if (path === "/search/tracks") return <SearchBucket bucket="tracks" />;
   if (path === "/queue") return <Queue />;
+  if (path === "/liked") return <LikedSongs />;
+  if (path === "/downloads") return <Downloads />;
   if (path === "/station") return <Station />;
-  if (path === "/diagnostics") return <DiagnosticsHome />;
-  if (path === "/diagnostics/recommender") return <Recommender />;
-  if (path === "/diagnostics/latent") return <LatentSpace />;
-  if (path === "/diagnostics/ingest") return <Ingest />;
-  if (path === "/diagnostics/tracing") return <Tracing />;
-  if (path === "/diagnostics/rum") return <Rum />;
-  if (path === "/diagnostics/listening") return <Listening />;
+  // Settings shell — /settings and /settings/<panel>. Bare /settings renders
+  // the default panel without redirecting (no history churn); an unknown
+  // panel falls back to the default too.
+  m = path.match(/^\/settings(?:\/([^/]+))?$/);
+  if (m) {
+    const id = m[1] && SETTINGS_PANELS[m[1]] ? m[1] : DEFAULT_PANEL;
+    return <SettingsRoute id={id} />;
+  }
+
+  // Legacy /diagnostics/* → /settings/* (old bookmarks / external links).
+  m = path.match(/^\/diagnostics(?:\/([^/]+))?$/);
+  if (m) {
+    const target = m[1] && SETTINGS_PANELS[m[1]] ? m[1] : "recommender";
+    return <Redirect to={`/settings/${target}`} />;
+  }
+
   return <Home />;
+}
+
+// Renders a settings panel, downgrading admin-only ("observe") panels to
+// the default for non-admins. Kept as its own component so the role hook
+// runs unconditionally (Routed's body has conditional early returns).
+// Fails closed: while whoami is still resolving, `useIsAdmin()` is false,
+// so a deep-linked observe panel shows the default panel until identity
+// confirms admin — never the reverse.
+function SettingsRoute({ id }: { id: string }) {
+  const isAdmin = useIsAdmin();
+  const effectiveId = panelVisible(id, isAdmin) ? id : DEFAULT_PANEL;
+  const Panel = SETTINGS_PANELS[effectiveId]!;
+  return (
+    <SettingsShell active={effectiveId}>
+      <Panel />
+    </SettingsShell>
+  );
+}
+
+// Maps a settings/diagnostics panel id (also the URL slug) to its component.
+// Single source for the router; the rail's order + labels live in
+// settings/nav, keyed by the same ids.
+const SETTINGS_PANELS: Record<string, ComponentType> = {
+  account: AccountPanel,
+  guests: GuestsPanel,
+  playback: PlaybackPanel,
+  appearance: AppearancePanel,
+  autoplay: AutoplayPanel,
+  storage: StoragePanel,
+  about: AboutPanel,
+  recommender: Recommender,
+  listening: Listening,
+  latent: LatentSpace,
+  ingest: Ingest,
+  tracing: Tracing,
+  rum: Rum,
+};
+
+// URL-replace redirect (no extra history entry, so Back doesn't bounce off
+// the old path straight back to where the user came from).
+function Redirect({ to }: { to: string }) {
+  useEffect(() => {
+    history.replaceState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [to]);
+  return null;
 }

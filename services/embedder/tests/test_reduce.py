@@ -23,6 +23,7 @@ from embedder.reduce import (
     compute_pcs,
     decode_vector_blob,
     default_proj_version,
+    project_matrix,
     read_embeddings_from_sqlite,
     run,
     write_projections_to_sqlite,
@@ -130,7 +131,19 @@ def test_default_proj_version_rejects_unsupported_dim() -> None:
 # proj_version so they describe the same snapshot.
 
 
-def test_compute_pcs_returns_shape_n_by_requested_components() -> None:
+@pytest.fixture
+def sklearn_module():
+    """Gate PCA tests on scikit-learn availability — it's a transitive
+    dep of the `reduce` extra, not installed in the base dev profile."""
+    return pytest.importorskip(
+        "sklearn",
+        reason="install with `uv sync --extra reduce` to run PCA-backed tests",
+    )
+
+
+def test_compute_pcs_returns_shape_n_by_requested_components(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # 30 points × 8 dims → 4 PCs, one per requested component, no padding.
     rng = np.random.default_rng(0)
     matrix = rng.standard_normal((30, 8)).astype(np.float32)
@@ -139,7 +152,9 @@ def test_compute_pcs_returns_shape_n_by_requested_components() -> None:
     assert np.isfinite(pcs).all()
 
 
-def test_compute_pcs_clamps_components_to_n_when_few_points() -> None:
+def test_compute_pcs_clamps_components_to_n_when_few_points(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # sklearn's PCA can't produce more components than min(N-1, D).
     # We clamp internally so a 3-point input doesn't crash — the
     # reducer must keep working on tiny dev datasets.
@@ -153,7 +168,9 @@ def test_compute_pcs_clamps_components_to_n_when_few_points() -> None:
     assert pcs.shape[1] >= 1
 
 
-def test_compute_pcs_clamps_components_to_dimensionality() -> None:
+def test_compute_pcs_clamps_components_to_dimensionality(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     # Embeddings can't have more axes than their own dimensionality.
     rng = np.random.default_rng(0)
     matrix = rng.standard_normal((10, 2)).astype(np.float32)
@@ -161,7 +178,9 @@ def test_compute_pcs_clamps_components_to_dimensionality() -> None:
     assert pcs.shape == (10, 2)
 
 
-def test_compute_pcs_is_deterministic_with_seeded_input() -> None:
+def test_compute_pcs_is_deterministic_with_seeded_input(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     rng = np.random.default_rng(7)
     matrix = rng.standard_normal((20, 8)).astype(np.float32)
     a = compute_pcs(matrix, n_components=4)
@@ -172,7 +191,9 @@ def test_compute_pcs_is_deterministic_with_seeded_input() -> None:
     np.testing.assert_allclose(np.abs(a), np.abs(b), rtol=0, atol=1e-6)
 
 
-def test_compute_pcs_empty_input_returns_empty_array() -> None:
+def test_compute_pcs_empty_input_returns_empty_array(
+    sklearn_module,  # noqa: ARG001
+) -> None:
     matrix = np.zeros((0, 8), dtype=np.float32)
     pcs = compute_pcs(matrix, n_components=4)
     assert pcs.shape == (0, 0)
@@ -430,3 +451,57 @@ def test_run_returns_zero_when_no_embeddings(
     )
     assert written == 0
     assert pv == default_proj_version(random_state=42)
+
+
+# --- project_matrix (vectors-over-the-wire) --------------------------------
+
+
+def test_project_matrix_rejects_track_id_count_mismatch() -> None:
+    matrix = np.zeros((3, 2), dtype=np.float32)
+    with pytest.raises(ValueError, match="track_ids"):
+        project_matrix(["only-one"], matrix)
+
+
+def test_project_matrix_delegates_to_project_embeddings(monkeypatch) -> None:
+    """project_matrix is a thin in-memory wrapper: it should build one
+    Embedding per row and forward the knobs verbatim to
+    project_embeddings (the pure UMAP+PCA core)."""
+    captured: dict = {}
+
+    def fake_project_embeddings(embeddings, **kwargs):
+        captured["track_ids"] = [e.track_id for e in embeddings]
+        captured["rows"] = [list(e.vector) for e in embeddings]
+        captured.update(kwargs)
+        return [Projection2D(track_id=e.track_id, x=0.0, y=0.0) for e in embeddings]
+
+    monkeypatch.setattr("embedder.reduce.project_embeddings", fake_project_embeddings)
+    matrix = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    out = project_matrix(
+        ["t1", "t2"],
+        matrix,
+        n_neighbors=20,
+        min_dist=0.25,
+        random_state=7,
+        metric="euclidean",
+        n_components=3,
+    )
+    assert [p.track_id for p in out] == ["t1", "t2"]
+    assert captured["track_ids"] == ["t1", "t2"]
+    assert captured["rows"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert captured["n_neighbors"] == 20
+    assert captured["min_dist"] == 0.25
+    assert captured["random_state"] == 7
+    assert captured["metric"] == "euclidean"
+    assert captured["n_components"] == 3
+
+
+def test_project_matrix_real_umap_3d_populates_z() -> None:
+    pytest.importorskip("umap")
+    rng = np.random.default_rng(0)
+    n = 30  # > default n_neighbors (15)
+    matrix = rng.standard_normal((n, 8)).astype(np.float32)
+    track_ids = [f"t{i}" for i in range(n)]
+    out = project_matrix(track_ids, matrix, n_components=3)
+    assert len(out) == n
+    assert [p.track_id for p in out] == track_ids
+    assert all(p.z is not None for p in out)

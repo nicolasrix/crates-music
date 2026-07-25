@@ -14,31 +14,52 @@ pub mod aggregate;
 pub mod ann;
 pub mod embedder;
 pub mod events;
+pub mod explore;
 pub mod feedback;
 pub mod ingest;
+pub mod leash;
 pub mod metadata;
 pub mod mmr;
 pub mod play_history;
+pub mod preference;
 pub mod projection;
+pub mod provenance;
 pub mod queue_filter;
+pub mod rating;
 pub mod sessions;
 pub mod store;
+pub mod track_affinity;
 pub mod types;
+pub mod whitening;
+pub mod whitening_store;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
 pub use events::{EventInput, EventStore, EventType, StoredEvent};
 pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
 pub use ingest::{MetadataFetcher, MetadataIngest};
+pub use leash::{
+    DEFAULT_LEASH_LAMBDA, DEFAULT_LEASH_TAU, LeashAdjustment, LeashCandidate, LeashParams,
+    LeashStats,
+};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };
 pub use mmr::{Candidate as MmrCandidate, mmr_rerank};
 pub use play_history::PlayHistoryStore;
+pub use preference::{AffinityEvent, half_life_days_to_ms, preference_bonus};
 pub use projection::{Projection2D, ProjectionStore, ProjectionVersionSummary};
+pub use provenance::{
+    RecommendationItemRecord, RecommendationKind, RecommendationLogStore, RecommendationOutcome,
+    RecommendationRecord, StoredRecommendation,
+};
 pub use queue_filter::{DiversityMode, QueueFilter, QueueFilterConfig};
+pub use rating::{LIKE_BONUS, LIKE_BONUS_ALBUM, LIKE_BONUS_ARTIST, RatedKind, Rating, RatingStore};
 pub use sessions::{SessionRow, SessionStore};
 pub use store::{EmbeddingStore, MIGRATIONS};
+pub use track_affinity::{AffinityRow, TrackAffinityStore};
 pub use types::{Embedding, EmbeddingKey, IngestStatus, ModelVersion};
+pub use whitening::{Whitening, default_k};
+pub use whitening_store::WhiteningStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -56,6 +77,9 @@ pub enum Error {
 
     #[error("invalid status string {0:?}")]
     InvalidStatus(String),
+
+    #[error("whitening: {0}")]
+    Whitening(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

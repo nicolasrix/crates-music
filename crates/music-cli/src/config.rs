@@ -3,30 +3,85 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally not derived: `TuiConfig`'s autoplay drift params are
+// floats (which are only `PartialEq`). Nothing keys a map/set on `Config`, so
+// `PartialEq` is all that's used (test `assert_eq!`s).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     /// When set, the CLI talks to a `music-gateway` instead of Navidrome
-    /// directly. Auth becomes a single bearer token; the `[server]`
-    /// credentials are unused in this mode but kept for clean fallback to
-    /// direct mode without rewriting the config.
+    /// directly. Auth is the OAuth 2.1 Device Authorization Grant — run
+    /// `crates-cli auth login` once; tokens are kept in a sibling
+    /// `cli-tokens.json`. The `[server]` credentials are unused in this
+    /// mode but kept for clean fallback to direct mode without rewriting
+    /// the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Streaming / download transcode quality. Per-client, like the web's
+    /// `cacheSettings` — see [`PlaybackConfig`].
+    #[serde(default)]
+    pub playback: PlaybackConfig,
+    /// Interactive-TUI settings (autoplay drift params, etc.). Per-client by
+    /// design, like the web client's localStorage — see [`TuiConfig`].
+    #[serde(default)]
+    pub tui: TuiConfig,
+    /// Path this config was loaded from. Not part of the on-disk format
+    /// (skipped by serde) — `Config::load` stamps it so siblings of the
+    /// config file (e.g. the `cli-tokens.json` token store) can be located.
+    #[serde(skip)]
+    pub source_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub url: String,
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Hand-rolled `Debug` so the Navidrome password is never printed in logs
+// or a panic dump. The derived impl would emit it verbatim.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub url: String,
-    pub bearer_token: String,
+    /// Path to a PEM file holding the CA that issued the gateway's TLS
+    /// cert — typically the mkcert root CA (`mkcert -CAROOT`/`rootCA.pem`).
+    /// Added as an *extra* trust anchor on top of the system store, so the
+    /// CLI verifies a `gateway.local` cert without installing the CA
+    /// system-wide. When unset, only the system trust store is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert_path: Option<PathBuf>,
+    /// Escape hatch: disable TLS certificate verification entirely. This
+    /// re-exposes the bearer token to anyone who can MITM the connection,
+    /// so it's only for throwaway/debug setups — prefer `ca_cert_path`.
+    /// Off by default; the CLI prints a loud warning when it's on.
+    #[serde(default)]
+    pub insecure_tls: bool,
+}
+
+// Derived `Debug` is fine now that the gateway holds no secret — the CLI
+// authenticates with the Device Authorization Grant and keeps tokens in a
+// separate `cli-tokens.json` store, not in this config.
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("url", &self.url)
+            .field("ca_cert_path", &self.ca_cert_path)
+            .field("insecure_tls", &self.insecure_tls)
+            .finish()
+    }
 }
 
 /// On-disk audio cache parameters. Defaults: 10 GB regular, 5 GB pinned,
@@ -60,6 +115,164 @@ fn default_pinned_budget() -> u64 {
     5 * 1024 * 1024 * 1024 // 5 GB
 }
 
+/// Transcode quality for audio the client fetches. `Original` streams the
+/// verbatim file; the two capped variants ride the `/rest/*` proxy's
+/// `format`/`maxBitRate` (Navidrome transcodes on demand — the same knobs the
+/// web's transcode-to-fit uses). Stream and download qualities are separate so
+/// you can, e.g., stream lossless on the LAN but pin space-efficient copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    /// Verbatim source file, no transcode.
+    #[default]
+    Original,
+    /// Opus at 128 kbps.
+    Opus128,
+    /// MP3 at 128 kbps.
+    Mp3128,
+}
+
+impl Quality {
+    /// The order the Settings view cycles through with `enter` / `←`/`→`.
+    pub const ALL: [Quality; 3] = [Quality::Original, Quality::Opus128, Quality::Mp3128];
+
+    /// `(format, maxBitRate)` for the Subsonic `stream` request, or `None` to
+    /// stream the original untouched.
+    #[must_use]
+    pub fn transcode(self) -> Option<(&'static str, u32)> {
+        match self {
+            Quality::Original => None,
+            Quality::Opus128 => Some(("opus", 128)),
+            Quality::Mp3128 => Some(("mp3", 128)),
+        }
+    }
+
+    /// Codec component of the [`AudioKey`](music_cache::AudioKey). `Original`
+    /// maps to `"stream"` — the value the CLI has always used — so blobs
+    /// cached before quality existed still resolve.
+    #[must_use]
+    pub fn codec(self) -> &'static str {
+        match self {
+            Quality::Original => "stream",
+            Quality::Opus128 => "opus",
+            Quality::Mp3128 => "mp3",
+        }
+    }
+
+    /// Bitrate component of the cache key (`None` for the original).
+    #[must_use]
+    pub fn bitrate(self) -> Option<u32> {
+        self.transcode().map(|(_, kbps)| kbps)
+    }
+
+    /// Human label for the Settings row.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Original => "original",
+            Quality::Opus128 => "opus @128k",
+            Quality::Mp3128 => "mp3 @128k",
+        }
+    }
+
+    /// Next quality in [`Self::ALL`], wrapping — the `enter`/cycle action.
+    #[must_use]
+    pub fn next(self) -> Quality {
+        let i = Self::ALL.iter().position(|q| *q == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+}
+
+/// Streaming and download transcode preferences. Both default to `Original`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlaybackConfig {
+    /// Quality for tracks fetched to play (the stream path).
+    #[serde(default)]
+    pub stream_quality: Quality,
+    /// Quality for tracks fetched to save offline (pin / bulk download).
+    #[serde(default)]
+    pub download_quality: Quality,
+}
+
+/// Interactive-TUI configuration. Currently just the autoplay drift
+/// parameters; Phase 7's Settings view will edit these in place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub autoplay: AutoplayConfig,
+}
+
+/// Tethered-drift autoplay parameters. Defaults mirror the web client's
+/// `DEFAULT_AUTOPLAY_SETTINGS` so the TUI and PWA drift identically. The
+/// frontier weights are folded into the seed list client-side; the leash and
+/// MMR params ride the `from-seeds` request body and are applied server-side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoplayConfig {
+    /// Start with autoplay already on. The web persists the last toggle in
+    /// localStorage; the TUI reads the initial state from here (runtime
+    /// toggling isn't persisted yet — that's Phase 7).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Refill the queue whenever fewer than this many tracks sit after the
+    /// now-playing cursor (web `MIN_UPCOMING`).
+    #[serde(default = "default_min_upcoming")]
+    pub min_upcoming: usize,
+    /// Boundary leash radius τ (whitened cosine) and strength λ — how hard a
+    /// candidate is demoted for straying from the anchor set.
+    #[serde(default = "default_leash_tau")]
+    pub leash_tau: f32,
+    #[serde(default = "default_leash_lambda")]
+    pub leash_lambda: f32,
+    /// Travel frontier: base weight β, per-step decay, and how many recently
+    /// played items seed the direction of drift.
+    #[serde(default = "default_frontier_weight")]
+    pub frontier_weight: f32,
+    #[serde(default = "default_frontier_decay")]
+    pub frontier_decay: f32,
+    #[serde(default = "default_frontier_window")]
+    pub frontier_window: usize,
+    /// MMR relevance/novelty tradeoff λ for the server-side diversity walk.
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f32,
+}
+
+impl Default for AutoplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_upcoming: default_min_upcoming(),
+            leash_tau: default_leash_tau(),
+            leash_lambda: default_leash_lambda(),
+            frontier_weight: default_frontier_weight(),
+            frontier_decay: default_frontier_decay(),
+            frontier_window: default_frontier_window(),
+            mmr_lambda: default_mmr_lambda(),
+        }
+    }
+}
+
+fn default_min_upcoming() -> usize {
+    5
+}
+fn default_leash_tau() -> f32 {
+    0.28
+}
+fn default_leash_lambda() -> f32 {
+    16.0
+}
+fn default_frontier_weight() -> f32 {
+    0.15
+}
+fn default_frontier_decay() -> f32 {
+    0.55
+}
+fn default_frontier_window() -> usize {
+    3
+}
+fn default_mmr_lambda() -> f32 {
+    0.8
+}
+
 /// Resolve cache root: explicit path if set, otherwise XDG cache.
 pub fn resolve_cache_root(config: &CacheConfig) -> Option<PathBuf> {
     if let Some(p) = &config.path {
@@ -72,11 +285,44 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading config at {}: {e}", path.display()))?;
-        let config: Self = toml::from_str(&raw)
+        let mut config: Self = toml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("parsing config at {}: {e}", path.display()))?;
+        config.source_path = path.to_path_buf();
         Ok(config)
     }
+
+    /// Persist the current config back to the file it was loaded from. Used by
+    /// the TUI Settings view so edits survive a restart (per-client, like the
+    /// web's localStorage). Written atomically (temp sibling + rename) so a
+    /// crash mid-write can't truncate a valid config. The `[server]` password
+    /// round-trips verbatim — it's the same file it came from.
+    pub fn save(&self) -> anyhow::Result<()> {
+        if self.source_path.as_os_str().is_empty() {
+            anyhow::bail!("cannot save config: no source path (not loaded from disk)");
+        }
+        let body =
+            toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
+        // Unique temp name per write: the TUI Settings view fires a save on
+        // every keystroke, and key-repeat can put several saves in flight at
+        // once (each an independent task). A shared temp path would let two
+        // writers interleave into one file and rename a torn result over the
+        // live config; a per-write name keeps each rename atomic.
+        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self
+            .source_path
+            .with_extension(format!("toml.{}.{seq}.tmp", std::process::id()));
+        std::fs::write(&tmp, body)
+            .map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.source_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp); // don't leak the temp on failure
+            anyhow::anyhow!("replacing {}: {e}", self.source_path.display())
+        })?;
+        Ok(())
+    }
 }
+
+/// Monotonic counter for [`Config::save`]'s per-write temp-file name.
+static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Returns the platform-appropriate default config path:
 /// `$XDG_CONFIG_HOME/crates-music/config.toml` on Linux,
@@ -84,4 +330,78 @@ impl Config {
 pub fn default_config_path() -> Option<PathBuf> {
     ProjectDirs::from("dev", "crates-music", "crates-music")
         .map(|d| d.config_dir().join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let server = ServerConfig {
+            url: "http://nav.lan:4533".to_string(),
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let gateway = GatewayConfig {
+            url: "https://gateway.local:8443".to_string(),
+            ca_cert_path: Some(PathBuf::from("/home/alice/rootCA.pem")),
+            insecure_tls: false,
+        };
+
+        let server_dbg = format!("{server:?}");
+        assert!(!server_dbg.contains("hunter2"));
+        assert!(server_dbg.contains("[REDACTED]"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(server_dbg.contains("alice"));
+
+        // The gateway block no longer holds a secret; the CA path is not
+        // sensitive and stays visible.
+        let gateway_dbg = format!("{gateway:?}");
+        assert!(gateway_dbg.contains("rootCA.pem"));
+    }
+
+    #[test]
+    fn quality_cache_key_components() {
+        // Original preserves the historical "stream" codec + no bitrate so
+        // already-cached blobs still resolve; the capped variants are distinct.
+        assert_eq!(Quality::Original.codec(), "stream");
+        assert_eq!(Quality::Original.bitrate(), None);
+        assert_eq!(Quality::Original.transcode(), None);
+        assert_eq!(Quality::Opus128.codec(), "opus");
+        assert_eq!(Quality::Opus128.bitrate(), Some(128));
+        assert_eq!(Quality::Opus128.transcode(), Some(("opus", 128)));
+        assert_eq!(Quality::Mp3128.transcode(), Some(("mp3", 128)));
+    }
+
+    #[test]
+    fn quality_cycles_and_serializes_lowercase() {
+        assert_eq!(Quality::Original.next(), Quality::Opus128);
+        assert_eq!(Quality::Opus128.next(), Quality::Mp3128);
+        assert_eq!(Quality::Mp3128.next(), Quality::Original);
+        // The wire form is lowercase (`opus128`), not the Rust `Opus128`.
+        let pb = PlaybackConfig {
+            stream_quality: Quality::Opus128,
+            download_quality: Quality::Mp3128,
+        };
+        let toml = toml::to_string(&pb).unwrap();
+        assert!(toml.contains("stream_quality = \"opus128\""), "{toml}");
+        assert!(toml.contains("download_quality = \"mp3128\""), "{toml}");
+    }
+
+    #[test]
+    fn playback_quality_parses_from_toml() {
+        let raw = r#"
+            [server]
+            url = "http://nav"
+            username = "a"
+            password = "b"
+            [playback]
+            stream_quality = "original"
+            download_quality = "opus128"
+        "#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(config.playback.stream_quality, Quality::Original);
+        assert_eq!(config.playback.download_quality, Quality::Opus128);
+    }
 }

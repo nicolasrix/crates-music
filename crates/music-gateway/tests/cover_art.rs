@@ -384,9 +384,7 @@ async fn duplicate_body_for_many_distinct_ids_is_treated_as_placeholder() {
     for i in 1..=5 {
         let r = app
             .clone()
-            .oneshot(auth(&format!(
-                "/rest/getCoverArt?id=al-{i}&size=200"
-            )))
+            .oneshot(auth(&format!("/rest/getCoverArt?id=al-{i}&size=200")))
             .await
             .unwrap();
         let b = r.into_body().collect().await.unwrap().to_bytes();
@@ -452,9 +450,7 @@ async fn small_number_of_albums_sharing_real_art_is_not_classified() {
     for i in 1..=4 {
         let r = app
             .clone()
-            .oneshot(auth(&format!(
-                "/rest/getCoverArt?id=al-disc{i}&size=200"
-            )))
+            .oneshot(auth(&format!("/rest/getCoverArt?id=al-disc{i}&size=200")))
             .await
             .unwrap();
         let b = r.into_body().collect().await.unwrap().to_bytes();
@@ -503,7 +499,11 @@ async fn duplicate_body_for_same_id_different_size_is_not_a_placeholder() {
         .await
         .unwrap();
     let b2 = r2.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(b2.as_ref(), body, "same id at a different size must not be flagged");
+    assert_eq!(
+        b2.as_ref(),
+        body,
+        "same id at a different size must not be flagged"
+    );
 }
 
 #[tokio::test]
@@ -538,9 +538,7 @@ async fn detected_placeholder_evicts_existing_cache_entries() {
     for i in 1..=6 {
         let _ = app
             .clone()
-            .oneshot(auth(&format!(
-                "/rest/getCoverArt?id=al-{i}&size=200"
-            )))
+            .oneshot(auth(&format!("/rest/getCoverArt?id=al-{i}&size=200")))
             .await
             .unwrap();
     }
@@ -558,6 +556,49 @@ async fn detected_placeholder_evicts_existing_cache_entries() {
         }
     }
     panic!("id=al-1 never started serving the SVG placeholder after detection");
+}
+
+#[tokio::test]
+async fn track_level_ids_sharing_album_cover_are_not_classified_as_placeholder() {
+    // Every track in an album resolves to the same cover art bytes via
+    // its mf-* id. An album with 15 tracks produces 15 distinct mf-*
+    // entries with the same etag — well above the duplicate threshold.
+    // The classifier must ignore mf-* ids when counting duplicates,
+    // otherwise real album art gets replaced with SVG placeholders.
+    let real_album_art: &[u8] = b"real-album-cover-shared-across-tracks";
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/getCoverArt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(real_album_art),
+        )
+        .mount(&upstream)
+        .await;
+
+    let app = build_router(
+        common::build_state(common::test_config_with_upstream(
+            &upstream.uri(),
+            "alice",
+            "sesame",
+        ))
+        .await,
+    );
+
+    for i in 1..=15 {
+        let r = app
+            .clone()
+            .oneshot(auth(&format!("/rest/getCoverArt?id=mf-track{i}&size=96")))
+            .await
+            .unwrap();
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            b.as_ref(),
+            real_album_art,
+            "track #{i} sharing album cover must not be classified as placeholder",
+        );
+    }
 }
 
 #[tokio::test]
@@ -582,9 +623,7 @@ async fn seed_param_drives_placeholder_initial() {
     );
 
     let r = app
-        .oneshot(auth(
-            "/rest/getCoverArt?id=ar-x&size=200&seed=Pink%20Floyd",
-        ))
+        .oneshot(auth("/rest/getCoverArt?id=ar-x&size=200&seed=Pink%20Floyd"))
         .await
         .unwrap();
     let body = r.into_body().collect().await.unwrap().to_bytes();
@@ -620,9 +659,7 @@ async fn seed_param_is_not_forwarded_to_upstream() {
     );
 
     let _ = app
-        .oneshot(auth(
-            "/rest/getCoverArt?id=al-1&size=200&seed=Brian%20Eno",
-        ))
+        .oneshot(auth("/rest/getCoverArt?id=al-1&size=200&seed=Brian%20Eno"))
         .await
         .unwrap();
 
@@ -734,7 +771,10 @@ async fn cached_placeholder_svg_is_rerendered_with_current_seed() {
         .unwrap();
     let body = r.into_body().collect().await.unwrap().to_bytes();
     let s = std::str::from_utf8(&body).unwrap();
-    assert!(s.contains(">P<"), "expected re-rendered SVG with 'P', got {s:?}");
+    assert!(
+        s.contains(">P<"),
+        "expected re-rendered SVG with 'P', got {s:?}"
+    );
     assert!(!s.contains(">A<"), "stale 'A' must not survive re-render");
 }
 
@@ -820,9 +860,7 @@ async fn cached_placeholder_revalidates_against_upstream_real_art() {
     // block on upstream).
     let r1 = app
         .clone()
-        .oneshot(auth(
-            "/rest/getCoverArt?id=al-fixed&size=200&seed=Paramore",
-        ))
+        .oneshot(auth("/rest/getCoverArt?id=al-fixed&size=200&seed=Paramore"))
         .await
         .unwrap();
     let b1 = r1.into_body().collect().await.unwrap().to_bytes();
@@ -837,9 +875,7 @@ async fn cached_placeholder_revalidates_against_upstream_real_art() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let r = app
             .clone()
-            .oneshot(auth(
-                "/rest/getCoverArt?id=al-fixed&size=200&seed=Paramore",
-            ))
+            .oneshot(auth("/rest/getCoverArt?id=al-fixed&size=200&seed=Paramore"))
             .await
             .unwrap();
         let body = r.into_body().collect().await.unwrap().to_bytes();
@@ -900,9 +936,7 @@ async fn revalidation_keeps_svg_when_upstream_still_serves_placeholder() {
     // First request: cache hit → SVG. Background revalidation fires.
     let r1 = app
         .clone()
-        .oneshot(auth(
-            "/rest/getCoverArt?id=al-target&size=200&seed=Foo",
-        ))
+        .oneshot(auth("/rest/getCoverArt?id=al-target&size=200&seed=Foo"))
         .await
         .unwrap();
     let b1 = r1.into_body().collect().await.unwrap().to_bytes();
@@ -916,9 +950,7 @@ async fn revalidation_keeps_svg_when_upstream_still_serves_placeholder() {
     // cached SVG alone.
     let r2 = app
         .clone()
-        .oneshot(auth(
-            "/rest/getCoverArt?id=al-target&size=200&seed=Foo",
-        ))
+        .oneshot(auth("/rest/getCoverArt?id=al-target&size=200&seed=Foo"))
         .await
         .unwrap();
     let b2 = r2.into_body().collect().await.unwrap().to_bytes();
@@ -968,9 +1000,7 @@ async fn revalidation_is_rate_limited_per_key() {
     for _ in 0..10 {
         let _ = app
             .clone()
-            .oneshot(auth(
-                "/rest/getCoverArt?id=al-burst&size=200&seed=Burst",
-            ))
+            .oneshot(auth("/rest/getCoverArt?id=al-burst&size=200&seed=Burst"))
             .await
             .unwrap();
     }

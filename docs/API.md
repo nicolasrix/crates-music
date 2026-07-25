@@ -25,6 +25,21 @@ A request is authenticated if its `Authorization: Bearer <token>` (or
 query-param path is required by `<audio>` and `<img>` URLs that can't
 set headers — see RFC 6750 §2.3.
 
+**Identity & roles.** `require_bearer` resolves every authenticated
+request to a `Principal { user_id, role, host_user_id? }` and injects it
+downstream. `role` is one of `admin | user | guest`. A NULL-`user_id`
+token (the legacy static bearer, or pre-multi-user rows) resolves to the
+owner (id=1, admin). The protected surface is split into two tiers:
+
+- **Any authenticated principal** — browse, play, recommend reads, room
+  control, ratings/events, `whoami`.
+- **Admin-only** (`require_admin`, 403 otherwise) — `/v1/admin/*`,
+  `/v1/diagnostics/*`, and recommender maintenance (`refit_whitening`,
+  `enqueue`).
+
+Real accounts (admin/user) are provisioned by an admin (see
+[`/v1/admin/users`](#post-v1adminusers)); guests come later (PR D).
+
 ## Public endpoints
 
 These don't require auth.
@@ -61,8 +76,17 @@ Form body (HTML form, not JSON):
 ### `GET /oauth/login` / `POST /oauth/login`
 
 Browser login form. The GET serves the HTML; the POST processes
-credentials and creates a session. Used by the OAuth Authorization
-Code flow when the user isn't already logged in.
+credentials and creates a session bound to the resolved `user_id`. Used
+by the OAuth Authorization Code flow when the user isn't already logged
+in.
+
+Form fields: `username` (optional — absent/empty logs in the owner, so
+the original master-password-only login is unchanged) and `password`.
+A real account supplies its `username`. Unknown username, wrong
+password, and not-yet-bootstrapped all return an identical 401 (no
+user-existence or bootstrap-state oracle). The logged-in `user_id`
+threads through the session → auth code → token chain, so the issued
+access token resolves to that account.
 
 ### `GET /oauth/authorize`
 
@@ -125,15 +149,88 @@ token_type_hint=refresh_token  # optional
 
 Always returns 200, even if the token wasn't found (per RFC).
 
+### `POST /oauth/guest`
+
+Redeem a guest code (PR D) for an ephemeral guest session that joins the
+code's **host room**. Public — the code is the credential (no PKCE, no
+password). Body is form-encoded:
+
+```
+code=XXXX-XXXX
+client_id=web
+display_name=Alice      # optional, shown in the host's room
+```
+
+On success (`200`):
+```json
+{
+  "access_token": "…",
+  "token_type": "Bearer",
+  "expires_in": 43200,
+  "role": "guest",
+  "host_user_id": 1
+}
+```
+
+There is **no `refresh_token`** — a guest gets one access token bounded by
+the guest account's expiry (`[oauth] guest_session_ttl_seconds`, default
+12 h). When it lapses, redeem the code again. A revoked/expired/exhausted
+or unknown code returns `400 invalid_grant` (opaque message — doesn't
+reveal which).
+
 ## Protected endpoints
 
 Below this line, every endpoint requires auth.
 
 ### `GET /v1/whoami`
 
-Diagnostic. Returns the gateway version. (Doesn't actually surface
-*which* token authenticated, by design — single-user means there's
-nothing useful to disambiguate.)
+Resolves the calling principal — clients call this post-login to drive
+role-gated UI.
+
+```json
+{
+  "user_id": 2,
+  "role": "user",
+  "username": "alice",
+  "display_name": "Alice",
+  "host_user_id": null
+}
+```
+
+`username`/`display_name` are `null` for accounts that have none (e.g.
+guests). `host_user_id` is set only for guests (PR D).
+
+### Guest codes (PR D)
+
+Host-side management of room-join codes. Any real account (admin or user)
+manages **its own** codes; guests are `403`. See `POST /oauth/guest` above
+for redemption.
+
+#### `POST /v1/guest_codes`
+
+Mint a code owned by the caller. Body (JSON, all optional):
+```json
+{ "label": "party Saturday", "expires_in_seconds": 86400, "max_uses": 5 }
+```
+`expires_in_seconds` absent/`0` = never expires; `max_uses` absent =
+unlimited. Returns `201` with the **plaintext code, shown once**:
+```json
+{ "id": 7, "code": "XXXX-XXXX", "expires_at_unix_ms": 1234, "max_uses": 5 }
+```
+
+#### `GET /v1/guest_codes`
+
+The caller's codes, newest first (no plaintext — only its hash is stored):
+```json
+[{ "id": 7, "label": "party", "created_at_unix_ms": 1, "expires_at_unix_ms": 2,
+   "max_uses": 5, "uses": 1, "revoked_at_unix_ms": null }]
+```
+
+#### `DELETE /v1/guest_codes/:id`
+
+Revoke one of the caller's codes. `204` (idempotent); `404` if no such
+code is owned by the caller. Already-issued guest tokens stay valid until
+they expire — revoking only stops *new* redemptions.
 
 ### Sync
 
@@ -174,7 +271,7 @@ difference is how they pick the *query vector*.
 | `GET /v1/recommend/next` | Embedding of a single track id. 404 if not embedded. |
 | `POST /v1/recommend/from-any` | Embedding of the first indexed track in a candidate list (album-start case). |
 | `POST /v1/recommend/from-seeds` | Multi-seed Σ-similarity fan-out (playlist case). |
-| `GET /v1/recommend/station` | CLAP **text** embedding of a natural-language prompt. |
+| `GET /v1/recommend/station` | **text** embedding of a natural-language prompt via the embedder's text encoder. |
 
 The track-seeded variants accept an optional `queue_context` for
 server-side diversity filtering and an optional `session_id` for
@@ -209,6 +306,10 @@ the endpoint 404s in that mode — the field is reserved for a future
 tag-only fallback.
 
 `similarity` is cosine similarity in `[-1, 1]`. Higher = more similar.
+
+`model_version` is dynamic and reflects the deployed backend. The
+`clap-music_...` strings throughout these examples are CLAP-era; a
+CLaMP 3 deployment reports a `weights_clamp3_saas_...` version.
 
 #### `POST /v1/recommend/from-any`
 
@@ -327,9 +428,19 @@ Same shape as `similar_albums` but aggregates by `artist_id` instead.
 #### `GET /v1/recommend/station`
 
 Natural-language "playlist from a prompt." The gateway sends the
-prompt to the embedder's `/embed/text` endpoint (CLAP text encoder),
-then runs the resulting 512-dim vector through the same content ANN
-that powers `/v1/recommend/next`.
+prompt to the embedder's `/embed/text` endpoint (the backend's text
+encoder), then runs the resulting vector through the same content ANN
+that powers `/v1/recommend/next`. The vector dimension is
+backend-dependent (512 for CLAP, 768 for CLaMP 3), not a hardcoded
+512.
+
+When `[recommend].whitening_enabled = true` (the default), text-query
+stations are centered by the cross-modal text mean before the shared
+All-but-the-Top de-coning. This corrects the embedding anisotropy
+that would otherwise collapse unrelated text queries toward each
+other (e.g. "death metal" and "smooth jazz" returning near-identical
+results). The text mean is refreshed via
+`POST /v1/recommend/refit_whitening`.
 
 | Query param | Required | Default | Description |
 |---|---|---|---|
@@ -346,6 +457,10 @@ Response:
   ]
 }
 ```
+
+`model_version` is backend-dependent — the example above is the CLAP
+string; a CLaMP 3 deployment reports a `weights_clamp3_saas_...`
+version instead.
 
 - 400 if `text` is empty or `n == 0`.
 - 400 if `text` exceeds 500 chars.
@@ -446,6 +561,104 @@ re-render without a follow-up GET:
   under rotating session ids. Single-tenant — not a security concern
   today.
 
+#### `POST /v1/recommend/refit_whitening`
+
+Admin endpoint. Empty request body. Refits the All-but-the-Top
+whitening transform from the current embedded corpus, persists it,
+installs it on the ANN, and rebuilds the index so stored vectors are
+re-whitened. Best-effort: also fits the cross-modal text mean if the
+embedder is reachable, so text-station queries are centered by the
+text-modality mean rather than the audio mean. Use after a large
+batch of new embeddings, or to (re)enable whitening.
+
+Response (200):
+```json
+{
+  "model_version": "weights_clamp3_saas_...",
+  "n_samples": 7349,
+  "k": 7,
+  "dim": 768,
+  "fitted_at_ms": 1780174710400,
+  "has_text_mean": true
+}
+```
+
+- `has_text_mean` is `false` when the embedder was unreachable during
+  the refit — text stations then fall back to centering by the audio
+  mean.
+- 409 Conflict if there are no embeddings to fit on.
+- 500 if listing / fitting / persisting fails.
+
+### Library ratings
+
+The user's **durable like/dislike** for a track, album, or artist. This
+is the gateway's own taste store — we never write back to Navidrome, so a
+verdict lives only here. It is a distinct channel from the recommendation
+thumbs (`POST /v1/recommend/feedback`): that rates whether a *recommendation*
+was a good fit (session-scoped, decays); this rates the *entity itself*
+(durable, never decays). Enforcement is **always-on**, independent of the
+`preference_enabled` flag:
+
+- **dislike** hard-excludes the entity from play — a disliked track, or
+  *every track* of a disliked album/artist, is dropped from all recommender
+  candidate generation and auto-skipped by the player on queue advance (a
+  direct click still overrides the skip).
+- **like** boosts relevance, weighted `track > album > artist` (additive;
+  see the `like_bonus*` knobs in [CONFIGURATION.md](./CONFIGURATION.md)).
+
+**Per-user partition (PR E).** Ratings are stored per `user_id` (the
+calling principal). One household member's verdicts are invisible to
+another, and they only shape *that user's* recommendations. The
+recommend reads that consume ratings (dislike-exclusion, like-boost) are
+scoped to the **room's host user**, so a guest gets the host's
+personalised recs read-only. A **guest cannot write a rating** — `PUT
+/v1/library/rating` returns **403** for a guest principal (they have no
+library of their own and must never reshape the host's taste).
+
+#### `PUT /v1/library/rating`
+
+Set or clear one entity's verdict. The nullable `rating` field encodes all
+three states in one request shape (so the client has a single mutation call
+site, mirroring the feedback endpoint):
+
+```json
+{
+  "kind": "album",          // "track" | "album" | "artist"; defaults to "track"
+  "id": "al-123",
+  "rating": "dislike"       // "like" | "dislike" | null
+}
+```
+
+- `"like"` / `"dislike"` upserts the `(kind, id)` row.
+- `null` (or omitted) clears it back to neutral (deletes the row).
+- `kind` defaults to `"track"` so the original track-only wire shape
+  (`{id, rating}`) keeps working unchanged.
+
+Response echoes the stored verdict (200):
+```json
+{ "kind": "album", "id": "al-123", "rating": "dislike" }
+```
+
+- 400 if `id` is empty or longer than 256 chars, or the body is invalid JSON.
+- 500 if the rating store write fails.
+
+#### `GET /v1/library/ratings`
+
+Every rated entity, newest first. Ids only — the client hydrates
+titles/art via the Subsonic `getSong` / `getAlbum` / `getArtist` paths
+(the gateway's metadata cache has no cover art).
+
+```json
+{
+  "ratings": [
+    { "kind": "track",  "id": "tr-9", "rating": "like" },
+    { "kind": "artist", "id": "ar-2", "rating": "dislike" }
+  ]
+}
+```
+
+- 500 if the rating store read fails.
+
 ### Event log
 
 #### `POST /v1/events`
@@ -489,7 +702,130 @@ Response (202):
 {"accepted": 3}
 ```
 
+**Per-user partition + guest sandboxing (PR E).** Events are attributed
+to the calling `user_id` and only feed *that user's* taste/affinity. A
+**guest's events are dropped from training**: the request is accepted
+(so the player's fire-and-forget batcher never errors) but nothing is
+persisted and no affinity is folded — the response is `{"accepted": 0}`.
+The same drop applies to a guest's `/rest/scrobble` (play_history /
+event log / affinity writes are skipped) and to a guest's thumb vote on
+`POST /v1/recommend/feedback` (no write; zeroed counts echoed).
+
+### Playlists
+
+Gateway-owned playlists (user-system PR F, decision D6). Playlist CRUD
+lives here, **not** on Navidrome's `/rest/*` — membership is private
+per-user, while the *catalog* (the tracks themselves) stays shared on
+Navidrome. A playlist therefore stores only Navidrome track ids; clients
+hydrate them into full tracks via `/rest/getSong`.
+
+**Authorization.** Reads (`GET`) are any-authenticated: the caller sees
+their own playlists plus any other user's `shared` ones. A private
+playlist the caller doesn't own returns **404** (never 403 — existence is
+not leaked). Writes (`POST`/`PATCH`/`PUT`/`DELETE`) require the
+`WritePlaylist` capability, so a **guest** token authenticates but gets
+**403**. Beyond that, a mutation target must be owned by the caller (a
+non-owner — even of a `shared` playlist — gets 404).
+
+The wire row:
+```json
+{
+  "id": "9f8e…",
+  "name": "Roadtrip",
+  "visibility": "private",
+  "owner_user_id": 1,
+  "owned": true,
+  "song_count": 12,
+  "created_ms": 1712345678901,
+  "updated_ms": 1712345700000
+}
+```
+`owned` is relative to the caller (so the UI shows edit controls only on
+the caller's own playlists).
+
+#### `GET /v1/playlists`
+
+Caller's own playlists plus others' `shared` ones, newest-updated first.
+Response `{ "playlists": [<row>, …] }`.
+
+#### `POST /v1/playlists`
+
+Create an empty playlist owned by the caller. Body `{ "name": "Roadtrip" }`
+(trimmed; empty → 400, >200 chars → 400). Returns **201** with the row.
+
+#### `GET /v1/playlists/:id`
+
+Full detail. Response:
+```json
+{ "playlist": <row>, "track_ids": ["t1", "t2", "t3"] }
+```
+404 if the caller may not read it.
+
+#### `PATCH /v1/playlists/:id`
+
+Update `name` and/or `visibility` (`"private" | "shared"`). Body
+`{ "name"?: "...", "visibility"?: "shared" }`; omitted fields are
+unchanged. Bad visibility → 400. Returns the refreshed row.
+
+#### `PUT /v1/playlists/:id/tracks`
+
+Set membership. Body `{ "track_ids": ["t1", …], "mode"?: "replace" }`.
+`mode` is `"replace"` (default — full set / reorder) or `"append"` (add
+after the current tail, used by the row-menu "add to playlist"). Empty
+track ids → 400; more than 10 000 ids → 400. Returns **204**.
+
+#### `DELETE /v1/playlists/:id`
+
+Delete the playlist (members cascade). Returns **204**.
+
 ### Admin
+
+All `/v1/admin/*` endpoints are **admin-only** — a User or Guest token
+authenticates but is 403'd by `require_admin`.
+
+#### `GET /v1/admin/users`
+
+List the real accounts (admin/user). Guests are excluded. No credential
+material is returned.
+
+```json
+{
+  "users": [
+    {"id": 1, "username": "owner", "display_name": "Owner", "role": "admin", "created_at": 0},
+    {"id": 2, "username": "alice", "display_name": "Alice", "role": "user", "created_at": 1718000000000}
+  ]
+}
+```
+
+#### `POST /v1/admin/users`
+
+Create a real account. JSON body:
+
+| Field | Required | Description |
+|---|---|---|
+| `username` | yes | Unique. |
+| `password` | yes | ≥ 12 chars. Argon2id-hashed before storage. |
+| `role` | yes | `admin` or `user` (`guest` is rejected — guests come from the guest-code flow). |
+| `display_name` | no | Defaults to none. |
+
+Returns `201 {"id": <new id>}`. A duplicate username is `409
+{"error":"username_taken", ...}`; validation failures are `400`.
+
+#### `DELETE /v1/admin/users/:id`
+
+Remove an account and cascade-delete its tokens/sessions. `204` on
+success, `404` if unknown. The owner (id=1) is undeletable (`400`).
+
+#### `POST /v1/admin/users/:id/password`
+
+Admin-driven password reset (account recovery without email). JSON body
+`{"password": "<≥12 chars>"}`. Rewrites the Argon2 hash in place — the
+account keeps its id and all dependent data. `204` on success, `404` if
+unknown.
+
+> The **owner's** master password is reset out-of-band on the gateway
+> host: `music-gateway --config … reset-master-password` (host access is
+> the root of trust). See the runbook.
 
 #### `POST /v1/admin/cache/invalidate`
 
@@ -811,6 +1147,7 @@ OpenSubsonic extensions: <https://opensubsonic.netlify.app/>.
 | 401 | Missing or invalid auth token. |
 | 403 | Auth valid but not authorized. (Rare today; single-user.) |
 | 404 | Resource not found, including "seed track not embedded yet" on recommend endpoints. |
+| 409 | Conflict — e.g. `refit_whitening` with no embeddings to fit on. |
 | 410 | `/oauth/setup` after master password is set. |
 | 413 | Batch too large (events, client_events). |
 | 422 | RUM `client_events` payload schema mismatch. |

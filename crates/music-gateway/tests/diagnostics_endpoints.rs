@@ -8,8 +8,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use music_gateway::build_router;
 use music_core::TrackId;
+use music_gateway::build_router;
 use music_gateway::diagnostics::SpanRecord;
 use music_recommend::types::{EmbeddingKey, ModelVersion};
 use music_recommend::{EventInput, EventType};
@@ -125,9 +125,7 @@ async fn traces_filter_by_name_excludes_other_spans() {
     let traces = json["traces"].as_array().unwrap();
     assert_eq!(traces.len(), 2);
     assert!(
-        traces
-            .iter()
-            .all(|t| t["name"] == "ingest.embed_one"),
+        traces.iter().all(|t| t["name"] == "ingest.embed_one"),
         "every returned span should match the name filter"
     );
 }
@@ -147,11 +145,8 @@ async fn traces_filter_by_since_ms_excludes_older_spans() {
         .await
         .unwrap();
 
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/traces?since_ms=2000",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/traces?since_ms=2000").await;
     assert_eq!(status, StatusCode::OK);
     let traces = json["traces"].as_array().unwrap();
     assert_eq!(traces.len(), 1);
@@ -511,8 +506,7 @@ async fn recently_played_requires_auth() {
 #[tokio::test]
 async fn recently_played_returns_empty_when_no_scrobbles() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) =
-        fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
+    let (status, json) = fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["events"], serde_json::json!([]));
 }
@@ -522,7 +516,7 @@ async fn recently_played_returns_scrobbles_newest_first() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-a", 1_000),
             scrobble("t-b", 3_000),
             scrobble("t-c", 2_000),
@@ -530,8 +524,7 @@ async fn recently_played_returns_scrobbles_newest_first() {
         .await
         .unwrap();
 
-    let (status, json) =
-        fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
+    let (status, json) = fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
     assert_eq!(status, StatusCode::OK);
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 3);
@@ -549,7 +542,7 @@ async fn recently_played_excludes_non_scrobble_events() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-a", 1_000),
             EventInput {
                 event_type: EventType::Skip,
@@ -569,8 +562,7 @@ async fn recently_played_excludes_non_scrobble_events() {
         .await
         .unwrap();
 
-    let (_, json) =
-        fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
+    let (_, json) = fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["track_id"], "t-a");
@@ -583,10 +575,13 @@ async fn recently_played_respects_limit_param() {
     for i in 0..10_i64 {
         batch.push(scrobble(&format!("t-{i}"), 1_000 + i));
     }
-    state.event_store().append_batch(&batch).await.unwrap();
+    state.event_store().append_batch(1, &batch).await.unwrap();
 
-    let (_, json) =
-        fetch_json(build_router(state), "/v1/diagnostics/recently_played?limit=3").await;
+    let (_, json) = fetch_json(
+        build_router(state),
+        "/v1/diagnostics/recently_played?limit=3",
+    )
+    .await;
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 3);
 }
@@ -596,7 +591,7 @@ async fn recently_played_filters_by_since_ms() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[
+        .append_batch(1, &[
             scrobble("t-old", 1_000),
             scrobble("t-mid", 2_500),
             scrobble("t-new", 5_000),
@@ -628,7 +623,7 @@ async fn recently_played_clamps_oversize_limit() {
     let state = common::build_state(common::test_config()).await;
     state
         .event_store()
-        .append_batch(&[scrobble("t-1", 1_000)])
+        .append_batch(1, &[scrobble("t-1", 1_000)])
         .await
         .unwrap();
     let (status, json) = fetch_json(
@@ -654,10 +649,7 @@ async fn recently_played_joins_track_metadata_when_present() {
     // render the raw track_id without crashing.
     state
         .event_store()
-        .append_batch(&[
-            scrobble("t-known", 1_000),
-            scrobble("t-orphan", 2_000),
-        ])
+        .append_batch(1, &[scrobble("t-known", 1_000), scrobble("t-orphan", 2_000)])
         .await
         .unwrap();
 
@@ -682,8 +674,7 @@ async fn recently_played_joins_track_metadata_when_present() {
         .await
         .unwrap();
 
-    let (status, json) =
-        fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
+    let (status, json) = fetch_json(build_router(state), "/v1/diagnostics/recently_played").await;
     assert_eq!(status, StatusCode::OK);
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -710,11 +701,7 @@ async fn recently_played_joins_track_metadata_when_present() {
 // spans. R1 records the requested_n, results, shortfall_reason, and
 // result_track_ids_json fields these tests assert on.
 
-fn recommend_span(
-    name: &str,
-    end_ms: i64,
-    fields: &serde_json::Value,
-) -> SpanRecord {
+fn recommend_span(name: &str, end_ms: i64, fields: &serde_json::Value) -> SpanRecord {
     SpanRecord {
         trace_id: format!("trace-{end_ms}"),
         span_id: end_ms,
@@ -746,11 +733,8 @@ async fn recommend_queue_fill_requires_auth() {
 #[tokio::test]
 async fn recommend_queue_fill_returns_empty_when_no_recommend_spans() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/queue_fill",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/queue_fill").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["total"], 0);
     // Buckets always present so the UI doesn't have to special-case
@@ -766,33 +750,34 @@ async fn recommend_queue_fill_buckets_by_fill_ratio() {
         .trace_store()
         .insert_batch(vec![
             // 20/20 → 100%
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 100,
                 &serde_json::json!({"requested_n": 20, "results": 20}),
             ),
             // 0/20 → 0%
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 200,
                 &serde_json::json!({"requested_n": 20, "results": 0}),
             ),
             // 10/20 → 50%
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 300,
                 &serde_json::json!({"requested_n": 20, "results": 10}),
             ),
             // 19/20 → 95% (lands in the 80–100 bucket exclusive of 100)
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 400,
                 &serde_json::json!({"requested_n": 20, "results": 19}),
             ),
         ])
         .await
         .unwrap();
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/queue_fill",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/queue_fill").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["total"], 4);
     let buckets = json["buckets"].as_array().unwrap();
@@ -816,19 +801,23 @@ async fn recommend_shortfall_groups_by_reason() {
     state
         .trace_store()
         .insert_batch(vec![
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 100,
                 &serde_json::json!({"shortfall_reason": "none"}),
             ),
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 200,
                 &serde_json::json!({"shortfall_reason": "filter_starved_artist"}),
             ),
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 300,
                 &serde_json::json!({"shortfall_reason": "filter_starved_artist"}),
             ),
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 400,
                 &serde_json::json!({"shortfall_reason": "pool_exhausted"}),
             ),
@@ -837,11 +826,8 @@ async fn recommend_shortfall_groups_by_reason() {
         ])
         .await
         .unwrap();
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/shortfall",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/shortfall").await;
     assert_eq!(status, StatusCode::OK);
     let counts = json["counts"].as_object().unwrap();
     assert_eq!(counts["none"], 1);
@@ -855,15 +841,14 @@ async fn recommend_similarity_returns_quantiles_of_admitted_sims() {
     let state = common::build_state(common::test_config()).await;
     state
         .trace_store()
-        .insert_batch(vec![
-            recommend_span("recommend.from_any",
-                100,
-                &serde_json::json!({
-                    "filter_admitted_sims_json":
-                        "[0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.00]"
-                }),
-            ),
-        ])
+        .insert_batch(vec![recommend_span(
+            "recommend.from_any",
+            100,
+            &serde_json::json!({
+                "filter_admitted_sims_json":
+                    "[0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.00]"
+            }),
+        )])
         .await
         .unwrap();
     let (status, json) =
@@ -889,19 +874,22 @@ async fn recommend_top_results_ranks_by_count() {
     state
         .trace_store()
         .insert_batch(vec![
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 100,
                 &serde_json::json!({
                     "result_track_ids_json": "[\"t-1\",\"t-2\",\"t-3\"]"
                 }),
             ),
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 200,
                 &serde_json::json!({
                     "result_track_ids_json": "[\"t-1\",\"t-2\"]"
                 }),
             ),
-            recommend_span("recommend.from_any",
+            recommend_span(
+                "recommend.from_any",
                 300,
                 &serde_json::json!({
                     "result_track_ids_json": "[\"t-1\"]"
@@ -965,7 +953,9 @@ async fn recommend_feedback_post_requires_auth() {
                 .method("POST")
                 .uri("/v1/recommend/feedback")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"track_id":"t","session_id":"s","vote":"up"}"#))
+                .body(Body::from(
+                    r#"{"track_id":"t","session_id":"s","vote":"up"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -1072,11 +1062,8 @@ async fn recommend_feedback_diagnostics_requires_auth() {
 #[tokio::test]
 async fn recommend_feedback_diagnostics_returns_empty_when_no_votes() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/feedback",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/feedback").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["items"].as_array().unwrap().len(), 0);
 }
@@ -1103,11 +1090,8 @@ async fn recommend_feedback_diagnostics_returns_aggregates_newest_first() {
         )
         .await;
     }
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/feedback",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/feedback").await;
     assert_eq!(status, StatusCode::OK);
     let items = json["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
@@ -1143,6 +1127,9 @@ async fn insert_projection_point(
     .await;
 }
 
+// Test fixture mirroring the projection-row column set; the wide arg list
+// matches the table columns rather than a domain abstraction.
+#[allow(clippy::too_many_arguments)]
 async fn insert_projection_point_with_pcs(
     state: &music_gateway::AppState,
     track_id: &str,
@@ -1415,6 +1402,9 @@ async fn latent_space_pcs_are_null_when_reducer_did_not_write_them() {
     }
 }
 
+// Test fixture mirroring the projection-row column set; the wide arg list
+// matches the table columns rather than a domain abstraction.
+#[allow(clippy::too_many_arguments)]
 async fn insert_projection_point_with_z(
     state: &music_gateway::AppState,
     track_id: &str,
@@ -1450,10 +1440,7 @@ async fn latent_space_3d_projection_serves_its_own_xyz() {
     // two dims, z from the third.
     let state = common::build_state(common::test_config()).await;
     let model = state.recommend_model_version().as_str().to_string();
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv1-d3", 7.0, 8.0, 200, Some(1.5),
-    )
-    .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv1-d3", 7.0, 8.0, 200, Some(1.5)).await;
     let (status, json) = fetch_json(
         build_router(state),
         "/v1/diagnostics/recommend/latent_space?proj_version=pv1-d3",
@@ -1499,7 +1486,14 @@ async fn latent_space_prefer_2d_picks_newest_non_d3_projection() {
     insert_projection_point(&state, "t1", &model, "pv-new-2d", 1.0, 1.0, 500).await;
     // -d3 companion written latest — must NOT win for prefer=2d.
     insert_projection_point_with_z(
-        &state, "t1", &model, "pv-new-2d-d3", 9.0, 9.0, 900, Some(0.5),
+        &state,
+        "t1",
+        &model,
+        "pv-new-2d-d3",
+        9.0,
+        9.0,
+        900,
+        Some(0.5),
     )
     .await;
     let (status, json) = fetch_json(
@@ -1519,14 +1513,10 @@ async fn latent_space_prefer_3d_picks_newest_d3_projection() {
     let state = common::build_state(common::test_config()).await;
     let model = state.recommend_model_version().as_str().to_string();
     insert_projection_point(&state, "t1", &model, "pv-2d", 1.0, 1.0, 100).await;
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv-old-d3", 5.0, 5.0, 200, Some(0.3),
-    )
-    .await;
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv-new-d3", 7.0, 7.0, 500, Some(0.7),
-    )
-    .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv-old-d3", 5.0, 5.0, 200, Some(0.3))
+        .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv-new-d3", 7.0, 7.0, 500, Some(0.7))
+        .await;
     let (status, json) = fetch_json(
         build_router(state),
         "/v1/diagnostics/recommend/latent_space?prefer=3d",
@@ -1546,10 +1536,7 @@ async fn latent_space_prefer_2d_returns_empty_when_only_d3_exists() {
     // accidentally falling back to the 3D layout.
     let state = common::build_state(common::test_config()).await;
     let model = state.recommend_model_version().as_str().to_string();
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv-d3", 1.0, 1.0, 100, Some(0.5),
-    )
-    .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv-d3", 1.0, 1.0, 100, Some(0.5)).await;
     let (status, json) = fetch_json(
         build_router(state),
         "/v1/diagnostics/recommend/latent_space?prefer=2d",
@@ -1589,10 +1576,7 @@ async fn latent_space_explicit_proj_version_overrides_prefer() {
     let state = common::build_state(common::test_config()).await;
     let model = state.recommend_model_version().as_str().to_string();
     insert_projection_point(&state, "t1", &model, "pv-2d", 1.0, 2.0, 100).await;
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv-d3", 7.0, 8.0, 200, Some(0.5),
-    )
-    .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv-d3", 7.0, 8.0, 200, Some(0.5)).await;
     let (status, json) = fetch_json(
         build_router(state),
         "/v1/diagnostics/recommend/latent_space?proj_version=pv-2d&prefer=3d",
@@ -1610,10 +1594,7 @@ async fn latent_space_dropdown_lists_both_2d_and_3d_projections() {
     let state = common::build_state(common::test_config()).await;
     let model = state.recommend_model_version().as_str().to_string();
     insert_projection_point(&state, "t1", &model, "pv1", 0.0, 0.0, 100).await;
-    insert_projection_point_with_z(
-        &state, "t1", &model, "pv1-d3", 9.0, 9.0, 200, Some(0.5),
-    )
-    .await;
+    insert_projection_point_with_z(&state, "t1", &model, "pv1-d3", 9.0, 9.0, 200, Some(0.5)).await;
     let (status, json) = fetch_json(
         build_router(state),
         "/v1/diagnostics/recommend/latent_space",
@@ -1629,15 +1610,11 @@ async fn latent_space_dropdown_lists_both_2d_and_3d_projections() {
 
 // --- /v1/diagnostics/recommend/sessions ----------------------------------
 
-
 #[tokio::test]
 async fn recommend_sessions_returns_empty_when_no_sessions() {
     let state = common::build_state(common::test_config()).await;
-    let (status, json) = fetch_json(
-        build_router(state),
-        "/v1/diagnostics/recommend/sessions",
-    )
-    .await;
+    let (status, json) =
+        fetch_json(build_router(state), "/v1/diagnostics/recommend/sessions").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["items"].as_array().unwrap().len(), 0);
 }
@@ -1648,7 +1625,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Three sessions, increasing started_ms. s1 and s2 closed; s3 active.
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
@@ -1661,7 +1638,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Stamp two events under s1 by going through the scrobble interceptor.
     state
         .event_store()
-        .append_batch(&[music_recommend::EventInput {
+        .append_batch(1, &[music_recommend::EventInput {
             event_type: music_recommend::EventType::Scrobble,
             track_id: music_core::TrackId::from("t-1"),
             occurred_at: 100,
@@ -1672,7 +1649,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
         .unwrap();
     state
         .event_store()
-        .append_batch(&[music_recommend::EventInput {
+        .append_batch(1, &[music_recommend::EventInput {
             event_type: music_recommend::EventType::Skip,
             track_id: music_core::TrackId::from("t-1"),
             occurred_at: 200,
@@ -1684,7 +1661,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     // Open s2 (auto-closes s1), then s3 (auto-closes s2).
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-2".to_string()),
                 track_id: music_core::TrackId::from("t-2".to_string()),
@@ -1696,7 +1673,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
         .unwrap();
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-3".to_string()),
                 track_id: music_core::TrackId::from("t-3".to_string()),
@@ -1714,7 +1691,10 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
     assert_eq!(items.len(), 3);
     // Newest started_ms first: s3, s2, s1.
     assert_eq!(items[0]["session_id"], "s3");
-    assert!(items[0]["ended_ms"].is_null(), "active session has null ended_ms");
+    assert!(
+        items[0]["ended_ms"].is_null(),
+        "active session has null ended_ms"
+    );
     assert_eq!(items[0]["event_count"], 0);
     assert_eq!(items[1]["session_id"], "s2");
     assert!(!items[1]["ended_ms"].is_null(), "s2 closed by s3 start");
@@ -1731,7 +1711,7 @@ async fn recommend_sessions_respects_limit_query() {
     for i in 0..5 {
         state
             .sync()
-            .apply(&music_sync::SyncOp::StartSession {
+            .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
                 items: vec![music_core::QueueItem {
                     item_id: music_core::QueueItemId::from(format!("qi-{i}")),
                     track_id: music_core::TrackId::from(format!("t-{i}")),
@@ -1802,7 +1782,7 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
 
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-a".to_string()),
                 track_id: music_core::TrackId::from("t-a".to_string()),
@@ -1820,7 +1800,7 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
     ] {
         state
             .event_store()
-            .append_batch(&[music_recommend::EventInput {
+            .append_batch(1, &[music_recommend::EventInput {
                 event_type: ev_type,
                 track_id: music_core::TrackId::from(track),
                 occurred_at,
@@ -1841,7 +1821,9 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
     assert_eq!(items.len(), 1);
     let item = &items[0];
 
-    let events = item["events"].as_array().expect("events present when include_events=1");
+    let events = item["events"]
+        .as_array()
+        .expect("events present when include_events=1");
     assert_eq!(events.len(), 4);
     // Oldest first by occurred_at.
     assert_eq!(events[0]["track_id"], "t-a");
@@ -1854,11 +1836,16 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
     assert_eq!(segments.len(), 3, "events.len() - 1");
 
     // a (1,0,0) and b (0,1,0) are orthogonal → cosine = 0 → distance = 1.
-    let d_ab = segments[0]["cosine_distance"].as_f64().expect("ab distance");
+    let d_ab = segments[0]["cosine_distance"]
+        .as_f64()
+        .expect("ab distance");
     assert!((d_ab - 1.0).abs() < 1e-6, "got {d_ab}");
 
     // b → c: c has no embedding → null.
-    assert!(segments[1]["cosine_distance"].is_null(), "missing embedding => null");
+    assert!(
+        segments[1]["cosine_distance"].is_null(),
+        "missing embedding => null"
+    );
     // c → b: same reason, null.
     assert!(segments[2]["cosine_distance"].is_null());
 }
@@ -1868,7 +1855,7 @@ async fn recommend_sessions_omits_events_by_default() {
     let state = common::build_state(common::test_config()).await;
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
@@ -1894,7 +1881,7 @@ async fn recommend_sessions_include_events_handles_session_with_no_events() {
     let state = common::build_state(common::test_config()).await;
     state
         .sync()
-        .apply(&music_sync::SyncOp::StartSession {
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
@@ -1988,10 +1975,13 @@ async fn latent_neighbours_returns_top_k_excluding_seed() {
     assert!(n.len() <= 3, "respect k cap");
     assert!(!n.is_empty(), "should return at least one neighbour");
     for entry in n {
-        assert_ne!(entry["track_id"], "t0", "seed must not appear in own neighbours");
+        assert_ne!(
+            entry["track_id"], "t0",
+            "seed must not appear in own neighbours"
+        );
         // Distances are non-negative and bounded by ~2 (cosine).
         let d = entry["cosine_distance"].as_f64().unwrap();
-        assert!(d >= 0.0 && d <= 2.0, "distance in cosine range: {d}");
+        assert!((0.0..=2.0).contains(&d), "distance in cosine range: {d}");
     }
 }
 
@@ -2036,7 +2026,11 @@ async fn latent_neighbours_clamps_oversized_k() {
     assert_eq!(status, StatusCode::OK);
     let n = json["neighbours"].as_array().unwrap();
     // Index has dim=8 tracks total; after excluding the seed, at most 7.
-    assert!(n.len() <= 7, "clamped to index size minus seed, got {}", n.len());
+    assert!(
+        n.len() <= 7,
+        "clamped to index size minus seed, got {}",
+        n.len()
+    );
 }
 
 #[tokio::test]
@@ -2044,7 +2038,8 @@ async fn latent_neighbours_400_when_k_is_zero() {
     let state = common::build_state(common::test_config()).await;
     let dim = 8;
     let ann = state.ann();
-    ann.upsert(&TrackId::from("t0"), &unit_at_dim(0, dim)).unwrap();
+    ann.upsert(&TrackId::from("t0"), &unit_at_dim(0, dim))
+        .unwrap();
     let app = build_router(state);
     let resp = app
         .oneshot(

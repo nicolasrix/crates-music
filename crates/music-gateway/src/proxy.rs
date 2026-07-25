@@ -17,7 +17,10 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH},
+        header::{
+            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+            IF_NONE_MATCH, RANGE,
+        },
     },
     response::Response,
 };
@@ -34,7 +37,69 @@ const GATEWAY_CLIENT_NAME: &str = "crates-music-gateway";
 // `seed` is a gateway-only hint for the cover-art placeholder rendering
 // (web client passes the album/artist display name); strip it before the
 // upstream request so Navidrome doesn't see an unexpected param.
-const STRIPPED_PARAM_KEYS: &[&str] = &["u", "p", "t", "s", "v", "c", "f", "seed"];
+const STRIPPED_PARAM_KEYS: &[&str] = &["u", "p", "t", "s", "v", "c", "f", "seed", "access_token"];
+
+/// Mutating Subsonic methods the `/rest` proxy refuses for **every** role
+/// (403, before any upstream call). Rationale (sec review 1.2): the gateway
+/// owns the write surface — playlists moved to `/v1/playlists`, ratings/likes
+/// to `/v1/library/rating` (with a hard no-Navidrome-writeback rule), and
+/// accounts to `/v1/admin/users`. Proxying these to Navidrome under the
+/// gateway's *shared* credential (typically a Navidrome admin) would let any
+/// authenticated caller — a guest most acutely — mutate shared catalog state
+/// or reach Navidrome-admin operations (`createUser`/`changePassword`). No
+/// legitimate client calls them through `/rest`, so blocking is zero-regression.
+///
+/// Compared case-insensitively with any trailing `.view` stripped (see
+/// [`is_subsonic_write_method`]). `scrobble` is deliberately absent — it is a
+/// separate, intentional route (`/rest/scrobble`) writing Navidrome's
+/// canonical play-count ledger.
+const SUBSONIC_WRITE_METHODS: &[&str] = &[
+    // Ratings / stars (gateway-owned, no writeback).
+    "star",
+    "unstar",
+    "setrating",
+    // Playlists (gateway-owned via /v1/playlists).
+    "createplaylist",
+    "updateplaylist",
+    "deleteplaylist",
+    // Play queue (gateway sync owns this).
+    "saveplayqueue",
+    // Sharing.
+    "createshare",
+    "updateshare",
+    "deleteshare",
+    // Navidrome user administration — must never be reachable via the proxy.
+    "createuser",
+    "updateuser",
+    "deleteuser",
+    "changepassword",
+    // Internet radio.
+    "createinternetradiostation",
+    "updateinternetradiostation",
+    "deleteinternetradiostation",
+    // Podcasts.
+    "createpodcastchannel",
+    "deletepodcastchannel",
+    "deletepodcastepisode",
+    "downloadpodcastepisode",
+    "refreshpodcasts",
+    // Bookmarks.
+    "createbookmark",
+    "deletebookmark",
+    // Library scan + jukebox control.
+    "startscan",
+    "jukeboxcontrol",
+];
+
+/// `true` iff `method` is a mutating Subsonic method the proxy blocks. The
+/// comparison strips a legacy `.view` suffix and lower-cases, so `star`,
+/// `star.view`, and `STAR` all match — Navidrome's routing tolerates case
+/// and the `.view` form, so the guard must too, or it's trivially bypassed.
+fn is_subsonic_write_method(method: &str) -> bool {
+    let lower = method.to_ascii_lowercase();
+    let base = lower.strip_suffix(".view").unwrap_or(&lower);
+    SUBSONIC_WRITE_METHODS.contains(&base)
+}
 
 /// Subsonic methods we cache. Catalog browse only — playback / mutating /
 /// session endpoints stay pass-through.
@@ -102,6 +167,16 @@ async fn proxy_inner(
         return Err(StatusCode::NOT_FOUND);
     }
     tracing::Span::current().record("method", subsonic_method);
+
+    // Read-only proxy: refuse mutating Subsonic methods for every role
+    // before touching upstream (sec review 1.2). These are gateway-owned
+    // or Navidrome-admin operations no legitimate client proxies.
+    if is_subsonic_write_method(subsonic_method) {
+        tracing::Span::current().record("kind", "write_blocked");
+        tracing::warn!(method = %subsonic_method, "blocked mutating subsonic method on read-only proxy");
+        return Ok(subsonic_forbidden());
+    }
+
     let client_query = request.uri().query().unwrap_or("");
 
     if BROWSE_METHODS.contains(&subsonic_method) && is_cacheable(subsonic_method, client_query) {
@@ -131,7 +206,11 @@ async fn proxy_inner(
     }
     tracing::Span::current().record("kind", "stream");
 
-    pass_through(&state, subsonic_method, client_query).await
+    // Forward the browser's byte-range so `<audio>` can seek. Without it the
+    // proxy always streamed the full file from byte 0, so any forward seek
+    // past the buffered region snapped playback back to the start.
+    let range = request.headers().get(RANGE).cloned();
+    pass_through(&state, subsonic_method, client_query, range).await
 }
 
 #[tracing::instrument(
@@ -168,8 +247,8 @@ async fn browse_proxy(
     tracing::Span::current().record("outcome", "upstream_fetch");
 
     // Miss or stale → fetch upstream, buffer body, store, return.
-    let upstream_url = build_upstream_url(state.config(), method, client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let upstream_url =
+        build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
     let upstream = state
         .http()
         .get(upstream_url)
@@ -227,6 +306,10 @@ async fn browse_proxy(
 ///      Navidrome's `coverArt` IDs are content-derived — when the file
 ///      changes, the id changes, so the old cache entry becomes
 ///      unreachable rather than stale).
+// One cohesive request flow (cache hit/ETag revalidation/upstream fetch/
+// placeholder fallback); splitting it would scatter the shared `key`/`ttl`/
+// `now` context without making it clearer. 24 lines over the pedantic cap.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "proxy.cover_art",
     skip_all,
@@ -265,7 +348,13 @@ async fn cover_art_proxy(
             // Navidrome). Cooldown-gated so a burst of cache hits
             // doesn't translate to a burst of upstream requests.
             maybe_spawn_revalidation(state, &key, client_query);
-            return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+            return Ok(write_and_serve_placeholder(
+                state,
+                &key,
+                &placeholder_seed,
+                ttl,
+                now,
+            ));
         }
         // Run the placeholder classifier on the cache hit too. The
         // common path here is the second-visit-after-cold-cache
@@ -280,7 +369,13 @@ async fn cover_art_proxy(
             // recognises an entry as a Navidrome default, we want to
             // re-check whether real art has landed since.
             maybe_spawn_revalidation(state, &key, client_query);
-            return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+            return Ok(write_and_serve_placeholder(
+                state,
+                &key,
+                &placeholder_seed,
+                ttl,
+                now,
+            ));
         }
         if let Some(client_etag) = if_none_match
             && client_etag == entry.etag
@@ -293,7 +388,7 @@ async fn cover_art_proxy(
     }
 
     let upstream_url = build_upstream_url(state.config(), "getCoverArt", client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| e.status())?;
     let upstream = state
         .http()
         .get(upstream_url)
@@ -316,7 +411,13 @@ async fn cover_art_proxy(
     // a real cover).
     if status == StatusCode::NOT_FOUND {
         tracing::Span::current().record("outcome", "placeholder_404");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     if !status.is_success() {
@@ -332,7 +433,13 @@ async fn cover_art_proxy(
     // not cache the JSON bytes.
     if is_subsonic_json_error(&upstream_headers, &body_bytes) {
         tracing::Span::current().record("outcome", "placeholder_subsonic_error");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     let etag = etag_for(&body_bytes);
@@ -345,7 +452,13 @@ async fn cover_art_proxy(
         .is_ok_and(|set| set.contains(&etag));
     if already_known {
         tracing::Span::current().record("outcome", "placeholder_known");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     // Synchronous cache write — *not* `tokio::spawn`. Without this,
@@ -372,7 +485,13 @@ async fn cover_art_proxy(
     // detection fires on the first parallel round, not the second.
     if classify_as_placeholder(state, &etag, &cover_id).await {
         tracing::Span::current().record("outcome", "placeholder_detected");
-        return Ok(write_and_serve_placeholder(state, &key, &placeholder_seed, ttl, now));
+        return Ok(write_and_serve_placeholder(
+            state,
+            &key,
+            &placeholder_seed,
+            ttl,
+            now,
+        ));
     }
 
     tracing::Span::current().record("outcome", "upstream_fetch");
@@ -583,6 +702,12 @@ fn write_and_serve_placeholder(
 /// (multi-disc, deluxe edition, compilation re-use) stays under the
 /// threshold and is left alone.
 ///
+/// Only entity-level IDs (`al-*`, `ar-*`) count toward the threshold.
+/// Track-level IDs (`mf-*`) are excluded because every track in an
+/// album resolves to the same album cover bytes — an album with 15
+/// tracks produces 15 entries with identical etags, which would
+/// false-positive as the Navidrome default without this filter.
+///
 /// Different sizes of the same id (`id=X&size=200` and `id=X&size=600`
 /// when Navidrome doesn't re-thumbnail) are filtered out — those are
 /// the same album, not duplication.
@@ -596,6 +721,7 @@ async fn is_duplicate_cover_etag(
         .iter()
         .filter_map(|k| cover_id_from_cache_key(k))
         .filter(|id| *id != current_cover_id)
+        .filter(|id| !id.starts_with("mf-"))
         .collect();
     Ok(distinct_other_ids.len() >= PLACEHOLDER_DUPLICATE_THRESHOLD)
 }
@@ -654,12 +780,19 @@ async fn pass_through(
     state: &AppState,
     method: &str,
     client_query: &str,
+    range: Option<HeaderValue>,
 ) -> Result<Response, StatusCode> {
-    let upstream_url = build_upstream_url(state.config(), method, client_query)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let upstream = state
-        .http()
-        .get(upstream_url)
+    let upstream_url =
+        build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
+    let mut request = state.http().get(upstream_url);
+    // Relay the byte-range so Navidrome answers with `206 Partial Content`
+    // for direct-play tracks — the mechanism that lets the browser seek.
+    // (Navidrome ignores Range for transcoded streams; those degrade to a
+    // full 200 download, i.e. today's behaviour, so this is never worse.)
+    if let Some(range) = &range {
+        request = request.header(RANGE, range);
+    }
+    let upstream = request
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -667,16 +800,40 @@ async fn pass_through(
     let status = upstream.status();
     tracing::Span::current().record("status", status.as_u16());
     let mut downstream_headers = HeaderMap::new();
-    if let Some(ct) = upstream.headers().get(CONTENT_TYPE).cloned() {
-        downstream_headers.insert(CONTENT_TYPE, ct);
+    // Forward the headers that make `<audio>`/`<video>` seeking work: the
+    // content type, plus the range-negotiation trio. `Accept-Ranges` tells
+    // the browser seeking is possible; `Content-Range`/`Content-Length`
+    // describe the returned slice and the whole-resource size. Missing any
+    // of these leaves the element unable to build a seekable range.
+    for name in [CONTENT_TYPE, ACCEPT_RANGES, CONTENT_RANGE, CONTENT_LENGTH] {
+        if let Some(value) = upstream.headers().get(&name).cloned() {
+            downstream_headers.insert(name, value);
+        }
     }
     let stream = upstream.bytes_stream();
     let body = Body::from_stream(stream);
 
+    // Status is forwarded verbatim, so a `206` from upstream reaches the
+    // client as `206` — the browser needs that to treat the body as a slice.
     let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = downstream_headers;
     Ok(response)
+}
+
+/// 403 for a blocked mutating method, shaped as a Subsonic error envelope
+/// (code 50 = "user not authorized for the given operation") so a Subsonic
+/// client gets a coherent failure rather than an opaque empty body.
+fn subsonic_forbidden() -> Response {
+    let body = Bytes::from_static(
+        br#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":50,"message":"This operation is not permitted through the gateway proxy."}}}"#,
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
 }
 
 fn not_modified(etag: &str) -> Response {
@@ -900,13 +1057,59 @@ fn cache_key(method: &str, client_query: &str) -> String {
     key
 }
 
+/// Why building an upstream URL failed.
+#[derive(Debug)]
+enum UpstreamUrlError {
+    /// The Subsonic method name contained path-navigation characters
+    /// (`/`, `\`, or a `..` segment). `Url::join` interprets those as
+    /// relative-path navigation, so a crafted method like `../admin`
+    /// would escape the `rest/` prefix and reach an arbitrary upstream
+    /// endpoint — with the gateway's Navidrome credentials attached.
+    /// Rejected before the join. A caller bug / hostile request, so the
+    /// handlers surface it as 400, not 500.
+    InvalidMethod,
+    /// The configured upstream base URL didn't parse. A server
+    /// misconfiguration → 500.
+    Parse,
+}
+
+impl UpstreamUrlError {
+    fn status(&self) -> StatusCode {
+        match self {
+            UpstreamUrlError::InvalidMethod => StatusCode::BAD_REQUEST,
+            UpstreamUrlError::Parse => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// A Subsonic method name is safe to splice into the upstream path iff it
+/// carries no path-navigation. Real method names are simple identifiers
+/// (`getAlbumList2`, `stream`), optionally with the legacy `.view` suffix
+/// (`ping.view`) — none contain a separator or a `..` segment. We block
+/// `/`, `\`, and the `..` substring rather than all dots so the `.view`
+/// form keeps proxying. Percent-encoded separators (`%2f`, `%2e`) are
+/// preserved verbatim by `Url::join` and never act as navigation, so a
+/// literal-character check is sufficient to keep the join inside `rest/`.
+fn is_valid_subsonic_method(method: &str) -> bool {
+    !method.is_empty()
+        && !method.contains('/')
+        && !method.contains('\\')
+        && !method.contains("..")
+}
+
 fn build_upstream_url(
     config: &Config,
     subsonic_method: &str,
     client_query: &str,
-) -> Result<Url, url::ParseError> {
+) -> Result<Url, UpstreamUrlError> {
+    if !is_valid_subsonic_method(subsonic_method) {
+        return Err(UpstreamUrlError::InvalidMethod);
+    }
     let base = ensure_trailing_slash(&config.upstream.navidrome_url);
-    let mut url = Url::parse(&base)?.join(&format!("rest/{subsonic_method}"))?;
+    let mut url = Url::parse(&base)
+        .map_err(|_| UpstreamUrlError::Parse)?
+        .join(&format!("rest/{subsonic_method}"))
+        .map_err(|_| UpstreamUrlError::Parse)?;
 
     let salt = auth::random_salt();
     let token = auth::compute_token(&config.upstream.password, &salt);
@@ -940,6 +1143,136 @@ fn ensure_trailing_slash(s: &str) -> String {
 pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        // Do not follow redirects. This client talks only to the trusted
+        // upstream Navidrome with the gateway's credentials attached to
+        // every request. If a (compromised or misconfigured) upstream
+        // answered with a 3xx to an attacker-controlled host, reqwest's
+        // default policy would replay the request — and its query string,
+        // which carries `u`/`t`/`s` auth params — to that location.
+        // Surfacing the 3xx to the client instead keeps the credentials
+        // from ever leaving the gateway↔Navidrome hop.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("rustls reqwest client should always build")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn valid_methods_accepted() {
+        for m in [
+            "ping",
+            "stream",
+            "getAlbumList2",
+            "search3",
+            "getCoverArt",
+            // Legacy Subsonic `.view` suffix must keep proxying.
+            "ping.view",
+            "stream.view",
+        ] {
+            assert!(is_valid_subsonic_method(m), "should accept {m:?}");
+        }
+    }
+
+    #[test]
+    fn write_methods_detected_case_and_view_insensitive() {
+        for m in [
+            "star",
+            "unstar",
+            "setRating",
+            "createPlaylist",
+            "updatePlaylist",
+            "deletePlaylist",
+            "createUser",
+            "deleteUser",
+            "changePassword",
+            "savePlayQueue",
+            "startScan",
+            "jukeboxControl",
+            // legacy `.view` suffix + case variants must still match
+            "star.view",
+            "STAR",
+            "SetRating.View",
+        ] {
+            assert!(is_subsonic_write_method(m), "should block {m:?}");
+        }
+    }
+
+    #[test]
+    fn read_methods_not_flagged_as_writes() {
+        for m in [
+            "ping",
+            "stream",
+            "getAlbumList2",
+            "getAlbum",
+            "search3",
+            "getCoverArt",
+            "getSong",
+            "getPlayQueue", // read counterpart of the blocked savePlayQueue
+            "scrobble",     // intentional separate route — never blocked here
+            "getStarred",   // reads stars; only the mutating star/unstar are blocked
+        ] {
+            assert!(!is_subsonic_write_method(m), "should allow {m:?}");
+        }
+    }
+
+    #[test]
+    fn path_navigation_methods_rejected() {
+        for m in [
+            "",
+            "../admin",
+            "..%2fadmin", // literal `..` still present pre-decode
+            "foo/bar",
+            "a\\b",
+            "..",
+            "rest/../admin",
+        ] {
+            assert!(!is_valid_subsonic_method(m), "should reject {m:?}");
+        }
+    }
+
+    fn test_config() -> Config {
+        Config::from_toml_str(
+            r#"
+[server]
+listen = "0.0.0.0:8443"
+tls_cert = "/c.pem"
+tls_key = "/k.pem"
+bearer_token = "t"
+
+[upstream]
+navidrome_url = "http://nav.lan:4533"
+username = "alice"
+password = "wonderland"
+
+[cache]
+path = "/tmp/cache.sqlite"
+browse_ttl_seconds = 3600
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn build_upstream_url_rejects_traversal_with_400() {
+        let cfg = test_config();
+        let err = build_upstream_url(&cfg, "../admin", "").unwrap_err();
+        assert!(matches!(err, UpstreamUrlError::InvalidMethod));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn build_upstream_url_keeps_valid_method_under_rest_prefix() {
+        let cfg = test_config();
+        let url = build_upstream_url(&cfg, "getAlbumList2", "type=newest").unwrap();
+        // The method stays a single segment under `/rest/` — no escape.
+        assert_eq!(url.path(), "/rest/getAlbumList2");
+        // Injected auth params are present and the client query rides along.
+        let q = url.query().unwrap();
+        assert!(q.contains("u=alice"));
+        assert!(q.contains("type=newest"));
+    }
 }

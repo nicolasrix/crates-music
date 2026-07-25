@@ -1,14 +1,11 @@
-//! Operator endpoints. Today: just the cache invalidator.
+//! Operator endpoints for cache management.
 //!
-//! `POST /v1/admin/cache/invalidate` clears every non-cover-art row
-//! from the L2 browse cache. Use case: new content added in Navidrome
-//! is hidden by a fresh cache entry for up to `browse_ttl_seconds`
-//! (default 24 h). This endpoint forces an upstream refetch on the
-//! next browse request without restarting the gateway.
+//! `POST /v1/admin/cache/invalidate` — clears browse-cache rows
+//! (`getAlbumList2`, `getAlbum`, etc.). Cover-art rows are preserved.
 //!
-//! Cover-art rows are preserved. Navidrome's `coverArt` ids are
-//! content-addressed: when a cover changes, the id changes, and the
-//! old entry becomes unreachable rather than stale.
+//! `POST /v1/admin/cache/invalidate_covers` — clears cover-art rows.
+//! Use when cover art is stuck on stale placeholders despite the
+//! background revalidation mechanism.
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
@@ -29,6 +26,23 @@ pub async fn invalidate_cache(State(state): State<AppState>) -> impl IntoRespons
         }
         Err(e) => {
             tracing::error!(error = %e, "cache invalidate failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[tracing::instrument(name = "admin.cache.invalidate_covers", skip_all)]
+pub async fn invalidate_covers(State(state): State<AppState>) -> impl IntoResponse {
+    if let Ok(mut set) = state.placeholder_etags().write() {
+        set.clear();
+    }
+    match state.cache().clear_covers().await {
+        Ok(removed) => {
+            tracing::info!(removed, "cover-art cache invalidated");
+            (StatusCode::OK, Json(InvalidateResponse { removed })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "cover-art cache invalidate failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

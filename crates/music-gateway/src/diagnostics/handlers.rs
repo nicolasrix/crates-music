@@ -328,6 +328,22 @@ const MAX_BATCH: usize = 50;
 /// from filling the table with multi-MB strings.
 const MAX_USER_AGENT_LEN: usize = 256;
 
+/// Per-field length caps on client-supplied RUM fields. The emitter
+/// produces short, structured values; anything larger is a bug or a
+/// client trying to bloat the (un-trimmed) ring. Reject the batch with
+/// 422 rather than truncate, so the telemetry isn't silently corrupted.
+const MAX_SESSION_ID_LEN: usize = 64;
+const MAX_NAME_LEN: usize = 128;
+const MAX_PAGE_PATH_LEN: usize = 512;
+const MAX_RATING_LEN: usize = 32;
+/// Serialized-`fields` JSON budget per event.
+const MAX_FIELDS_BYTES: usize = 4096;
+
+/// Ring capacity for the `client_events` table, mirroring the `spans`
+/// ring (`TRACES_MAX_ROWS`). Trimmed after each insert so the table
+/// can't grow without bound on a long-lived gateway.
+const CLIENT_EVENTS_MAX_ROWS: usize = 100_000;
+
 #[derive(Debug, Deserialize)]
 pub struct ClientEventInput {
     /// Random per-page-load identifier. Lets the diagnostics page
@@ -446,7 +462,23 @@ pub async fn submit_client_events(
                 .fields
                 .as_ref()
                 .map_or_else(|| "{}".to_string(), ToString::to_string);
-            ClientEventRecord {
+            let too_long = if e.session_id.len() > MAX_SESSION_ID_LEN {
+                Some("session_id")
+            } else if e.name.len() > MAX_NAME_LEN {
+                Some("name")
+            } else if e.page_path.len() > MAX_PAGE_PATH_LEN {
+                Some("page_path")
+            } else if e.rating.as_ref().is_some_and(|r| r.len() > MAX_RATING_LEN) {
+                Some("rating")
+            } else if fields_json.len() > MAX_FIELDS_BYTES {
+                Some("fields")
+            } else {
+                None
+            };
+            if let Some(field) = too_long {
+                return Err(field);
+            }
+            Ok(ClientEventRecord {
                 received_ms,
                 occurred_ms: e.occurred_ms,
                 session_id: e.session_id,
@@ -456,13 +488,27 @@ pub async fn submit_client_events(
                 page_path: e.page_path,
                 user_agent: user_agent.clone(),
                 fields_json,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, &'static str>>()
+        .map_err(|field| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "event field exceeds size limit",
+                    "field": field,
+                })),
+            )
+        })?;
     let n = records.len();
-    state
-        .trace_store()
+    let store = state.trace_store();
+    store
         .insert_client_events(records)
+        .await
+        .map_err(db_error)?;
+    // Bound the ring right after the write (no drainer for RUM).
+    store
+        .trim_client_events_to_capacity(CLIENT_EVENTS_MAX_ROWS)
         .await
         .map_err(db_error)?;
     Ok(Json(ClientEventsAccepted { accepted: n }))
@@ -472,7 +518,10 @@ pub async fn list_client_events(
     State(state): State<AppState>,
     Query(q): Query<ClientEventsQuery>,
 ) -> Result<Json<ClientEventsResponse>, (StatusCode, Json<Value>)> {
-    let limit = q.limit.unwrap_or(DEFAULT_TRACE_LIMIT).clamp(1, MAX_TRACE_LIMIT);
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_TRACE_LIMIT)
+        .clamp(1, MAX_TRACE_LIMIT);
     let rows = state
         .trace_store()
         .recent_client_events(limit, q.name.as_deref())
@@ -625,10 +674,7 @@ pub async fn recommend_queue_fill(
 
     let mut buckets: Vec<FillBucket> = FILL_BUCKETS
         .iter()
-        .map(|(label, ..)| FillBucket {
-            label,
-            count: 0,
-        })
+        .map(|(label, ..)| FillBucket { label, count: 0 })
         .collect();
     let mut total: u64 = 0;
     for row in &rows {
@@ -674,8 +720,7 @@ pub async fn recommend_shortfall(
         .recommend_summaries(q.since_ms)
         .await
         .map_err(db_error)?;
-    let mut counts: std::collections::BTreeMap<String, u64> =
-        std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for row in &rows {
         let key = row
             .shortfall_reason
@@ -1001,9 +1046,10 @@ pub async fn recommend_latent_space(
     State(state): State<AppState>,
     Query(q): Query<LatentSpaceQuery>,
 ) -> Result<Json<LatentSpaceResponse>, (StatusCode, Json<Value>)> {
-    let model_version = q
-        .model_version
-        .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from);
+    let model_version = q.model_version.map_or_else(
+        || state.recommend_model_version().clone(),
+        ModelVersion::from,
+    );
 
     let versions = state
         .projection()
@@ -1156,7 +1202,7 @@ pub async fn recommend_latent_neighbours(
         .into_iter()
         .map(|r| LatentNeighbourEntry {
             track_id: r.track_id.into_inner(),
-            cosine_distance: (1.0 - r.similarity as f64).max(0.0),
+            cosine_distance: (1.0 - f64::from(r.similarity)).max(0.0),
         })
         .collect();
     Ok(Json(LatentNeighboursResponse {
@@ -1169,9 +1215,10 @@ pub async fn queue_depth(
     State(state): State<AppState>,
     Query(q): Query<QueueDepthQuery>,
 ) -> Result<Json<QueueDepthResponse>, (StatusCode, Json<Value>)> {
-    let model_version = q
-        .model_version
-        .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from);
+    let model_version = q.model_version.map_or_else(
+        || state.recommend_model_version().clone(),
+        ModelVersion::from,
+    );
     let counts = state
         .embedding_store()
         .counts(&model_version)
@@ -1300,10 +1347,10 @@ pub async fn recommend_sessions(
         .map_err(db_error)?;
 
     let model_version = if include_events {
-        Some(
-            q.model_version
-                .map_or_else(|| state.recommend_model_version().clone(), ModelVersion::from),
-        )
+        Some(q.model_version.map_or_else(
+            || state.recommend_model_version().clone(),
+            ModelVersion::from,
+        ))
     } else {
         None
     };
@@ -1362,7 +1409,11 @@ async fn compute_session_segments(
     for e in events {
         if !vectors.contains_key(&e.track_id) {
             let key = EmbeddingKey::new(e.track_id.clone(), model_version.clone());
-            let vec = state.embedding_store().get(&key).await?.map(|emb| emb.vector);
+            let vec = state
+                .embedding_store()
+                .get(&key)
+                .await?
+                .map(|emb| emb.vector);
             vectors.insert(e.track_id.clone(), vec);
         }
     }
@@ -1377,4 +1428,37 @@ async fn compute_session_segments(
         out.push(SessionSegment { cosine_distance });
     }
     Ok(out)
+}
+
+// --- /v1/diagnostics/recommendations ---------------------------------------
+//
+// Read-back of the recommendation provenance log (what the recommender
+// served + context + per-item scores). Lets you eyeball the training
+// substrate without going to SQLite. Newest first; items hydrated.
+
+#[derive(Debug, Deserialize)]
+pub struct RecommendationsQuery {
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecommendationsResponse {
+    recommendations: Vec<music_recommend::StoredRecommendation>,
+}
+
+pub async fn recommendations(
+    State(state): State<AppState>,
+    Query(q): Query<RecommendationsQuery>,
+) -> Result<Json<RecommendationsResponse>, (StatusCode, Json<Value>)> {
+    // u32 literals matching DEFAULT_TRACE_LIMIT / MAX_TRACE_LIMIT — the
+    // store's `recent` takes a u32, so avoid a usize→u32 cast here.
+    let limit = q.limit.unwrap_or(100).clamp(1, 1_000);
+    // Outcome-annotated: each track item carries the listener's
+    // session-scoped kept/skipped/pending label joined from the event log.
+    let recommendations = state
+        .recommendation_log()
+        .recent_with_outcomes(limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(RecommendationsResponse { recommendations }))
 }

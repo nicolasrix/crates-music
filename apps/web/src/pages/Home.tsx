@@ -43,7 +43,7 @@ export function Home() {
     queryFn: () => listRecentTracks(TRACKS_N),
     staleTime: 60_000,
   });
-  const { playSingle } = usePlayback();
+  const { playSingle, playAlbum } = usePlayback();
 
   const albums = albumsQ.data ?? [];
   const recentArtists = deriveRecentArtists(albums, artistsQ.data ?? [], ARTISTS_N);
@@ -68,7 +68,11 @@ export function Home() {
         {albums.length > 0 && (
           <div className="tile-grid">
             {albums.slice(0, ALBUMS_N).map((a) => (
-              <AlbumCard key={a.id} album={a} />
+              <AlbumCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
             ))}
           </div>
         )}

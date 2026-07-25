@@ -194,3 +194,85 @@ async fn proxy_propagates_upstream_5xx() {
     // We forward upstream's status — 503 in, 503 out.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn proxy_rejects_subsonic_write_methods() {
+    // The /rest proxy is read-only: mutating Subsonic methods (star,
+    // setRating, createPlaylist, createUser, …) are gateway-owned via
+    // /v1/* or would expose Navidrome-admin operations under the shared
+    // credential. They must be 403'd *before* any upstream call — proven
+    // by the `expect(0)` catch-all below (any proxied request would 200).
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "subsonic-response": { "status": "ok", "version": "1.16.1" }
+        })))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state(cfg).await);
+
+    // Even the owner/admin static bearer is blocked — read-only is
+    // universal, so a guest (strictly less capable) is denied a fortiori.
+    for method in ["star", "setRating", "createPlaylist", "deleteUser", "star.view", "STAR"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/rest/{method}?id=al-1"))
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{method} must be blocked read-only"
+        );
+    }
+}
+
+#[tokio::test]
+async fn proxy_does_not_follow_upstream_redirects() {
+    // A redirect from the upstream must NOT be chased by the gateway's
+    // HTTP client: the request carries the gateway's Navidrome
+    // credentials in its query string, and following a 3xx would replay
+    // them to the (attacker-chosen) Location. We forward the 3xx to the
+    // client instead.
+    let upstream = MockServer::start().await;
+    // `/rest/ping` answers with a redirect to `/leaked`.
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/ping"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "/leaked"),
+        )
+        .mount(&upstream)
+        .await;
+    // The redirect target must never be hit. `expect(0)` is verified when
+    // the MockServer is dropped at end of test.
+    Mock::given(m_method("GET"))
+        .and(m_path("/leaked"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let app = build_router(common::build_state(cfg).await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/rest/ping")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The 302 is forwarded verbatim — not followed.
+    assert_eq!(response.status(), StatusCode::FOUND);
+}

@@ -3,6 +3,8 @@
 //! Pure functions over `&str` — the store deals in the resulting PHC
 //! string, so storage doesn't depend on argon2 directly.
 
+use std::sync::OnceLock;
+
 use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
@@ -42,5 +44,43 @@ pub fn verify(plaintext: &str, phc: &str) -> Result<bool> {
         Ok(()) => Ok(true),
         Err(password_hash::Error::Password) => Ok(false),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Burn an Argon2id verify against a fixed dummy hash and return `false`.
+///
+/// Used on the login path when *no* master password is stored yet, so
+/// that the "not bootstrapped" branch costs the same wall-clock as a
+/// real wrong-password verify. Without this, an unauthenticated caller
+/// could distinguish "gateway not configured" from "wrong password" by
+/// response latency alone — the same bootstrap-state leak the uniform
+/// 401 closes at the status-code level. The dummy hash uses
+/// `Argon2::default()` (identical params to real hashes), so the timing
+/// matches.
+pub fn verify_absent(plaintext: &str) -> bool {
+    static DUMMY_PHC: OnceLock<String> = OnceLock::new();
+    let phc =
+        DUMMY_PHC.get_or_init(|| hash("placeholder-never-matches").expect("hashing a constant"));
+    // A dummy hash never matches; the call is purely for its timing.
+    let _ = verify(plaintext, phc);
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_then_verify_roundtrips() {
+        let phc = hash("correct horse battery staple").unwrap();
+        assert!(verify("correct horse battery staple", &phc).unwrap());
+        assert!(!verify("wrong", &phc).unwrap());
+    }
+
+    #[test]
+    fn verify_absent_always_false() {
+        // Whatever the input, the no-stored-hash path reports failure.
+        assert!(!verify_absent(""));
+        assert!(!verify_absent("anything-at-all"));
     }
 }

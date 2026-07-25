@@ -4,21 +4,27 @@
 // Click semantics: the row navigates to /albums/:id; the artist cell
 // navigates to /artists/:artistId via an inner <Link>. The artist
 // cell stops propagation so clicking the artist name doesn't *also*
-// trigger the row's album-navigate.
+// trigger the row's album-navigate. When an onPlayAlbum handler is
+// given, the cover thumb becomes a play button (hover/touch-revealed
+// glyph, see .thumb-play) that also stops propagation.
 //
 // Leading column is a square album-cover thumbnail, matching the
 // AlbumHeroCard convention so the hero strip and table view feel like
 // two presentations of the same data.
 
+import { Play } from "lucide-react";
 import { Album } from "../api/types";
 import { Cover } from "./Cover";
 import { Link, navigate } from "../router";
 
 interface Props {
   albums: readonly Album[];
+  /** Optional — renders a play overlay on the cover thumb that plays
+   *  the album in place instead of navigating. */
+  onPlayAlbum?: (album: Album) => void;
 }
 
-export function AlbumTable({ albums }: Props) {
+export function AlbumTable({ albums, onPlayAlbum }: Props) {
   return (
     <table className="tracks">
       <thead>
@@ -37,18 +43,34 @@ export function AlbumTable({ albums }: Props) {
             role="link"
             tabIndex={0}
             onKeyDown={(e) => {
-              if (e.key === "Enter") navigate(`/albums/${a.id}`);
+              // Only when the row itself is focused — Enter on the
+              // nested play button must click it, not also navigate.
+              if (e.key === "Enter" && e.target === e.currentTarget) {
+                navigate(`/albums/${a.id}`);
+              }
             }}
           >
             <td className="col-cover">
-              <div className="cover-thumb">
-                <Cover
-                  coverArt={a.coverArt}
-                  seed={a.name}
-                  size={96}
-                  alt=""
-                />
-              </div>
+              {onPlayAlbum ? (
+                <button
+                  type="button"
+                  className="cover-thumb"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPlayAlbum(a);
+                  }}
+                  aria-label={`play ${a.name}`}
+                >
+                  <Cover coverArt={a.coverArt} seed={a.name} size={96} alt="" />
+                  <span className="thumb-play" aria-hidden>
+                    <Play size={14} fill="currentColor" strokeWidth={0} />
+                  </span>
+                </button>
+              ) : (
+                <div className="cover-thumb">
+                  <Cover coverArt={a.coverArt} seed={a.name} size={96} alt="" />
+                </div>
+              )}
             </td>
             <td className="col-title">{a.name}</td>
             <td className="col-artist" onClick={(e) => e.stopPropagation()}>

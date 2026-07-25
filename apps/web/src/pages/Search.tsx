@@ -21,7 +21,6 @@ import { TrackHeroCard } from "../components/TrackHeroCard";
 import { TrackTable } from "../components/TrackTable";
 import { Link, useRoute } from "../router";
 import { usePlayback } from "../sync/usePlayback";
-import { rankResults } from "./searchRanking";
 
 const TOP_RESULTS = 3;
 // Each section shows a small table of next-best results after the
@@ -33,7 +32,7 @@ const REST_LIMIT = 5;
 export function Search() {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle } = usePlayback();
+  const { playSingle, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query],
@@ -46,31 +45,35 @@ export function Search() {
     refetchOnWindowFocus: false,
   });
 
-  // Canonical artist registry — used by rankResults to hydrate derived
-  // artists with albumCount and other fields search3's track/album
-  // results don't carry. Shared cache key with Artists/Home, so this
-  // is a no-op fetch when the user has already visited those pages.
+  // Canonical artist registry — used to hydrate the server's search
+  // artists with albumCount and other fields the search response omits.
+  // Shared cache key with Artists/Home, so this is a no-op fetch when the
+  // user has already visited those pages.
   const knownArtistsQ = useQuery({
     queryKey: ["artists"],
     queryFn: listArtists,
     staleTime: 5 * 60_000,
   });
 
-  // Re-rank + derive every time the underlying data or the query changes.
-  // Cheap (O(n) over a few hundred items at most), deterministic, and
-  // keeping it out of useQuery keeps the cache key honest — the same
-  // raw search3 response is reused across re-renders.
-  const ranked = useMemo(
-    () =>
-      q.data
-        ? rankResults(
-            q.data,
-            query,
-            knownArtistsQ.data ? { knownArtists: knownArtistsQ.data } : {}
-          )
-        : null,
-    [q.data, query, knownArtistsQ.data]
-  );
+  // The gateway now fuzzy-matches, derives artists, and relevance-orders
+  // server-side (see /v1/search) — re-ranking here would only re-drop the
+  // typo hits the server just recovered (an exact-prefix client scorer
+  // gives a fuzzy match 0). So we render server order as-is, and
+  // only *hydrate* each artist from the canonical registry to recover
+  // fields the search response omits (chiefly albumCount for the card).
+  const ranked = useMemo(() => {
+    if (!q.data) return null;
+    const known = new Map((knownArtistsQ.data ?? []).map((a) => [a.id, a]));
+    return {
+      ...q.data,
+      // {...known, ...a} keeps the server's fields while filling anything
+      // it left out (albumCount, coverArt); order is preserved.
+      artists: q.data.artists.map((a) => {
+        const k = known.get(a.id);
+        return k ? { ...k, ...a } : a;
+      }),
+    };
+  }, [q.data, knownArtistsQ.data]);
 
   if (query.length === 0) {
     return (
@@ -128,8 +131,19 @@ export function Search() {
             items={ranked.albums}
             restLimit={REST_LIMIT}
             seeAllHref={`/search/albums${qParam}`}
-            renderHero={(a) => <AlbumHeroCard key={a.id} album={a} />}
-            renderRest={(rest) => <AlbumTable albums={rest} />}
+            renderHero={(a) => (
+              <AlbumHeroCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
+            )}
+            renderRest={(rest) => (
+              <AlbumTable
+                albums={rest}
+                onPlayAlbum={(a) => void playAlbum(a.id)}
+              />
+            )}
           />
         );
         // Two-column wrap only when both buckets have content. Otherwise

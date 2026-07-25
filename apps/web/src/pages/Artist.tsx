@@ -2,18 +2,32 @@
 // extraction) but with a circular cover, an optional biography blurb, and
 // the artist's albums grid in place of a tracklist.
 
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play } from "lucide-react";
-import { useMemo } from "react";
-import { coverArtUrl, getAlbum, getArtist, listArtists } from "../api/client";
+import { useMemo, useState } from "react";
+import {
+  coverArtUrl,
+  getAlbum,
+  getArtist,
+  getTopSongs,
+  listArtists,
+} from "../api/client";
 import { fetchSimilarArtists } from "../api/recommend";
 import { AlbumCard } from "../components/AlbumCard";
 import { ArtistHeroCard } from "../components/ArtistHeroCard";
 import { ArtistTable } from "../components/ArtistTable";
 import { Cover } from "../components/Cover";
+import { EntityRating } from "../components/EntityRating";
+import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
+import { usePlayback } from "../sync/usePlayback";
 import type { Artist as ArtistType } from "../api/types";
+
+// Album-order fallback for "play artist" when getTopSongs has nothing
+// (no play history yet). Bounded so a 50-album discography doesn't fan
+// out 50 getAlbum calls from one click.
+const PLAY_FALLBACK_ALBUMS = 10;
 
 export function Artist({ id }: { id: string }) {
   const q = useQuery({
@@ -22,6 +36,9 @@ export function Artist({ id }: { id: string }) {
   });
   const cover = coverArtUrl(q.data?.artist.coverArt, 600, q.data?.artist.name);
   const palette = useCoverPalette(cover);
+  const { playList, playAlbum } = usePlayback();
+  const queryClient = useQueryClient();
+  const [playPending, setPlayPending] = useState(false);
 
   if (q.isLoading) {
     return (
@@ -46,10 +63,37 @@ export function Artist({ id }: { id: string }) {
 
   const { artist, albums, biography } = q.data;
 
+  async function playArtist() {
+    setPlayPending(true);
+    try {
+      // Top songs first (play-count-backed); empty for never-played
+      // artists, so fall back to the albums grid's listing order.
+      // getTopSongs failures degrade to the fallback too.
+      let tracks = await getTopSongs(artist.name).catch(() => []);
+      if (tracks.length === 0) {
+        const details = await Promise.all(
+          albums.slice(0, PLAY_FALLBACK_ALBUMS).map((a) =>
+            queryClient
+              .fetchQuery({
+                queryKey: ["album", a.id],
+                queryFn: () => getAlbum(a.id),
+                staleTime: 5 * 60_000,
+              })
+              .catch(() => null),
+          ),
+        );
+        tracks = details.flatMap((d) => d?.tracks ?? []);
+      }
+      if (tracks.length > 0) playList(tracks, 0);
+    } finally {
+      setPlayPending(false);
+    }
+  }
+
   return (
     <Layout breadcrumb={`artists · ${artist.name}`} palette={palette}>
-      <div className="tinted-wash" />
       <div className="hero">
+        <HeroBackdrop url={cover} />
         <div className="cover-lg is-circle">
           <Cover
             coverArt={artist.coverArt}
@@ -73,9 +117,16 @@ export function Artist({ id }: { id: string }) {
             <p className="text-art-mute text-sm max-w-2xl mt-2">{biography}</p>
           )}
           <div className="actions">
-            <button className="play-disc" aria-label="play artist" title="play artist (top tracks)">
+            <button
+              className="play-disc"
+              onClick={() => void playArtist()}
+              disabled={playPending || albums.length === 0}
+              aria-label="play artist"
+              title="play artist (top tracks)"
+            >
               <Play size={20} fill="currentColor" strokeWidth={0} />
             </button>
+            <EntityRating kind="artist" id={artist.id} />
           </div>
         </div>
       </div>
@@ -92,7 +143,11 @@ export function Artist({ id }: { id: string }) {
         ) : (
           <div className="tile-grid">
             {albums.map((a) => (
-              <AlbumCard key={a.id} album={a} />
+              <AlbumCard
+                key={a.id}
+                album={a}
+                onPlay={() => void playAlbum(a.id)}
+              />
             ))}
           </div>
         )}

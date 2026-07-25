@@ -14,7 +14,7 @@
 // `clear`, because `clear` nukes the now-playing track too and stops
 // playback — not what the user means by "clear the queue".
 
-import { ChevronDown, ChevronUp, Play, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, ChevronsUp, Play, Trash2, X } from "lucide-react";
 import { coverArtUrl } from "../api/client";
 import { Cover } from "../components/Cover";
 import { Layout } from "../components/Layout";
@@ -56,6 +56,11 @@ export function Queue() {
   function moveDown(itemId: string, absoluteIndex: number) {
     if (absoluteIndex >= items.length - 1) return;
     sync.submit({ type: "reorder", item_id: itemId, new_index: absoluteIndex + 1 });
+  }
+  function moveToTop(itemId: string, absoluteIndex: number) {
+    // Top of *upcoming* = the play-next slot, not index 0 (history).
+    if (absoluteIndex <= upcomingStart) return;
+    sync.submit({ type: "reorder", item_id: itemId, new_index: upcomingStart });
   }
   function clearUpcoming() {
     if (upcoming.length === 0) return;
@@ -120,6 +125,7 @@ export function Queue() {
                     onRemove={() => remove(it.item_id)}
                     onMoveUp={() => moveUp(it.item_id, absoluteIndex)}
                     onMoveDown={() => moveDown(it.item_id, absoluteIndex)}
+                    onMoveToTop={() => moveToTop(it.item_id, absoluteIndex)}
                     canMoveUp={i > 0}
                     canMoveDown={i < upcoming.length - 1}
                   />
@@ -199,6 +205,7 @@ function QueueRow({
   onRemove,
   onMoveUp,
   onMoveDown,
+  onMoveToTop,
   canMoveUp,
   canMoveDown,
 }: {
@@ -208,9 +215,36 @@ function QueueRow({
   onRemove: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onMoveToTop: () => void;
   canMoveUp: boolean;
   canMoveDown: boolean;
 }) {
+  // Reorder via the row menu: on phones (≤640px) the chevron buttons are
+  // hidden for width, so the ⋯ menu is the only reorder affordance there.
+  // On desktop they coexist — menu reorder also helps keyboard users.
+  const reorderItems = [
+    {
+      key: "move-top",
+      label: "move to top",
+      icon: <ChevronsUp size={14} strokeWidth={1.5} />,
+      onClick: onMoveToTop,
+      disabled: !canMoveUp,
+    },
+    {
+      key: "move-up",
+      label: "move up",
+      icon: <ChevronUp size={14} strokeWidth={1.5} />,
+      onClick: onMoveUp,
+      disabled: !canMoveUp,
+    },
+    {
+      key: "move-down",
+      label: "move down",
+      icon: <ChevronDown size={14} strokeWidth={1.5} />,
+      onClick: onMoveDown,
+      disabled: !canMoveDown,
+    },
+  ];
   return (
     <tr onDoubleClick={onJump}>
       <td
@@ -227,6 +261,9 @@ function QueueRow({
       </td>
       <td className="col-title is-clickable" onClick={onJump}>
         {track?.title ?? "(unknown — not in local cache)"}
+        {/* Phone-only artist sub-line — the .col-artist column is hidden
+            at ≤640px (see components.css). Mirrors TrackRow. */}
+        <span className="row-sub-artist">{track?.artist ?? "—"}</span>
       </td>
       <td className="col-artist">
         {track?.artistId && track.artist ? (
@@ -276,7 +313,13 @@ function QueueRow({
               playlist, go to album, go to artist. Only renders when we
               have track metadata in the local cache; without it, the
               menu has nothing meaningful to act on. */}
-          {track && <TrackRowMenu track={track} showQueueActions={false} />}
+          {track && (
+            <TrackRowMenu
+              track={track}
+              showQueueActions={false}
+              extraItems={reorderItems}
+            />
+          )}
         </div>
       </td>
     </tr>

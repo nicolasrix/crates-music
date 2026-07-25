@@ -21,13 +21,20 @@ body {
   overflow: hidden; /* shell scroll containers handle overflow per area */
 }
 
-/* App shell — sidebar + main + bottom-fixed player. */
+/* App shell — sidebar + main + bottom-fixed player. The player row is
+   `auto` (not a fixed track) so the bar can grow for the two-row mobile
+   layout and the iOS home-indicator safe-area; on desktop .player keeps
+   height: var(--player-h), so the resolved track height is identical. */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
-  grid-template-rows: 1fr var(--player-h);
+  grid-template-rows: 1fr auto;
   grid-template-areas: "side main" "player player";
   height: 100vh;
+  /* dvh tracks the *visible* viewport on mobile — 100vh ignores the
+     collapsing URL bar and pushes the player bar off-screen. The vh
+     line above stays as the fallback for older engines. */
+  height: 100dvh;
 }
 .shell > .sidebar {
   grid-area: side;
@@ -39,9 +46,30 @@ body {
 .shell > main {
   grid-area: main;
   overflow-y: auto;
+  /* Contain accidental wide content (tables, long unbroken strings) —
+     without this the whole main area pans sideways on phones. */
+  overflow-x: hidden;
   position: relative;
 }
 .shell > .player { grid-area: player; }
+
+/* Page-level artwork wash on detail pages. Two stops, two hues: the
+   primary tint at the top, drifting toward the cover's secondary hue
+   (when it has one ≥50° away) before fading out. Fixed pixel height —
+   not viewport-relative — so once content scrolls past it, everything
+   sits on plain --surface-0 and sticky chrome (topbar, thead) blends
+   against a stable background. */
+.shell > main.has-art {
+  background:
+    linear-gradient(
+        to bottom,
+        color-mix(in oklab, var(--art-glow) 38%, var(--art-bg)) 0%,
+        color-mix(in oklab, var(--art-bg2) 55%, transparent) 55%,
+        transparent 100%
+      )
+      top / 100% 640px no-repeat,
+    var(--surface-0);
+}
 
 /* Topbar inside main — sticky 56px. */
 .topbar {
@@ -75,7 +103,17 @@ body {
 .topbar .breadcrumb {
   color: var(--fg-muted);
   font-size: var(--text-sm);
+  /* Flex child: allow it to shrink + ellipsize instead of pushing the
+     right-side cluster past the viewport edge on narrow screens. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+/* Hamburger that opens the sidebar drawer — mobile-only chrome, shown
+   by the ≤768px block in the responsive section at the end of this
+   file. */
+.topbar .menu-btn { display: none; }
 
 /* Brand row inside the sidebar. */
 .brand {
@@ -172,12 +210,79 @@ body {
 /* Detail-page hero. */
 .hero {
   padding: var(--space-7) var(--space-7) var(--space-6);
+  /* Bold artwork band. The primary glow fills the space to the right of
+     the cover (radial centered top-right, well past the cover's column);
+     the secondary hue answers from the bottom-left so two-hue covers get
+     a diagonal conversation, single-hue covers a single field. Radials —
+     not a linear band — so the color melts into the page wash below with
+     no hard bottom edge. Text on top is pinned --art-fg/--art-mute, so
+     the glow tier can run at full chroma without a legibility cost.
+     `background-color` stays transparent so the page-level main.has-art
+     gradient shows through underneath. */
   background:
-    radial-gradient(120% 80% at 0% 0%, color-mix(in oklab, var(--art-bg) 60%, transparent) 0%, transparent 70%),
-    var(--surface-0);
+    radial-gradient(130% 160% at 82% 0%,
+      color-mix(in oklab, var(--art-glow) 88%, transparent) 0%,
+      color-mix(in oklab, var(--art-glow) 50%, transparent) 48%,
+      transparent 78%),
+    radial-gradient(90% 120% at 8% 100%,
+      color-mix(in oklab, var(--art-glow2, var(--art-glow)) 45%, transparent) 0%,
+      transparent 70%);
   display: flex;
   gap: var(--space-6);
   align-items: flex-end;
+  position: relative;
+  z-index: 1;
+}
+/* Blurred-artwork backdrop (HeroBackdrop.tsx) — sits between the hero's
+   glow-radial background and its content. Three sub-layers:
+     img      — the cover, blown up + blurred + oversaturated
+     ::before — film grain (SVG turbulence), kills gradient banding
+     ::after  — scrim pinned to --art-bg so the fixed-L text roles keep
+                their contrast no matter how bright the cover is
+   The whole layer dissolves downward via mask-image, so the hero hands
+   off to the page wash with no seam and no color math at the boundary.
+   The blur filter MUST stay on the img inside this clipped container —
+   a filter on .hero itself would become the containing block for any
+   position:fixed descendant (see TrackRowMenu's portal comment). */
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.85) 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.85) 55%, transparent 100%);
+}
+.hero-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Scale hides the blur's transparent edge bleed inside the clip. */
+  transform: scale(1.5);
+  filter: blur(64px) saturate(1.5);
+  opacity: var(--art-backdrop-opacity, 0.55);
+}
+.hero-backdrop::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+  mix-blend-mode: overlay;
+  opacity: 0.45;
+}
+.hero-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* Slightly heavier on the left, where the title/meta column lives. */
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--art-bg) 50%, transparent) 0%,
+    color-mix(in oklab, var(--art-bg) 28%, transparent) 55%,
+    color-mix(in oklab, var(--art-bg) 38%, transparent) 100%
+  );
+}
+/* Hero content paints above the backdrop. */
+.hero > :not(.hero-backdrop) {
   position: relative;
   z-index: 1;
 }
@@ -447,18 +552,52 @@ a.tile-title:hover {
   background-color: var(--surface-2);
 }
 
-/* Tinted wash on detail pages — vertical fade from --art-bg to transparent. */
-.tinted-wash {
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 320px;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in oklab, var(--art-bg) 60%, transparent) 0%,
-    transparent 100%
-  );
-  z-index: 0;
+/* Artwork influence on interactive elements — scoped to has-art pages so
+   chrome-only pages keep the neutral hover language. All values run
+   through color-mix against the existing neutrals: the tint shifts the
+   temperature of a state, it never replaces the state's lightness. */
+main.has-art .tracks tbody tr:hover {
+  /* Hover rows borrow the glow tier (diluted — they carry body text). */
+  background: color-mix(in oklab, var(--art-glow) 22%, color-mix(in oklab, var(--surface-2) 60%, transparent));
+}
+main.has-art .tracks thead th {
+  /* Match the washed page behind the sticky header — a plain surface-0
+     strip would band against the tint while the table is still inside
+     the wash's 640px. */
+  background: color-mix(in oklab, var(--art-bg) 18%, color-mix(in oklab, var(--surface-0) 92%, transparent));
+  border-bottom-color: color-mix(in oklab, var(--art-accent, var(--accent)) 30%, var(--border-subtle));
+}
+/* Track numbers pick up the album accent — they're an index, not body
+   text, so they can afford color where titles can't. */
+main.has-art .tracks .col-num .num-text {
+  color: color-mix(in oklab, var(--art-accent, var(--accent)) 60%, var(--fg-muted));
+}
+main.has-art .icon-btn:hover {
+  color: var(--art-fg);
+  background: color-mix(in oklab, var(--art-glow) 30%, var(--surface-2));
+}
+main.has-art .section-more:hover {
+  color: var(--art-accent, var(--accent));
+}
+/* Hero cards (similar artists / search heroes) on tinted pages become
+   color surfaces: primary glow sweeping to the secondary hue. Their text
+   is --fg on a glow-diluted surface-2, so dilution percentages are the
+   guardrail here. Inset ring instead of a border so layout doesn't shift. */
+main.has-art .search-hero {
+  background: linear-gradient(115deg,
+    color-mix(in oklab, var(--art-glow) 32%, var(--surface-2)) 0%,
+    color-mix(in oklab, var(--art-glow2, var(--art-glow)) 14%, var(--surface-2)) 100%);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--art-glow) 35%, transparent);
+}
+main.has-art .search-hero:hover {
+  background: linear-gradient(115deg,
+    color-mix(in oklab, var(--art-glow) 48%, var(--surface-2)) 0%,
+    color-mix(in oklab, var(--art-glow2, var(--art-glow)) 26%, var(--surface-2)) 100%);
+}
+/* Album tiles on tinted pages (artist discography) glow on hover —
+   layered on top of the normal pop shadow, not replacing it. */
+main.has-art .tile:hover .tile-cover {
+  box-shadow: var(--shadow-pop), 0 10px 32px color-mix(in oklab, var(--art-glow) 60%, transparent);
 }
 
 /* Hero filled play disc on detail pages. Reads --art-accent so it tints. */
@@ -467,7 +606,7 @@ a.tile-title:hover {
   height: 56px;
   border-radius: var(--radius-2);
   background: var(--art-accent, var(--accent));
-  color: var(--on-accent);
+  color: var(--art-on-accent, var(--on-accent));
   border: 0;
   cursor: pointer;
   display: flex;
@@ -505,10 +644,15 @@ a.tile-title:hover {
   vertical-align: middle;
 }
 .tracks tbody tr {
-  transition: background var(--dur-1) var(--ease-out-soft);
+  transition: background var(--dur-1) var(--ease-out-soft),
+    opacity var(--dur-2) var(--ease-out-soft);
   cursor: pointer;
 }
 .tracks tbody tr:hover { background: color-mix(in oklab, var(--surface-2) 60%, transparent); }
+/* Desktop DnD: fade the row while it's the drag source so the user sees
+   which track was picked up. The compact pill under the cursor is the copy;
+   the row stays in place (a copy-into-playlist, not a move). */
+.tracks tbody tr.is-dragging { opacity: 0.4; }
 .tracks .col-num { width: 48px; color: var(--fg-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 /* Optional album-cover thumbnail column. The thumb is sized so the cell
    ends up the same total height as a normal text cell — i.e. row height
@@ -532,12 +676,39 @@ a.tile-title:hover {
 /* Circular variant for artist photos — mirrors the ArtistHeroCard
    convention so the hero strip and table views match. */
 .cover-thumb.is-circle { border-radius: var(--radius-full); }
+/* Cover thumb as a play button (AlbumTable rows given onPlayAlbum).
+   Mirrors .search-hero-play: dimmed overlay + glyph on row hover or
+   focus; revealed at rest on touch in the (hover: none) block below. */
+button.cover-thumb {
+  position: relative;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out-soft);
+}
+.tracks tbody tr:hover .thumb-play,
+button.cover-thumb:focus-visible .thumb-play {
+  opacity: 1;
+}
 /* When the cover is the leading column (e.g. ArtistTable, which has
    no row-number cell to provide a left gutter), restore the table's
    normal left padding so the thumbnail doesn't sit flush against
    the row's left edge. */
 .tracks .col-cover:first-child { padding-left: var(--space-4); }
 .tracks .col-title { color: var(--fg); }
+/* Phone-only artist sub-line inside the title cell; hidden on desktop
+   where the dedicated .col-artist column is shown instead. */
+.row-sub-artist { display: none; }
 .tracks .col-artist { color: var(--fg-muted); }
 .tracks .col-album { color: var(--fg-muted); }
 /* When the artist or album cell wraps a navigation link, mirror the
@@ -592,10 +763,13 @@ a.tile-title:hover {
   color: var(--fg);
 }
 
-/* Track row context menu — fixed-positioned popover, computed in JS. */
+/* Track row context menu — fixed-positioned popover, computed in JS.
+   The width is clamped to the viewport so the menu never renders wider
+   than a small phone screen (the JS clamps `left` but assumes 220px
+   fits). */
 .row-menu {
   position: fixed;
-  width: 220px;
+  width: min(220px, calc(100vw - 16px));
   max-height: 400px;
   overflow-y: auto;
   background: var(--surface-1);
@@ -639,6 +813,45 @@ a.tile-title:hover {
   padding: 8px 10px;
   font-size: var(--text-xs);
   color: var(--fg-faint);
+}
+
+/* Toast stack (ToastContext). Bottom-center, floating above the player
+   bar. pointer-events split: the viewport ignores clicks (it spans the
+   width for centering), each toast accepts them (tap to dismiss). */
+.toast-viewport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--player-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 110; /* above .row-menu (100) — a toast can announce a menu action */
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-pop);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  animation: toast-in var(--dur-2) var(--ease-out-soft);
+}
+.toast.is-success { border-color: color-mix(in oklab, var(--success) 40%, var(--border-subtle)); }
+.toast.is-error {
+  border-color: color-mix(in oklab, var(--danger) 50%, var(--border-subtle));
+  color: var(--danger);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* Queue row's per-item action cluster (move-up / move-down / remove). */
@@ -821,6 +1034,12 @@ a.tile-title:hover {
   border-top: 1px solid var(--border-subtle);
   height: var(--player-h);
 }
+/* The bar carries the *playing* track's tint (mounted by PlayerBar via
+   artAttrs), independent of whichever page is open above it. */
+.player.has-art {
+  background: color-mix(in oklab, var(--art-bg) 30%, color-mix(in oklab, var(--surface-0) 88%, transparent));
+  border-top-color: color-mix(in oklab, var(--art-bg) 35%, var(--border-subtle));
+}
 .np {
   display: flex;
   gap: var(--space-3);
@@ -865,6 +1084,26 @@ a.tile-title:hover {
    pattern leaves the affordance invisible. Same reasoning as the
    queue-row-actions override. */
 .np .row-menu-trigger { opacity: 1; flex-shrink: 0; }
+/* Desktop drag affordance: the now-playing card is a draggable source
+   (onto sidebar playlists). Signal it with a grab cursor + a faint
+   rounded hover backing so the whole card reads as one grabbable object.
+   Padding + equal negative margin keeps the layout from shifting when the
+   backing appears. The inner artist/album links keep their own pointer
+   cursor (they're anchors) so navigation stays discoverable. */
+.np.is-draggable {
+  cursor: grab;
+  margin: 0 calc(var(--space-2) * -1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-2);
+  transition: background var(--dur-2) var(--ease-out-soft);
+}
+.np.is-draggable:hover {
+  background: color-mix(in oklab, var(--fg) 7%, transparent);
+}
+.np.is-draggable:active { cursor: grabbing; }
+/* Source-fade while this card is being dragged (the pill under the cursor
+   is the live copy). Mirrors the tracklist rows. */
+.np.is-dragging { opacity: 0.45; }
 .transport-col {
   display: flex;
   flex-direction: column;
@@ -1194,6 +1433,53 @@ a.tile-title:hover {
   top: 3px;
   bottom: 3px;
 }
+/* Highlight a playlist row while a dragged track hovers it (desktop DnD).
+   Outline (not layout) so the row doesn't shift under the cursor. A gentle
+   pulse draws the eye to the live drop target. */
+.nav-item.is-drop-target {
+  background: var(--surface-2);
+  color: var(--fg);
+  outline: 1px dashed var(--accent, var(--fg-muted));
+  outline-offset: -2px;
+  border-radius: var(--radius-2, 6px);
+  animation: drop-target-pulse var(--dur-3) var(--ease-out-soft) infinite alternate;
+}
+@keyframes drop-target-pulse {
+  from { outline-color: color-mix(in oklab, var(--accent, var(--fg-muted)) 55%, transparent); }
+  to { outline-color: var(--accent, var(--fg-muted)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-item.is-drop-target { animation: none; }
+}
+
+/* Compact drag image for a track source (built in dnd/trackDrag, snapshotted
+   by setDragImage). Replaces the browser's default full-element bitmap — an
+   ugly full-width row ghost — with a small titled pill that trails the
+   cursor. Lives off-screen only for the instant the browser snapshots it. */
+.track-drag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 260px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--surface-2) 92%, var(--accent, transparent));
+  color: var(--fg);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+.track-drag-chip__icon {
+  color: var(--accent, var(--fg-muted));
+  font-size: var(--text-sm);
+}
+.track-drag-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Diagnostics histogram inline 3-segment box-bar. */
 .hist-bar {
@@ -1514,4 +1800,739 @@ a.search-hero-title:hover {
   font-size: var(--text-xs);
   color: var(--fg-faint);
   margin-top: 2px;
+}
+
+/* ============================================================
+   Responsive / touch adaptations.
+
+   The app is desktop-first; this section adapts the chrome for
+   tablets (≤900px), phones (≤768px / ≤640px), and touch input
+   (hover: none / pointer: coarse). Kept in one block so the
+   breakpoint story is readable top-to-bottom rather than spread
+   across every component above.
+   ============================================================ */
+
+/* --- Touch input: hover-gated affordances must be visible. ------- */
+@media (hover: none) {
+  /* Card play overlay and row ⋯-menu normally fade in on :hover,
+     which never fires on touch. Show them at rest. */
+  .tile-play { opacity: 1; transform: translateY(0); }
+  .row-menu-trigger { opacity: 1; }
+  /* Queue rows gate remove-✕ / reorder behind tr:hover; a child's
+     opacity can't beat the parent's 0, so the cluster itself must be
+     un-hidden here — it's the only reorder/remove path on phones. */
+  .queue-row-actions { opacity: 1; }
+  /* Hero-card / table-thumb play glyphs too — but drop the dimming
+     wash (a permanent 50% black film over every cover reads as
+     broken art on phones); a drop shadow keeps the glyph legible
+     over busy artwork. */
+  .search-hero-play,
+  .thumb-play {
+    opacity: 1;
+    background: transparent;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+  }
+}
+
+@media (pointer: coarse) {
+  /* iOS Safari auto-zooms the page when a focused text input has a
+     font-size below 16px. */
+  .search-input,
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  select,
+  textarea { font-size: 16px; }
+  /* 28px arrows are below the ~40px touch-target guideline. */
+  .topbar .arrow { width: 36px; height: 36px; }
+  /* An on-page volume slider is dead weight on touch devices —
+     hardware buttons own volume there (iOS ignores element volume
+     entirely). */
+  .player .volume { display: none; }
+}
+
+/* --- Tablet (≤900px): the player loses its 560px transport floor. - */
+@media (max-width: 900px) {
+  .player {
+    /* Desktop is `1fr auto 1fr` with the middle column sized by the
+       560px min-width below; once that floor goes, size the middle
+       proportionally instead so the scrubber keeps real width. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  }
+  .transport-col { min-width: 0; max-width: none; }
+  /* The rating + rate-rec pills don't fit alongside the transport at
+     tablet widths; they remain reachable from track rows / the queue. */
+  .player .right-cluster .rec-feedback { display: none; }
+  /* Album column is the first table casualty — title/artist/time keep
+     their slots. */
+  .tracks .col-album { display: none; }
+}
+
+/* --- Phone (≤768px): sidebar becomes an off-canvas drawer. -------- */
+@media (max-width: 768px) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-areas: "main" "player";
+  }
+  .shell > .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 85vw);
+    z-index: 40;
+    transform: translateX(-100%);
+    /* visibility flips after the slide-out completes — removes the
+       offscreen drawer from the tab order without JS focus juggling. */
+    visibility: hidden;
+    transition:
+      transform var(--dur-2) var(--ease-out-soft),
+      visibility 0s var(--dur-2);
+    border-right: 1px solid var(--border-subtle);
+    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  }
+  .shell > .sidebar.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform var(--dur-2) var(--ease-out-soft);
+    box-shadow: var(--shadow-pop);
+  }
+  .topbar .menu-btn { display: inline-flex; }
+  .topbar { padding: 0 var(--space-3); }
+
+  /* Reclaim horizontal space. The 48px (--space-7) gutters on .section /
+     .hero are a desktop luxury; on a ~390px phone they ate ~25% of the
+     width and squeezed tables, cards, and the hero into a narrow column.
+     Drop to 16px so content runs near edge-to-edge. */
+  .section { padding: var(--space-4) var(--space-4); }
+  /* Title + action-button rows wrap instead of overflowing when a long
+     heading meets a button (e.g. "downloads & cache" + "free up space"). */
+  .section .section-head { flex-wrap: wrap; row-gap: var(--space-2); }
+  /* Stack the hero: cover on top, meta below. The desktop layout pins
+     the cover beside the meta with align-items:flex-end — at phone width
+     the short cover floats mid-column while the title wraps above it,
+     an awkward L-shape. A vertical stack reads as a normal mobile header
+     and lets the artwork be a proper focal point again. */
+  .hero {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: var(--space-5) var(--space-4) var(--space-4);
+    gap: var(--space-4);
+  }
+  .hero .cover-lg { width: 160px; height: 160px; }
+  .hero h1 { font-size: var(--text-display-sm); }
+  .hero .actions { flex-wrap: wrap; }
+}
+/* Backdrop behind the open drawer. Rendered by Layout only while the
+   drawer is open; display gated to the drawer breakpoint so a rotate-
+   to-desktop with the drawer open can't leave a full-screen overlay. */
+.sidebar-backdrop { display: none; }
+@media (max-width: 768px) {
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: color-mix(in oklab, var(--surface-0) 55%, transparent);
+  }
+}
+
+/* --- Small phone (≤640px): two-row player, condensed tables. ------ */
+@media (max-width: 640px) {
+  .player {
+    /* Row 1: now-playing | transport | queue. Row 2: full-width
+       scrubber. `display: contents` dissolves .transport-col so its
+       two children participate in this grid directly — no JSX change. */
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      "np transport extra"
+      "scrub scrub scrub";
+    height: auto;
+    gap: var(--space-2);
+    row-gap: 2px;
+    padding: 8px var(--space-3) calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  .np { grid-area: np; }
+  .transport-col { display: contents; }
+  .transport { grid-area: transport; }
+  .transport-col .scrub { grid-area: scrub; }
+  .right-cluster { grid-area: extra; }
+  .np .cover { width: 40px; height: 40px; }
+  /* The two-row player is height:auto here, so --player-h understates
+     it — pin the toast stack above the real-world worst case. */
+  .toast-viewport {
+    bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Squeeze-outs: the now-playing ⋯-menu (same actions are on every
+     row), the rate-rec / rating pills (hidden at ≤900px already), the
+     volume slider, and the perpetually-disabled repeat button. */
+  .np .row-menu-trigger { display: none; }
+  .player .volume { display: none; }
+  .transport .icon-btn[aria-label="repeat"] { display: none; }
+
+  /* Tables: drop the row-number column (title taps still play) and the
+     album column (gone at ≤900px); fix the layout so long titles
+     truncate instead of widening the table past the viewport. */
+  .tracks { table-layout: fixed; }
+  .tracks .col-num { display: none; }
+  .tracks .col-time { width: 52px; }
+  /* Stack artist under the title (see TrackRow.tsx) and drop the
+     separate artist column — fixed columns wasted a wide gap between a
+     short title and the artist while truncating long titles. The title
+     now owns the full row width; the artist rides underneath. Scoped
+     with :has() to tables that actually render the stacked sub-line
+     (track lists, queue) so AlbumTable / diagnostics tables, which have
+     no sub-line, keep their artist column. */
+  .tracks:has(.row-sub-artist) .col-artist { display: none; }
+  /* Any still-visible artist column (AlbumTable) keeps truncating. */
+  .tracks .col-title,
+  .tracks .col-artist {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tracks .col-title .row-sub-artist {
+    display: block;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Denser rows: trim the 12px vertical cell padding to 8px and shrink
+     the cover thumb a touch so more tracks fit per screen. The cover
+     cell (36px thumb + 8px) sets a 44px floor — kept deliberately at
+     the 44px touch-target minimum, since the whole row plays on tap. */
+  .tracks thead th,
+  .tracks tbody td { padding: var(--space-2); }
+  .tracks .cover-thumb { width: 36px; height: 36px; }
+  .tracks .col-cover { width: 44px; }
+  /* .col-cover's zero left padding relied on the row-number gutter,
+     which is hidden here — restore the table's edge padding. */
+  .tracks .col-cover { padding-left: var(--space-2); }
+  /* The ⋯ trigger was 28px — below the 44px touch floor. Grow its hit
+     area to a 44px square (icon stays visually centered). Zero the
+     cell's vertical padding so the taller button matches the 44px
+     cover-driven row floor instead of stacking on top of it and
+     making rows grow. Scoped to the direct child so the queue's dense
+     .queue-row-actions cluster (remove + ⋯ in one cell) is untouched. */
+  .tracks .col-menu > .row-menu-trigger { width: 44px; height: 44px; }
+  .tracks .col-menu:not(:has(.queue-row-actions)) {
+    width: 48px;
+    padding: 0 var(--space-2) 0 0;
+  }
+
+  /* Queue rows: the four-button action cluster (move-up / move-down /
+     remove / ⋯-menu) is wider than any phone-sized cell. Drop the
+     reorder chevrons — phone reordering wants a drag affordance, not
+     28px chevron taps — and widen the menu cell for the remaining two. */
+  .queue-row-actions [aria-label="move up"],
+  .queue-row-actions [aria-label="move down"] { display: none; }
+  .tracks:has(.queue-row-actions) .col-menu { width: 64px; }
+
+  /* Search hero cards stack their 1100px two-column grid long before
+     this, but the topbar breadcrumb is pure decoration — reclaim the
+     space for the title cluster. */
+  .topbar .breadcrumb { display: none; }
+
+  /* Guarantee a 2-up album/artist grid on phones. The desktop
+     minmax(160px) + 24px gap needs 344px of content, which a 360px
+     phone (≈328px after gutters) can't supply — so it silently
+     collapsed to one giant tile per row. Drop the floor to 140px and
+     tighten the gap so two tiles always fit, down to ~320px screens. */
+  .tile-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: var(--space-3);
+  }
+}
+
+/* ── Settings shell ──────────────────────────────────────────────────
+   Two columns inside <main>: a sticky secondary rail + the active panel.
+   The panel's own .section blocks supply the content insets, so the
+   shell adds none on that side — just a divider rule. */
+.settings-shell {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+.settings-rail {
+  flex: 0 0 210px;
+  position: sticky;
+  top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-6) var(--space-4) var(--space-6) var(--space-6);
+}
+.settings-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left: 1px solid var(--border-subtle, var(--border));
+}
+
+.settings-rail-head {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin-bottom: var(--space-1);
+  padding: 0 var(--space-2);
+}
+.settings-rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-2);
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-size: var(--text-sm);
+}
+.settings-rail-item:hover { background: var(--surface-2); color: var(--fg); }
+.settings-rail-item.is-active {
+  background: var(--surface-2);
+  color: var(--fg);
+  font-weight: var(--weight-medium, 500);
+}
+.settings-rail-item.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.settings-rail-icon { display: inline-flex; opacity: 0.85; }
+.settings-rail-label { flex: 1 1 auto; min-width: 0; }
+/* Dot marks "observe" (diagnostics) items so they stay distinguishable
+   from config rows when interleaved within a domain group. */
+.settings-rail-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+.settings-rail-item.is-active .settings-rail-dot { background: var(--accent); }
+
+/* Mobile: the rail folds into a grouped <select>; the desktop rail hides. */
+.settings-rail-mobile { display: none; }
+.settings-rail-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 768px) {
+  .settings-shell { flex-direction: column; }
+  .settings-rail { display: none; }
+  .settings-panel { border-left: 0; }
+  .settings-rail-mobile {
+    display: block;
+    padding: var(--space-5) var(--space-5) 0;
+  }
+}
+
+/* ============================== crate digging ============================
+   /crates — albums as LPs standing in a box (pages/Crates.tsx). The 3D
+   scene is plain CSS: perspective on .crate-stage, per-sleeve transforms
+   set inline by CrateDigger (they animate via the transition below).
+   Skeuomorphism is kept to a whisper: a wood-toned box, a masking-tape
+   label, a paper edge on each sleeve — all derived from surface tokens
+   so both themes work without dedicated colors. */
+
+.crate-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.crate-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+.crate-seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out-soft),
+              background var(--dur-1) var(--ease-out-soft);
+}
+.crate-seg-btn:hover { color: var(--fg); }
+.crate-seg-btn.is-active {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+/* Floor: the digging area (carousel + meta) with the crate list as a
+   rail on the right. */
+.crate-floor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  gap: var(--space-5);
+  align-items: start;
+}
+.crate-main { min-width: 0; }
+
+/* Rail: every crate, vertically. The active row follows swipes
+   (scrollIntoView from the page). */
+.crate-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: calc(min(42vh, 380px) + 240px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 2px;
+}
+.crate-rail-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 0;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: var(--radius-2);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out-soft),
+              color var(--dur-1) var(--ease-out-soft);
+}
+.crate-rail-item:hover {
+  background: var(--surface-1);
+  color: var(--fg);
+}
+.crate-rail-item.is-active {
+  background: color-mix(in oklab, var(--art-glow, var(--surface-2)) 30%, var(--surface-1));
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--art-accent, var(--accent)) 75%, transparent);
+}
+.crate-rail-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crate-rail-count {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+
+/* Carousel: previous crate | active digger | next crate, resting on the
+   same floor line. Neighbors are small, dimmed, clickable. */
+.crate-carousel {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  overflow: hidden;
+}
+.crate-carousel > .crate-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A neighbor crate: same .crate-box / .sleeve markup at a smaller
+   --sleeve-size, with box geometry overridden to match. */
+.crate-preview {
+  --sleeve-size: 124px;
+  position: relative;
+  flex: 0 0 auto;
+  width: 176px;
+  height: 236px;
+  perspective: 900px;
+  perspective-origin: 50% 30%;
+  overflow: hidden;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: var(--radius-3);
+  cursor: pointer;
+  opacity: 0.5;
+  filter: saturate(0.75);
+  transition: opacity var(--dur-1) var(--ease-out-soft),
+              filter var(--dur-1) var(--ease-out-soft);
+  /* Remounted per crate (key) — fades to its resting 0.5 on each swap. */
+  animation: crate-preview-in 0.3s ease;
+}
+.crate-preview:hover,
+.crate-preview:focus-visible {
+  opacity: 0.95;
+  filter: none;
+}
+.crate-preview.is-empty {
+  visibility: hidden;
+  pointer-events: none;
+}
+.crate-preview .crate-box {
+  width: calc(var(--sleeve-size) + 52px);
+  margin-left: calc((var(--sleeve-size) + 52px) / -2);
+  height: 92px;
+  bottom: 10px;
+}
+.crate-preview .crate-box-back { top: -16px; }
+.crate-preview .sleeve {
+  bottom: 72px;
+  cursor: pointer;
+}
+.crate-preview .crate-tape {
+  top: 10px;
+  padding: 2px 10px;
+  font-size: 10px;
+}
+
+/* The stage: perspective container. Sleeves and the box are its direct
+   children so one shared perspective renders a coherent scene; painting
+   order is explicit z-index (no preserve-3d — flat children avoid
+   intersection artifacts and keep this compositor-cheap). */
+.crate-stage {
+  --sleeve-size: min(42vh, 380px);
+  position: relative;
+  height: calc(var(--sleeve-size) + 240px);
+  perspective: 1200px;
+  perspective-origin: 50% 26%;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  outline: none;
+  border-radius: var(--radius-3);
+}
+.crate-stage:active { cursor: grabbing; }
+.crate-stage:focus-visible {
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--art-accent, var(--focus)) 55%, transparent);
+}
+
+/* Crate-switch slide-in. The digger remounts per crate (key=crate.id),
+   so the animation replays on every left/right step; the direction class
+   comes from which side the crate was entered (swipe, neighbor click,
+   rail, arrow keys). The matching previews fade in keyed the same way. */
+@keyframes crate-enter-right {
+  from {
+    transform: translateX(56px);
+    opacity: 0.35;
+  }
+}
+@keyframes crate-enter-left {
+  from {
+    transform: translateX(-56px);
+    opacity: 0.35;
+  }
+}
+.crate-stage.crate-enter-right {
+  animation: crate-enter-right 0.3s var(--ease-out-soft);
+}
+.crate-stage.crate-enter-left {
+  animation: crate-enter-left 0.3s var(--ease-out-soft);
+}
+@keyframes crate-preview-in {
+  from { opacity: 0; }
+}
+
+.crate-counter {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-4);
+  z-index: 320;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+  pointer-events: none;
+}
+
+/* The box. Front panel paints OVER the sleeve bottoms (that's what makes
+   them sit "in" the crate); back wall sits behind everything. Wood is a
+   surface-token mix + one faint plank-line repeat — texture you notice
+   only when you look for it. */
+.crate-box {
+  /* Centered via margin, NOT translateX(-50%): a transform would create
+     a stacking context that traps the panels' z-indexes inside the box,
+     painting the front panel behind the sleeves it must occlude. */
+  position: absolute;
+  left: 50%;
+  /* Flush with the stage floor: flipped sleeves project far below their
+     pivot under this perspective, and any gap under the panel lets that
+     projection peek through as a sliver of cover art. */
+  bottom: 0;
+  width: calc(var(--sleeve-size) + 96px);
+  margin-left: calc((var(--sleeve-size) + 96px) / -2);
+  height: 172px;
+  pointer-events: none;
+}
+.crate-box-back,
+.crate-box-front {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-2);
+  background:
+    repeating-linear-gradient(
+      88deg,
+      rgb(0 0 0 / 0.05) 0 2px,
+      transparent 2px 30px
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--surface-3) 45%, oklch(52% 0.07 62)) 0%,
+      color-mix(in oklab, var(--surface-2) 50%, oklch(43% 0.06 58)) 100%
+    );
+}
+.crate-box-back {
+  z-index: 40;
+  top: -26px;
+  filter: brightness(0.72);
+}
+.crate-box-front {
+  z-index: 250;
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.07),
+    inset 0 -12px 26px rgb(0 0 0 / 0.22),
+    0 18px 44px -18px rgb(0 0 0 / 0.55);
+}
+
+/* Masking-tape label on the crate front. */
+.crate-tape {
+  position: absolute;
+  z-index: 260;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%) rotate(-2deg);
+  background: oklch(90% 0.025 95 / 0.96);
+  color: oklch(32% 0.015 70);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  white-space: nowrap;
+  max-width: calc(100% - 48px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 3px 14px;
+  border-radius: 2px;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.25);
+}
+
+/* One LP sleeve. transform-origin bottom-center: records pivot where
+   they rest in the box. Inline transform comes from CrateDigger. */
+.sleeve {
+  position: absolute;
+  left: 50%;
+  bottom: 120px;
+  width: var(--sleeve-size);
+  aspect-ratio: 1;
+  margin-left: calc(var(--sleeve-size) / -2);
+  transform-origin: 50% 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-2);
+  box-shadow: 0 6px 18px -8px rgb(0 0 0 / 0.5);
+  transition: transform 0.34s cubic-bezier(0.22, 1.18, 0.36, 1),
+              opacity 0.34s ease;
+  will-change: transform;
+  cursor: pointer;
+}
+.sleeve .cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Paper edge: hairline ring + a top-left sheen + the worn bottom seam. */
+.sleeve::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.07),
+    inset 0 -2px 0 rgb(0 0 0 / 0.18);
+  background: linear-gradient(160deg, rgb(255 255 255 / 0.09) 0%, transparent 26%);
+  pointer-events: none;
+}
+.sleeve.is-focused {
+  box-shadow:
+    0 24px 48px -16px rgb(0 0 0 / 0.55),
+    0 10px 28px color-mix(in oklab, var(--art-glow, transparent) 50%, transparent);
+}
+
+/* Focused-record meta under the stage. */
+.crate-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  text-align: center;
+}
+.crate-meta-title {
+  font-family: var(--font-display);
+  font-size: var(--text-display-sm);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  color: var(--fg);
+  text-decoration: none;
+}
+.crate-meta-title:hover { text-decoration: underline; }
+.crate-meta-sub {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.crate-meta-sub a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.crate-meta-sub a:hover {
+  color: var(--fg);
+  border-bottom-color: currentColor;
+}
+.crate-meta-play { margin-top: var(--space-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .sleeve { transition: none; }
+  .crate-stage.crate-enter-right,
+  .crate-stage.crate-enter-left,
+  .crate-preview { animation: none; }
+}
+
+@media (max-width: 768px) {
+  .crate-stage { --sleeve-size: min(66vw, 300px); }
+  .section .section-head .crate-controls {
+    flex-basis: 100%;
+    order: 10;
+  }
+  /* Single column: the rail drops below the digger, capped + scrollable. */
+  .crate-floor { grid-template-columns: minmax(0, 1fr); }
+  .crate-rail {
+    max-height: 220px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-2);
+  }
+  /* Neighbors show only their inner edge — enough to invite the swipe
+     without spending phone width. The carousel clips the rest. */
+  .crate-carousel { gap: 0; }
+  .crate-preview-left { margin-left: -144px; }
+  .crate-preview-right { margin-right: -144px; }
+  .crate-preview .crate-tape { display: none; }
 }

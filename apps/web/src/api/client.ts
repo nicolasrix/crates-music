@@ -6,29 +6,36 @@
 
 import { refreshTokens } from "../auth/oauth";
 import { clearTokens, readTokens } from "../auth/tokens";
+import { codecFromContentType } from "../cache/audioKey";
+import { streamQualityParams } from "../settings/playback";
 import {
   Album,
   AlbumWithTracks,
   Artist,
   ArtistWithAlbums,
-  PlaylistSummary,
-  PlaylistWithTracks,
   Track,
 } from "./types";
 
 class AuthError extends Error {}
 
-async function apiFetch(path: string): Promise<Response> {
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const tokens = readTokens();
   if (!tokens) throw new AuthError("not signed in");
 
   const doFetch = (token: string) =>
     fetch(path, {
-      headers: { Authorization: `Bearer ${token}` },
+      ...init,
+      headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
     });
 
   let res = await doFetch(tokens.accessToken);
   if (res.status === 401) {
+    // Guest sessions (PR D) carry no refresh token — a 401 is terminal,
+    // the visitor must re-redeem the code. Don't attempt a refresh.
+    if (!tokens.refreshToken) {
+      clearTokens();
+      throw new AuthError("guest session expired");
+    }
     try {
       await refreshTokens(tokens.refreshToken);
     } catch {
@@ -142,63 +149,28 @@ export async function getArtist(id: string): Promise<ArtistWithAlbums> {
   return { artist, albums: album ?? [] };
 }
 
-export async function listPlaylists(): Promise<PlaylistSummary[]> {
-  type Resp = { playlist?: PlaylistSummary[] };
-  const result = await getSubsonic<Resp>("/rest/getPlaylists", "playlists");
-  return result.playlist ?? [];
+// Per-artist top songs (Subsonic getTopSongs — Navidrome backs it with
+// play counts). An artist with no recorded plays can come back empty,
+// so callers need a fallback (see Artist.tsx's album-order fallback).
+export async function getTopSongs(
+  artistName: string,
+  count = 50
+): Promise<Track[]> {
+  const params = new URLSearchParams({
+    artist: artistName,
+    count: String(count),
+  });
+  const result = await getSubsonic<{ song?: Track[] }>(
+    `/rest/getTopSongs?${params.toString()}`,
+    "topSongs"
+  );
+  return result.song ?? [];
 }
 
-export async function getPlaylist(id: string): Promise<PlaylistWithTracks> {
-  const path = `/rest/getPlaylist?id=${encodeURIComponent(id)}`;
-  const raw = await getSubsonic<PlaylistSummary & { entry?: Track[] }>(path, "playlist");
-  const { entry, ...playlist } = raw;
-  return { playlist, tracks: entry ?? [] };
-}
-
-// Create an empty playlist. Subsonic accepts createPlaylist with `name`
-// alone and returns the new playlist envelope. Some servers (Navidrome
-// included) wrap it under "playlist" exactly like getPlaylist; others
-// drop the wrapper. The fetched response carries enough metadata for us
-// to navigate to /playlists/:id.
-export async function createPlaylist(name: string): Promise<PlaylistSummary> {
-  const path = `/rest/createPlaylist?name=${encodeURIComponent(name)}`;
-  return getSubsonic<PlaylistSummary>(path, "playlist");
-}
-
-// Add a single song to an existing playlist via Subsonic's updatePlaylist.
-// Returns nothing — the caller invalidates the relevant queries to pick
-// up the new track count.
-export async function addTrackToPlaylist(
-  playlistId: string,
-  trackId: string
-): Promise<void> {
-  const path =
-    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
-    `&songIdToAdd=${encodeURIComponent(trackId)}`;
-  // updatePlaylist returns an empty `subsonic-response` body on success;
-  // we only care that getSubsonic doesn't throw on a non-ok envelope.
-  await getSubsonic<unknown>(path, "");
-}
-
-// Rename an existing playlist. Subsonic's updatePlaylist accepts a `name`
-// param to overwrite the playlist's title — same endpoint as track edits.
-export async function renamePlaylist(
-  playlistId: string,
-  name: string
-): Promise<void> {
-  const path =
-    `/rest/updatePlaylist?playlistId=${encodeURIComponent(playlistId)}` +
-    `&name=${encodeURIComponent(name)}`;
-  await getSubsonic<unknown>(path, "");
-}
-
-// Delete a playlist. Subsonic deletes immediately on success; no
-// soft-delete or undo. Caller is responsible for the confirmation step
-// and for invalidating the playlists list afterwards.
-export async function deletePlaylist(playlistId: string): Promise<void> {
-  const path = `/rest/deletePlaylist?id=${encodeURIComponent(playlistId)}`;
-  await getSubsonic<unknown>(path, "");
-}
+// Playlists moved off `/rest/*` to the gateway-owned `/v1/playlists/*`
+// store (user-system PR F). Their client wrappers — listPlaylists,
+// getPlaylist, createPlaylist, addTrackToPlaylist, renamePlaylist,
+// deletePlaylist, setPlaylistTracks — live in `./playlists`.
 
 // "Recent tracks" — derived from the newest-albums endpoint, NOT from
 // search3 directly. search3's empty-query result has no guaranteed order
@@ -286,15 +258,19 @@ export interface SearchResults {
   tracks: Track[];
 }
 
-// Library-wide search via Subsonic search3. Caller decides per-section
-// caps; the defaults match what the Search page renders without paging.
+// Library-wide search via the gateway's typo-tolerant /v1/search. Returns
+// the same Subsonic `searchResult3` envelope as `search3` (so the parser is
+// unchanged), but the gateway fuzzy-matches and relevance-orders the
+// results server-side — a misspelled query still finds the track. When the
+// gateway's index isn't built yet it transparently falls back to proxying
+// Navidrome `search3`. Caller decides per-section caps.
 export async function searchAll(
   query: string,
   opts: { artistCount?: number; albumCount?: number; songCount?: number } = {}
 ): Promise<SearchResults> {
   const { artistCount = 20, albumCount = 40, songCount = 60 } = opts;
   const path =
-    `/rest/search3?query=${encodeURIComponent(query)}` +
+    `/v1/search?query=${encodeURIComponent(query)}` +
     `&artistCount=${artistCount}&albumCount=${albumCount}&songCount=${songCount}`;
   type Resp = { artist?: Artist[]; album?: Album[]; song?: Track[] };
   const result = await getSubsonic<Resp>(path, "searchResult3");
@@ -333,7 +309,40 @@ export function streamUrl(trackId: string): string {
   // header OR ?access_token= for media URLs; see auth.rs comment.
   const tokens = readTokens();
   const auth = tokens ? `&access_token=${encodeURIComponent(tokens.accessToken)}` : "";
-  return `/rest/stream?id=${encodeURIComponent(trackId)}${auth}`;
+  // Streaming quality (Settings → Playback): transcode live playback to fit
+  // a metered connection. Forwarded verbatim through the /rest proxy to
+  // Navidrome. Independent of the offline-cache download quality; null =
+  // passthrough original. Read at src-build time so a change applies to the
+  // next track load.
+  const q = streamQualityParams();
+  const fmt = q ? `&format=${q.format}&maxBitRate=${q.maxBitRate}` : "";
+  return `/rest/stream?id=${encodeURIComponent(trackId)}${fmt}${auth}`;
+}
+
+// Download a full track for the offline cache. Unlike streamUrl (which is
+// consumed by an <audio> element and so passes ?access_token=), this goes
+// through apiFetch with an Authorization header and token-refresh, and
+// returns the bytes plus the codec the server actually served (derived
+// from Content-Type — the web Track type carries no suffix). Caller stores
+// it keyed by (trackId, bitrate, codec).
+//
+// `quality` (transcode-to-fit): forwarded verbatim through the gateway's
+// /rest proxy to Navidrome's stream endpoint, which transcodes server-side
+// — the same params the ingest fetcher uses. Omitted = passthrough original.
+export async function fetchTrackBlob(
+  trackId: string,
+  quality?: { format: string; maxBitRate: number } | null,
+): Promise<{ blob: Blob; codec: string }> {
+  const params = new URLSearchParams({ id: trackId });
+  if (quality) {
+    params.set("format", quality.format);
+    params.set("maxBitRate", String(quality.maxBitRate));
+  }
+  const res = await apiFetch(`/rest/stream?${params.toString()}`);
+  if (!res.ok) throw new Error(`stream HTTP ${res.status}`);
+  const blob = await res.blob();
+  const codec = codecFromContentType(res.headers.get("content-type"));
+  return { blob, codec };
 }
 
 export function coverArtUrl(
@@ -349,6 +358,75 @@ export function coverArtUrl(
   // upstream — see STRIPPED_PARAM_KEYS in crates/music-gateway/src/proxy.rs.
   const seedQ = seed ? `&seed=${encodeURIComponent(seed)}` : "";
   return `/rest/getCoverArt?id=${encodeURIComponent(coverArt)}&size=${size}${auth}${seedQ}`;
+}
+
+export type Role = "admin" | "user" | "guest";
+
+export interface Whoami {
+  user_id: number;
+  role: Role;
+  username: string | null;
+  display_name: string | null;
+  host_user_id: number | null;
+}
+
+/** Resolve the calling principal (identity + role) for role-gated UI. */
+export async function whoami(): Promise<Whoami> {
+  const res = await apiFetch("/v1/whoami");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as Whoami;
+}
+
+// ---- Guest codes (PR D) — host-side management ------------------------
+
+export interface GuestCode {
+  id: number;
+  label: string | null;
+  created_at_unix_ms: number;
+  expires_at_unix_ms: number | null;
+  max_uses: number | null;
+  uses: number;
+  revoked_at_unix_ms: number | null;
+}
+
+export interface CreatedGuestCode {
+  id: number;
+  /** Plaintext — shown once at creation, never recoverable afterwards. */
+  code: string;
+  expires_at_unix_ms: number | null;
+  max_uses: number | null;
+}
+
+/** List the caller's guest codes (newest first). Forbidden for guests. */
+export async function listGuestCodes(): Promise<GuestCode[]> {
+  const res = await apiFetch("/v1/guest_codes");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as GuestCode[];
+}
+
+/** Mint a new guest code owned by the caller. Returns the plaintext once. */
+export async function createGuestCode(opts: {
+  label?: string | undefined;
+  expiresInSeconds?: number | undefined;
+  maxUses?: number | undefined;
+}): Promise<CreatedGuestCode> {
+  const body: Record<string, unknown> = {};
+  if (opts.label) body.label = opts.label;
+  if (opts.expiresInSeconds) body.expires_in_seconds = opts.expiresInSeconds;
+  if (opts.maxUses) body.max_uses = opts.maxUses;
+  const res = await apiFetch("/v1/guest_codes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as CreatedGuestCode;
+}
+
+/** Revoke one of the caller's guest codes. Idempotent. */
+export async function revokeGuestCode(id: number): Promise<void> {
+  const res = await apiFetch(`/v1/guest_codes/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
 }
 
 export { AuthError };
