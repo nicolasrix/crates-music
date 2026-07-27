@@ -39,10 +39,23 @@ L2 metadata cache. SQLite-backed.
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `path` | path | no | `gateway-cache.sqlite` | SQLite file path. |
-| `browse_ttl_seconds` | u64 | no | `86400` (24 h) | TTL applied to cached browse-endpoint responses. |
+| `browse_ttl_seconds` | u64 | no | `86400` (24 h) | TTL for *entity* browse responses (`getAlbum`, `getArtist`) — these only change when a record's tags are edited. |
+| `list_ttl_seconds` | u64 | no | `60` | TTL for *list* browse responses (`getAlbumList2`, `getArtists`, `search3`). Keep this short: lists are views over the whole catalog, so adding an album changes the answer without touching anything already in the response. A long value here makes newly-added music invisible for up to that long — and because `size` is part of the cache key, two pages asking at different sizes can hold snapshots from different days and visibly disagree. |
 
 The cache is throwaway — deleting the file at any time is safe. ETags
 get re-derived on the next refresh.
+
+Note that `ttl_seconds` is stored **per row**, at the moment the row is
+written. Changing either TTL therefore only affects entries written
+afterwards; rows already in the file keep the value they were cached
+with. After lowering a TTL, clear the cache (`POST
+/v1/admin/cache/invalidate`, or just delete the file) or the old
+entries will outlive the new setting.
+
+When upstream is unreachable — a refused connection, or a `5xx` from
+whatever answers on Navidrome's behalf — a stale entry is served in
+preference to failing, carrying a `Warning: 110` header. Availability
+is deliberately not bounded by the TTL; only freshness is.
 
 ### `[oauth]`
 

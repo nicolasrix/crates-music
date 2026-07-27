@@ -1126,8 +1126,10 @@ Endpoints currently augmented with caching:
 
 | Endpoint | Cache |
 |---|---|
-| `/rest/getAlbumList2` | L2 (`browse_ttl_seconds`). Bypassed when `type=random`. |
-| `/rest/getAlbum` | L2 (`browse_ttl_seconds`) |
+| `/rest/getAlbumList2` | L2 (`list_ttl_seconds`, default 60 s). Bypassed when `type=random`. |
+| `/rest/getAlbum` | L2 (`browse_ttl_seconds`, default 24 h) |
+| `/rest/getArtists`, `/rest/search3` | L2 (`list_ttl_seconds`) |
+| `/rest/getArtist` | L2 (`browse_ttl_seconds`) |
 | `/rest/getCoverArt` | L2 (separate budget; see above) |
 | `/rest/scrobble` | intercepted (see above) |
 | `/rest/ping` | not cached |

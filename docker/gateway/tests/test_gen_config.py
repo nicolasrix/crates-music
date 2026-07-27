@@ -48,6 +48,7 @@ def test_minimum_env_produces_valid_toml() -> None:
 
     assert parsed["cache"]["path"] == "/data/state/gateway-cache.sqlite"
     assert parsed["cache"]["browse_ttl_seconds"] == 86400
+    assert parsed["cache"]["list_ttl_seconds"] == 60
 
     assert parsed["oauth"]["state_db"] == "/data/state/gateway-state.sqlite"
     # Default web + cli clients always registered.
@@ -208,6 +209,12 @@ def test_browse_ttl_seconds_override() -> None:
     env = _minimum_env() | {"GATEWAY_BROWSE_TTL_SECONDS": "3600"}
     parsed = tomllib.loads(build_config(env))
     assert parsed["cache"]["browse_ttl_seconds"] == 3600
+
+
+def test_list_ttl_seconds_override() -> None:
+    env = _minimum_env() | {"GATEWAY_LIST_TTL_SECONDS": "300"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["cache"]["list_ttl_seconds"] == 300
 
 
 def test_listen_override() -> None:

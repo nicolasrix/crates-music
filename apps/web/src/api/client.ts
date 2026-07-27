@@ -182,14 +182,35 @@ export async function getTopSongs(
 // flattened list to `size`. Per-album track fetches run in parallel —
 // the gateway caches each `getAlbum` aggressively, so warm-cache cost
 // is effectively one round-trip.
+//
+// One album failing must not blank the whole section, so failures are
+// tolerated — but never silently. A swallowed failure here is visually
+// identical to the album simply not being in the list, which is exactly
+// the ambiguity that made a stale-cache bug read as a missing-data bug.
+// So: warn per failure, and throw if *every* album failed, since that's
+// not partial degradation but a broken fetch path the caller should
+// render as an error rather than as an empty list.
 export async function listRecentTracks(size = 200): Promise<Track[]> {
   const albumCount = Math.max(10, Math.ceil(size / 8));
   const albums = await listAlbums({ type: "newest", size: albumCount });
   // Promise.all preserves index order, so the flattened tracks come
   // out album-by-album in newest-first order without an extra sort.
   const details = await Promise.all(
-    albums.map((a) => getAlbum(a.id).catch(() => null)),
+    albums.map((a) =>
+      getAlbum(a.id).catch((err: unknown) => {
+        console.warn(
+          `listRecentTracks: dropping album ${a.id} (${a.name}) —`,
+          err,
+        );
+        return null;
+      }),
+    ),
   );
+  if (albums.length > 0 && details.every((d) => d === null)) {
+    throw new Error(
+      `could not load any of the ${albums.length} most recent albums`,
+    );
+  }
   const tracks: Track[] = [];
   for (const detail of details) {
     if (!detail) continue;

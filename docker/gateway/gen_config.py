@@ -18,7 +18,8 @@ Optional env (with defaults):
     GATEWAY_TLS_KEY             /data/certs/gateway.local-key.pem
     GATEWAY_STATE_DB            /data/state/gateway-state.sqlite
     GATEWAY_CACHE_DB            /data/state/gateway-cache.sqlite
-    GATEWAY_BROWSE_TTL_SECONDS  86400
+    GATEWAY_BROWSE_TTL_SECONDS  86400   (getAlbum / getArtist)
+    GATEWAY_LIST_TTL_SECONDS    60      (getAlbumList2 / getArtists / search3)
     OAUTH_WEB_REDIRECT_URIS     https://gateway.local:8443/oauth/callback
     EMBEDDER_URL                (unset → no [embedder] section)
     EMBEDDER_FALLBACK_URLS      (comma-separated failover endpoints, tried
@@ -76,6 +77,7 @@ DEFAULT_TLS_KEY = "/data/certs/gateway.local-key.pem"
 DEFAULT_STATE_DB = "/data/state/gateway-state.sqlite"
 DEFAULT_CACHE_PATH = "/data/state/gateway-cache.sqlite"
 DEFAULT_BROWSE_TTL = 86400
+DEFAULT_LIST_TTL = 60
 DEFAULT_EMBEDDER_TIMEOUT = 30
 DEFAULT_REDIRECT_URI = "https://gateway.local:8443/oauth/callback"
 
@@ -119,6 +121,11 @@ def build_config(env: Mapping[str, str]) -> str:
         browse_ttl = int(env.get("GATEWAY_BROWSE_TTL_SECONDS", DEFAULT_BROWSE_TTL))
     except ValueError as e:
         raise ConfigError(f"GATEWAY_BROWSE_TTL_SECONDS must be an integer: {e}") from e
+
+    try:
+        list_ttl = int(env.get("GATEWAY_LIST_TTL_SECONDS", DEFAULT_LIST_TTL))
+    except ValueError as e:
+        raise ConfigError(f"GATEWAY_LIST_TTL_SECONDS must be an integer: {e}") from e
 
     redirect_raw = env.get("OAUTH_WEB_REDIRECT_URIS", DEFAULT_REDIRECT_URI)
     redirect_uris = [u.strip() for u in redirect_raw.split(",") if u.strip()]
@@ -249,6 +256,7 @@ def build_config(env: Mapping[str, str]) -> str:
     parts.append("[cache]")
     parts.append(f'path = {_str(cache_path)}')
     parts.append(f"browse_ttl_seconds = {browse_ttl}")
+    parts.append(f"list_ttl_seconds = {list_ttl}")
     parts.append("")
 
     parts.append("[oauth]")
