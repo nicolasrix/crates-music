@@ -19,7 +19,7 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
         header::{
             ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-            IF_NONE_MATCH, RANGE,
+            IF_NONE_MATCH, RANGE, WARNING,
         },
     },
     response::Response,
@@ -29,7 +29,7 @@ use music_cache::{Entry, etag_for};
 use music_subsonic::auth;
 use url::Url;
 
-use crate::config::Config;
+use crate::config::{CacheConfig, Config};
 use crate::state::AppState;
 
 const SUBSONIC_PROTOCOL_VERSION: &str = "1.16.1";
@@ -226,13 +226,17 @@ async fn browse_proxy(
 ) -> Result<Response, StatusCode> {
     let key = cache_key(method, client_query);
     let now = SystemTime::now();
-    let ttl = Duration::from_secs(state.config().cache.browse_ttl_seconds);
+    let ttl = Duration::from_secs(ttl_seconds_for(method, &state.config().cache));
 
-    if let Some(entry) = state
+    // Kept past the freshness check: if upstream turns out to be
+    // unreachable, a stale entry is a better answer than a 502.
+    let cached = state
         .cache()
         .get(&key)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(entry) = &cached
         && entry.is_fresh(now)
     {
         if let Some(client_etag) = if_none_match
@@ -242,29 +246,36 @@ async fn browse_proxy(
             return Ok(not_modified(&entry.etag));
         }
         tracing::Span::current().record("outcome", "cache_hit");
-        return Ok(serve_from_cache(&entry));
+        return Ok(serve_from_cache(entry));
     }
     tracing::Span::current().record("outcome", "upstream_fetch");
 
     // Miss or stale → fetch upstream, buffer body, store, return.
     let upstream_url =
         build_upstream_url(state.config(), method, client_query).map_err(|e| e.status())?;
-    let upstream = state
-        .http()
-        .get(upstream_url)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let Ok(upstream) = state.http().get(upstream_url).send().await else {
+        return serve_stale_or_bad_gateway(cached.as_ref());
+    };
 
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
-    let body_bytes = upstream
-        .bytes()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let Ok(body_bytes) = upstream.bytes().await else {
+        return serve_stale_or_bad_gateway(cached.as_ref());
+    };
 
     if !status.is_success() {
-        // Don't poison the cache with errors. Forward verbatim.
+        // A 5xx means upstream is unhealthy, not that the request was
+        // bad — and it arrives as a *successful* HTTP exchange when
+        // something (a reverse proxy in front of Navidrome) answers on
+        // its behalf, so the transport-error arm above never sees it.
+        // Same reasoning as there: prefer a stale list to a dead one.
+        if status.is_server_error()
+            && let Some(entry) = cached.as_ref()
+        {
+            return serve_stale_or_bad_gateway(Some(entry));
+        }
+        // 4xx is a legitimate answer about this request. Don't poison
+        // the cache with errors — forward verbatim.
         return Ok(forward_buffered(status, &upstream_headers, body_bytes));
     }
 
@@ -845,6 +856,32 @@ fn not_modified(etag: &str) -> Response {
     response
 }
 
+/// Fallback for when upstream can't answer: serve a stale cache entry if we
+/// have one, otherwise `502`.
+///
+/// Without this, shortening `list_ttl_seconds` would be a straight downgrade
+/// during a Navidrome outage — the old 24 h TTL doubled as an accidental
+/// outage buffer, and browse survived only for as long as an entry happened
+/// to still be fresh. Serving stale on error separates the two concerns:
+/// freshness is bounded by the TTL, availability isn't bounded at all.
+///
+/// `Warning: 110` is formally obsolete (RFC 9111 §5.5 dropped the field), but
+/// nothing replaced it and it remains the clearest way to tell a human with
+/// `curl` that they're looking at a fallback rather than a live answer.
+fn serve_stale_or_bad_gateway(stale: Option<&Entry>) -> Result<Response, StatusCode> {
+    let Some(entry) = stale else {
+        return Err(StatusCode::BAD_GATEWAY);
+    };
+    tracing::Span::current().record("outcome", "stale_upstream_unavailable");
+    tracing::warn!("upstream unavailable; serving stale browse entry");
+    let mut response = serve_from_cache(entry);
+    response.headers_mut().insert(
+        WARNING,
+        HeaderValue::from_static("110 - \"Response is Stale\""),
+    );
+    Ok(response)
+}
+
 fn serve_from_cache(entry: &Entry) -> Response {
     let mut response = Response::new(Body::from(entry.body.clone()));
     *response.status_mut() = StatusCode::OK;
@@ -999,6 +1036,28 @@ fn is_cacheable(method: &str, client_query: &str) -> bool {
     let is_random = url::form_urlencoded::parse(client_query.as_bytes())
         .any(|(k, v)| k == "type" && v == "random");
     !is_random
+}
+
+/// TTL for a browse response, in seconds.
+///
+/// `BROWSE_METHODS` covers two kinds of data with very different volatility,
+/// and one TTL can't serve both:
+///
+/// - **Lists** (`getAlbumList2`, `getArtists`, `search3`) are views over the
+///   whole catalog. Adding an album changes the answer without touching
+///   anything already in the response, so they go stale on library changes
+///   nobody signalled. They also carry `size` in the cache key, so a long
+///   TTL lets two pages asking the same question at different sizes hold
+///   snapshots from different days and visibly contradict each other.
+/// - **Entities** (`getAlbum`, `getArtist`) only change when someone edits
+///   that specific record's tags. Long TTL is right, and it's the expensive
+///   lookup worth caching hardest — one home-page load fans out to ten
+///   `getAlbum` calls.
+fn ttl_seconds_for(method: &str, cache: &CacheConfig) -> u64 {
+    match method {
+        "getAlbumList2" | "getArtists" | "search3" => cache.list_ttl_seconds,
+        _ => cache.browse_ttl_seconds,
+    }
 }
 
 /// Cover-art cache key. Like `cache_key` but limited to the small set of

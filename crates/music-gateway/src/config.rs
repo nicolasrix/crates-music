@@ -114,8 +114,23 @@ impl std::fmt::Debug for UpstreamConfig {
 pub struct CacheConfig {
     /// Path to the SQLite file backing the L2 metadata cache.
     pub path: PathBuf,
-    /// TTL applied to browse-endpoint responses (in seconds).
+    /// TTL applied to *entity* browse responses — `getAlbum`, `getArtist`.
+    /// Long by design: a given album's track list only changes when its
+    /// tags are edited, which at our scale is approximately never.
     pub browse_ttl_seconds: u64,
+    /// TTL applied to *list* browse responses — `getAlbumList2`,
+    /// `getArtists`, `search3`.
+    ///
+    /// These must expire on the order of a page-load, not a day, because
+    /// they are views over the whole catalog: adding an album changes the
+    /// answer without touching anything already in the response. Sharing
+    /// one TTL with the entity endpoints meant a newly-added album stayed
+    /// invisible for up to `browse_ttl_seconds`, and — since the cache key
+    /// includes `size` — different pages asking the same question at
+    /// different sizes held independently-aged snapshots and visibly
+    /// disagreed with each other.
+    #[serde(default = "default_list_ttl_seconds")]
+    pub list_ttl_seconds: u64,
 }
 
 impl Default for CacheConfig {
@@ -123,8 +138,13 @@ impl Default for CacheConfig {
         Self {
             path: PathBuf::from("gateway-cache.sqlite"),
             browse_ttl_seconds: 24 * 60 * 60,
+            list_ttl_seconds: default_list_ttl_seconds(),
         }
     }
+}
+
+fn default_list_ttl_seconds() -> u64 {
+    60
 }
 
 /// OAuth 2.1 state DB (users, clients, codes, tokens). Deliberately a

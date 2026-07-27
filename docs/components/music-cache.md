@@ -73,9 +73,14 @@ Contrast with random or timestamp-based ETags, which would make
 
 ### TTL
 
-Each entry has a `ttl_seconds` configured per call site (typically
-`browse_ttl_seconds` from gateway config, default 24 h). `is_fresh`
-checks `now < created_at + ttl`.
+Each entry has a `ttl_seconds` configured per call site: `list_ttl_seconds`
+(default 60 s) for catalog-wide lists — `getAlbumList2`, `getArtists`,
+`search3` — and `browse_ttl_seconds` (default 24 h) for entity lookups
+like `getAlbum`. `is_fresh` checks `now < created_at + ttl`.
+
+Because the TTL is stored on the row rather than read from config at
+lookup time, changing a TTL does not retroactively re-age existing
+entries — clear the cache after lowering one.
 
 After TTL expiry, the entry is **stale, not gone**. The proxy handler
 sends `If-None-Match: <etag>` to upstream; if upstream returns 304,
@@ -97,8 +102,8 @@ cache.clear_covers().await?;              // drop only getCoverArt|… entries
 ```
 
 `clear_browse` is what `POST /v1/admin/cache/invalidate` calls (gateway
-side) to force a refetch of browse responses without waiting out
-`browse_ttl_seconds`; cover art is left alone because its keys are
+side) to force a refetch of browse responses without waiting out their
+TTL; cover art is left alone because its keys are
 already content-addressed by Navidrome's `coverArt` ids.
 
 The etag pair powers **cover-art placeholder self-healing**. Navidrome
