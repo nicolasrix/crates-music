@@ -108,6 +108,17 @@ New track discovered (Subsonic poll)
 
 Ingest runs in a background queue at low priority. Recommender works in **degraded mode** (tag-only similarity) for not-yet-embedded tracks. Worker is resumable; embeddings are content-addressed by `(track_id, model_version)` so retries are idempotent.
 
+The "new track discovered" step is `crates/music-gateway/src/discovery.rs`
+(`[discovery]` config). It is **stateless** — it re-offers catalog ids to
+`EmbeddingStore::enqueue_many` and lets `INSERT OR IGNORE` decide what's
+new, so there's no cursor to persist. Two tiers, because Navidrome's
+`newest` ordering keys on *album* creation: a recent scan
+(`getAlbumList2?type=newest` + `getAlbum`, every 5 min) catches new
+albums, and a full `search3` sweep (boot + daily) catches tracks added to
+pre-existing albums and self-seeds a fresh install. `POST
+/v1/admin/discovery/scan` forces a sweep. This is why
+`scripts/enqueue_all_tracks.py` is now a fallback, not the normal path.
+
 ## Auth (OAuth 2.1, self-hosted in gateway)
 
 OAuth does device pairing + token rotation **and** carries identity:
@@ -376,9 +387,12 @@ Cutover mechanics (e.g. future model bumps): (1) rebuild
 (`scripts/ship-image.sh … nas-host`, `REMOTE_DOCKER="sudo docker"`);
 (2) set `RECOMMEND_EMBEDDING_DIM` in the platform's env config;
 (3) wipe the old-dim ANN sidecar (`gateway-state.ann` + `.ann.keys`) —
-a dim change is non-migratable; (4) Save/restart; (5) re-embed via
-`scripts/enqueue_all_tracks.py` — recommender runs degraded until the
-GPU drains the queue. The cached ABTT whitening (`embedding_whitening`
+a dim change is non-migratable; (4) Save/restart; (5) re-embedding needs
+no manual step — the discovery watcher's boot sweep enqueues the whole
+catalog at the new `model_version` (force it early with
+`POST /v1/admin/discovery/scan`; `scripts/enqueue_all_tracks.py` is the
+out-of-band fallback) — recommender runs degraded until the GPU drains
+the queue. The cached ABTT whitening (`embedding_whitening`
 table) does **not** need a manual wipe — `load_or_fit_whitening` detects
 a stale-dim cached row at boot, logs a warning, and refits from the
 corpus automatically.
@@ -403,6 +417,16 @@ on top of the CLaMP 3 base after the P6 minimum-viable slice:
   future ranking model; readable at `GET /v1/diagnostics/recommendations`.
 - Migrations in `crates/music-recommend/migrations/` now run through
   **0016** (the P6-MVP notes above only cover 0011–0012).
+
+**Automatic catalog discovery — DONE (2026-08-02, on `dev`, not yet
+deployed).** Closes the last manual step in the ingest pipeline: newly-
+added Navidrome tracks are now enqueued for embedding on their own, so
+"new music is browsable" and "new music is recommendable" no longer drift
+apart. `crates/music-gateway/src/discovery.rs` + `[discovery]` config +
+`EmbeddingStore::enqueue_many` + `POST /v1/admin/discovery/scan`. Design
+notes in the "Ingest pipeline" section above; the load-bearing property
+is that it's stateless (re-offer + `INSERT OR IGNORE`), so a scan can
+fail, overlap, or double-run with no consequence.
 
 **Embedder failover + watchdog (PR #22, merged to `dev` 2026-06-09;
 deployed).** Text-prompt **stations** now survive the GPU

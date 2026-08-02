@@ -26,6 +26,63 @@ pub struct Config {
     /// proxied Navidrome `search3` when disabled or still building.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Automatic catalog discovery — enqueues newly-added Navidrome
+    /// tracks for embedding without a manual bulk-enqueue run.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// `[discovery]` — the background catalog watcher that feeds the
+/// embedding queue. See `crate::discovery` for the two-tier scan design.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveryConfig {
+    /// Master switch. When false, tracks only enter the ingest queue via
+    /// `POST /v1/recommend/enqueue` (the pre-discovery behaviour).
+    #[serde(default = "default_discovery_enabled")]
+    pub enabled: bool,
+    /// Cadence of the cheap "newest albums" scan. `0` runs the boot
+    /// sweep and then stops — a usable "scan once at startup" mode.
+    #[serde(default = "default_discovery_interval_seconds")]
+    pub interval_seconds: u64,
+    /// Cadence of the full catalog sweep, which also runs once at boot.
+    /// Needed because Navidrome's `newest` ordering is by *album*
+    /// creation, so a track added to a pre-existing album never appears
+    /// in the recent scan. `0` disables the periodic sweep (the boot one
+    /// still runs).
+    #[serde(default = "default_discovery_full_interval_seconds")]
+    pub full_interval_seconds: u64,
+    /// How many albums the recent scan expands per tick. Each costs one
+    /// `getAlbum` call, so this is the knob for "how much new music can
+    /// land between two ticks without waiting for the full sweep".
+    #[serde(default = "default_discovery_recent_albums")]
+    pub recent_albums: u32,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_discovery_enabled(),
+            interval_seconds: default_discovery_interval_seconds(),
+            full_interval_seconds: default_discovery_full_interval_seconds(),
+            recent_albums: default_discovery_recent_albums(),
+        }
+    }
+}
+
+fn default_discovery_enabled() -> bool {
+    true
+}
+
+fn default_discovery_interval_seconds() -> u64 {
+    300
+}
+
+fn default_discovery_full_interval_seconds() -> u64 {
+    24 * 60 * 60
+}
+
+fn default_discovery_recent_albums() -> u32 {
+    50
 }
 
 /// `[search]` — the fuzzy catalog index behind `GET /v1/search`.
