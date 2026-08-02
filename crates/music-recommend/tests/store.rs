@@ -55,6 +55,70 @@ async fn enqueue_is_idempotent() {
 }
 
 #[tokio::test]
+async fn enqueue_many_counts_only_genuinely_new_rows() {
+    let (store, _dir) = fresh_store().await;
+    let model = ModelVersion::from("clap-v1");
+    let ids = |v: &[&str]| -> Vec<TrackId> { v.iter().map(|s| TrackId::from(*s)).collect() };
+
+    let first = store.enqueue_many(&ids(&["t1", "t2"]), &model).await.unwrap();
+    assert_eq!(first, 2, "both tracks are new");
+
+    // Overlapping batch: only `t3` is new. This is the discovery
+    // watcher's steady state — it re-offers the whole catalog every
+    // sweep and expects the count to be the delta, not the batch size.
+    let second = store
+        .enqueue_many(&ids(&["t1", "t2", "t3"]), &model)
+        .await
+        .unwrap();
+    assert_eq!(second, 1, "already-queued tracks must not be recounted");
+
+    let counts = store.counts(&model).await.unwrap();
+    assert_eq!(counts.not_started, 3);
+}
+
+#[tokio::test]
+async fn enqueue_many_never_resurrects_a_finished_track() {
+    let (store, _dir) = fresh_store().await;
+    let model = ModelVersion::from("clap-v1");
+    let k = key("t1", "clap-v1");
+    store.enqueue(&k).await.unwrap();
+    store.claim_next(&model).await.unwrap();
+    store
+        .mark_done(&Embedding::new(k.clone(), vec![0.5, 0.5]))
+        .await
+        .unwrap();
+
+    // A later sweep still sees `t1` in the catalog. It must stay `done`
+    // — re-embedding every track on every scan would be a treadmill.
+    let inserted = store
+        .enqueue_many(&[TrackId::from("t1")], &model)
+        .await
+        .unwrap();
+    assert_eq!(inserted, 0);
+    assert_eq!(store.status(&k).await.unwrap(), Some(IngestStatus::Done));
+}
+
+#[tokio::test]
+async fn enqueue_many_on_empty_slice_is_a_noop() {
+    let (store, _dir) = fresh_store().await;
+    let model = ModelVersion::from("clap-v1");
+    assert_eq!(store.enqueue_many(&[], &model).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn enqueue_many_spans_transaction_chunks() {
+    // Larger than the internal 1000-row chunk, so the count has to be
+    // accumulated across transactions rather than read off one result.
+    let (store, _dir) = fresh_store().await;
+    let model = ModelVersion::from("clap-v1");
+    let ids: Vec<TrackId> = (0..2500).map(|i| TrackId::from(format!("t{i}"))).collect();
+
+    assert_eq!(store.enqueue_many(&ids, &model).await.unwrap(), 2500);
+    assert_eq!(store.enqueue_many(&ids, &model).await.unwrap(), 0);
+    assert_eq!(store.counts(&model).await.unwrap().not_started, 2500);
+}
+
+#[tokio::test]
 async fn claim_next_returns_none_on_empty_queue() {
     let (store, _dir) = fresh_store().await;
     let claimed = store

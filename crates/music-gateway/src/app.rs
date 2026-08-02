@@ -93,6 +93,7 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/cache/invalidate_covers",
             post(admin::invalidate_covers),
         )
+        .route("/v1/admin/discovery/scan", post(admin::discovery_scan))
         .route(
             "/v1/admin/users",
             get(crate::users::list_users).post(crate::users::create_user),

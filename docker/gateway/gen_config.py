@@ -63,6 +63,21 @@ Optional env (with defaults):
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
+
+    DISCOVERY_ENABLED                   (bool; gateway default true —
+                                         auto-enqueue newly-added Navidrome
+                                         tracks for embedding)
+    DISCOVERY_INTERVAL_SECONDS          (int >= 0; gateway default 300 —
+                                         "newest albums" scan cadence; 0 →
+                                         boot sweep only)
+    DISCOVERY_FULL_INTERVAL_SECONDS     (int >= 0; gateway default 86400 —
+                                         full-catalog sweep cadence; 0 →
+                                         boot sweep only)
+    DISCOVERY_RECENT_ALBUMS             (int > 0; gateway default 50 —
+                                         albums expanded per recent scan)
+
+The [discovery] section follows the same rule: emitted when any DISCOVERY_*
+key is set, each field omitted individually when unset.
 """
 
 from __future__ import annotations
@@ -235,6 +250,22 @@ def build_config(env: Mapping[str, str]) -> str:
         env, "RECOMMEND_EXPLORE_TEMPERATURE", non_negative=True
     )
 
+    # Optional [discovery] section — the background catalog watcher that
+    # keeps the embedding queue in step with Navidrome. On by default
+    # gateway-side, so an unset block is the intended production shape;
+    # these knobs exist to slow it down (or switch it off) on a deploy
+    # where the upstream walk is expensive.
+    discovery_enabled = _parse_bool(env, "DISCOVERY_ENABLED")
+    discovery_interval = _parse_int(
+        env, "DISCOVERY_INTERVAL_SECONDS", non_negative=True
+    )
+    discovery_full_interval = _parse_int(
+        env, "DISCOVERY_FULL_INTERVAL_SECONDS", non_negative=True
+    )
+    discovery_recent_albums = _parse_int(
+        env, "DISCOVERY_RECENT_ALBUMS", positive=True
+    )
+
     parts: list[str] = []
 
     parts.append("[server]")
@@ -332,6 +363,24 @@ def build_config(env: Mapping[str, str]) -> str:
         parts.extend(recommend_lines)
         parts.append("")
 
+    discovery_lines: list[str] = []
+    if discovery_enabled is not None:
+        discovery_lines.append(
+            f"enabled = {'true' if discovery_enabled else 'false'}"
+        )
+    if discovery_interval is not None:
+        discovery_lines.append(f"interval_seconds = {discovery_interval}")
+    if discovery_full_interval is not None:
+        discovery_lines.append(
+            f"full_interval_seconds = {discovery_full_interval}"
+        )
+    if discovery_recent_albums is not None:
+        discovery_lines.append(f"recent_albums = {discovery_recent_albums}")
+    if discovery_lines:
+        parts.append("[discovery]")
+        parts.extend(discovery_lines)
+        parts.append("")
+
     return "\n".join(parts) + "\n"
 
 
@@ -361,6 +410,32 @@ def _parse_bool(env: Mapping[str, str], key: str) -> bool | None:
     raise ConfigError(
         f"{key} must be a boolean (true/false), got {env.get(key)!r}"
     )
+
+
+def _parse_int(
+    env: Mapping[str, str],
+    key: str,
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> int | None:
+    """Parse an integer env var. Empty/unset → None (omit the field).
+    `positive` requires > 0; `non_negative` requires >= 0. Separate from
+    `_parse_float` because these render into TOML integer fields — a
+    float here ("300.0") would fail the gateway's own deserialization at
+    boot, long after this script has exited successfully."""
+    raw = env.get(key, "").strip()
+    if raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ConfigError(f"{key} must be an integer: {e}") from e
+    if positive and value <= 0:
+        raise ConfigError(f"{key} must be positive, got {value}")
+    if non_negative and value < 0:
+        raise ConfigError(f"{key} must be non-negative, got {value}")
+    return value
 
 
 def _parse_float(

@@ -843,6 +843,33 @@ No body. Response:
 Surfaced as a "Refresh metadata" button on the web `/diagnostics`
 page.
 
+#### `POST /v1/admin/discovery/scan`
+
+Run a **full catalog sweep now** instead of waiting for the background
+watcher's timer: pages Navidrome's whole song list and enqueues every
+track that has no embedding row for the current `model_version`.
+
+Use after a bulk import, or after re-pointing the gateway at a different
+Navidrome. This replaces `scripts/enqueue_all_tracks.py` for everyday
+use — the script remains useful only when you need to enqueue from
+outside the gateway.
+
+No body. Response:
+```json
+{"seen": 7349, "enqueued": 12}
+```
+
+`seen` is how many track ids the catalog returned; `enqueued` is how many
+of those were new. Re-running is harmless — enqueue is
+`INSERT OR IGNORE` on `(track_id, model_version)`, so already-embedded
+and already-queued tracks are untouched.
+
+Works regardless of `[discovery] enabled`, so a deployment that runs
+discovery manually still has a supported trigger. `502` if the upstream
+catalog can't be read (retryable). The sweep is synchronous — expect a
+few seconds on a ~10⁴-track library — but *embedding* the queued tracks
+happens in the background afterwards, at roughly 3.5 s/track.
+
 ### Diagnostics
 
 Authenticated read-mostly endpoints under `/v1/diagnostics/*` that
