@@ -767,10 +767,11 @@ button.cover-thumb:focus-visible .thumb-play {
   color: var(--fg);
 }
 
-/* Track row context menu — fixed-positioned popover, computed in JS.
-   The width is clamped to the viewport so the menu never renders wider
-   than a small phone screen (the JS clamps `left` but assumes 220px
-   fits). */
+/* Row context menu (track / album / artist) — fixed-positioned popover,
+   placed in JS by rowMenuCoords. The width cap is the other half of that
+   placement: on a viewport narrower than 220px + margins the JS floors
+   `left` at the left edge and lets the panel overflow right, and this cap
+   is what catches it. */
 .row-menu {
   position: fixed;
   width: min(220px, calc(100vw - 16px));
@@ -799,14 +800,27 @@ button.cover-thumb:focus-visible .thumb-play {
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-out-soft);
 }
-.row-menu-item:hover { background: var(--surface-2); }
+.row-menu-item:hover:not(:disabled) { background: var(--surface-2); }
 .row-menu-item.is-back { color: var(--fg-muted); }
-.row-menu-item .truncate {
+/* Entries go disabled while a menu action is in flight (fetching an
+   album's tracks, waiting on a rating PUT). Without a visual the menu
+   just looks unresponsive. */
+.row-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Icons must not absorb the label's flex shrink. */
+.row-menu-item > svg { flex-shrink: 0; }
+/* Labels ellipsise rather than wrap — playlist names are user-supplied
+   and the panel is a fixed 220px. `flex: 1` also right-aligns whatever
+   `trailing` content follows (the submenu chevron). */
+.row-menu-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+  text-align: left;
 }
 .row-menu-sep {
   height: 1px;
@@ -1635,6 +1649,11 @@ button.cover-thumb:focus-visible .thumb-play {
   background: var(--surface-3);
 }
 .search-hero-cover {
+  /* `display: block` because this class lands on an <a> as often as a
+     <button> (artist + album heroes navigate; the track hero plays), and
+     width/height are ignored on a non-replaced *inline* element — the
+     link variant would collapse to nothing without it. */
+  display: block;
   width: 72px;
   height: 72px;
   flex-shrink: 0;
@@ -1645,6 +1664,7 @@ button.cover-thumb:focus-visible .thumb-play {
   padding: 0;
   background: var(--surface-3);
   color: var(--fg);
+  text-decoration: none;
 }
 button.search-hero-cover {
   cursor: pointer;
@@ -1671,8 +1691,24 @@ button.search-hero-cover {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Grow so the trailing ⋯ cluster is pushed to the card's right edge
+     without a margin hack; `min-width: 0` keeps the title ellipsising
+     rather than forcing the card wider. */
+  flex: 1;
   min-width: 0;
 }
+/* Trailing ⋯ cluster. Top-aligned rather than centred so it reads as
+   chrome attached to the card, not as a third piece of metadata — and
+   so it doesn't drift as the meta column gains or loses its third
+   line (tracks have a duration, artists don't). */
+.search-hero-menu {
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+/* Match the table convention: the trigger is hover-revealed on fine
+   pointers. The global `@media (hover: none)` rule further down un-hides
+   it for touch, where :hover never fires. */
+.search-hero:hover .row-menu-trigger { opacity: 1; }
 .search-hero-title {
   font-size: var(--text-base);
   font-weight: var(--weight-medium);

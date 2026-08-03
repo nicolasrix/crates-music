@@ -105,14 +105,26 @@ export async function createPlaylist(name: string): Promise<PlaylistSummary> {
   return toSummary((await res.json()) as PlaylistWire);
 }
 
-// Append a single song to a playlist (the row-menu "add to playlist").
-export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<void> {
+// Append songs to a playlist, in the order given. One request regardless
+// of count — the endpoint has always taken a list, so adding a whole album
+// or artist costs the same round trip as adding one track. Duplicates are
+// the server's call; we don't pre-filter against current membership.
+export async function addTracksToPlaylist(
+  playlistId: string,
+  trackIds: readonly string[],
+): Promise<void> {
+  if (trackIds.length === 0) return;
   const res = await apiFetch(`/v1/playlists/${encodeURIComponent(playlistId)}/tracks`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ track_ids: [trackId], mode: "append" }),
+    body: JSON.stringify({ track_ids: trackIds, mode: "append" }),
   });
-  if (!res.ok) throw new Error(`addTrackToPlaylist HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`addTracksToPlaylist HTTP ${res.status}`);
+}
+
+// Append a single song to a playlist (the row-menu "add to playlist").
+export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<void> {
+  await addTracksToPlaylist(playlistId, [trackId]);
 }
 
 // Replace a playlist's whole membership (reorder / remove). Positions are
