@@ -481,8 +481,14 @@ fn default_whitening_enabled() -> bool {
     true
 }
 
+/// On by default since the bonus became scale-correct on the multi-seed
+/// path (before that it was mis-scaled there, which is why it shipped off).
+/// The signal it reads — `track_affinity` — is written unconditionally by
+/// the scrobble / skip / thumb paths, so an existing install has a warm
+/// counter the moment this flips. Set `preference_enabled = false` to
+/// restore pure acoustic-plus-explicit-likes ranking.
 fn default_preference_enabled() -> bool {
-    false
+    true
 }
 
 fn default_preference_weight() -> f32 {

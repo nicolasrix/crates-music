@@ -2293,6 +2293,14 @@ fn preference_config() -> Config {
     c
 }
 
+/// Preference explicitly *off*. Set rather than assumed: the gateway default
+/// is now on, so a test about the disabled path has to say so.
+fn no_preference_config() -> Config {
+    let mut c = test_config();
+    c.recommend.preference_enabled = false;
+    c
+}
+
 async fn post_feedback(app: axum::Router, track_id: &str, vote: &str) -> StatusCode {
     let body = json!({"track_id": track_id, "vote": vote, "session_id": "sess-1"}).to_string();
     let req = Request::builder()
@@ -2384,9 +2392,9 @@ async fn next_promotes_a_liked_track_when_preference_enabled() {
 
 #[tokio::test]
 async fn next_ignores_feedback_when_preference_disabled() {
-    // Default config has preference_enabled = false. Even a strong
-    // dislike must not perturb the pure-similarity ordering.
-    let state = build_state(test_config()).await;
+    // With preference off, even a strong dislike must not perturb the
+    // pure-similarity ordering.
+    let state = build_state(no_preference_config()).await;
     seed_and_graded_candidates(&state);
 
     let status = post_feedback(build_router(state.clone()), "t1", "down").await;
@@ -2446,4 +2454,88 @@ async fn from_seeds_demotes_disliked_track_in_hardcap_mode() {
         pos("t1") > pos("t2"),
         "disliked t1 ranked below t2 (ids = {ids:?})"
     );
+}
+
+#[tokio::test]
+async fn from_seeds_scales_preference_bonus_into_sigma_similarity_units() {
+    // Regression: bonuses are tuned on the *cosine* scale, but from-seeds
+    // scores `Σ wᵢ·simᵢ`. Adding a raw cosine bonus to a weighted sum
+    // under-applies it in proportion to the seed weights — the autoplay
+    // client sends anchors at weight 3.0, so preference was ~3× too weak
+    // there while being correctly scaled on /next.
+    //
+    // One seed at weight 4.0 isolates the unit conversion from the
+    // seed-count effect: candidate scores are exactly 4·sim.
+    //
+    //   t1 = 4 × 0.95 = 3.80   ← acoustic leader
+    //   t3 = 4 × 0.80 = 3.20   ← liked, must overtake
+    //
+    // The gap is 0.60. A liked t3's bonus is `preference_weight(0.5) ×
+    // tanh(1.0/2) ≈ 0.231` — unscaled that closes none of it, so this
+    // asserted ordering fails on the pre-fix code. Scaled by the seed
+    // weight it is ≈ 0.924, which clears the gap.
+    let state = build_state(preference_config()).await;
+    seed_and_graded_candidates(&state);
+
+    let status = post_feedback(build_router(state.clone()), "t3", "up").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = build_router(state.clone());
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "seed_weights": [4.0],
+            "per_seed_n": 20,
+            "top_n": 5,
+            "queue_context": {}
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<String> = body["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect();
+
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("t3"),
+        "liked t3 should lead once the bonus is in Σ-similarity units (ids = {ids:?})"
+    );
+}
+
+#[tokio::test]
+async fn from_seeds_leaves_ranking_alone_when_nothing_is_liked() {
+    // The scale factor multiplies an empty bonus map on a cold profile, so
+    // a weighted request must still return pure acoustic order. Guards
+    // against the factor leaking in as a score multiplier.
+    let state = build_state(preference_config()).await;
+    seed_and_graded_candidates(&state);
+
+    let app = build_router(state.clone());
+    let req = auth_post(
+        "/v1/recommend/from-seeds",
+        &json!({
+            "seeds": ["t0"],
+            "seed_weights": [4.0],
+            "per_seed_n": 20,
+            "top_n": 5,
+            "queue_context": {}
+        }),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let ids: Vec<String> = body["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["track_id"].as_str().unwrap().to_string())
+        .collect();
+
+    assert_eq!(ids, vec!["t1", "t2", "t3"], "acoustic order preserved");
 }

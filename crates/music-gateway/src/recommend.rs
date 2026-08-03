@@ -921,7 +921,9 @@ pub async fn from_seeds(
     let explore_temperature = state.explore_temperature();
     apply_exploration(&mut aggregated, &mut rng, explore_temperature);
 
-    let rescore = rescore_ctx(&state, room).await;
+    // Bonuses are cosine-scale; this path's score is Σ wᵢ·simᵢ. Convert.
+    let bonus_scale = seed_weight_total(&weights_for_results);
+    let rescore = rescore_ctx(&state, room).await.with_bonus_scale(bonus_scale);
     let (filtered, filter_stats) = match &req.queue_context {
         Some(qc) => {
             apply_queue_filter_to_aggregate(
@@ -955,6 +957,12 @@ pub async fn from_seeds(
         "exclude_count": req.exclude_track_ids.len(),
         "recency_excluded": recency_count,
         "explore_temperature": explore_temperature,
+        // Without the scale, a logged bonus can't be read against a logged
+        // score — they'd be in different units.
+        "preference": {
+            "enabled": state.preference_params().is_some(),
+            "bonus_scale": bonus_scale,
+        },
         "leash": {
             "tau": leash_params.tau,
             "lambda": leash_params.lambda,
@@ -1977,6 +1985,30 @@ struct Rescore<'a> {
     liked_artists: HashSet<String>,
     album_bonus: f32,
     artist_bonus: f32,
+    /// Multiplier converting a *cosine-scale* bonus into the units of the
+    /// score it is added to. See [`seed_weight_total`].
+    ///
+    /// Every bonus here (like, album, artist, decayed affinity) is tuned on
+    /// the cosine scale — they are meant to read as "this candidate is
+    /// `bonus` more similar than it measured". That is directly comparable
+    /// on the single-seed paths (`/next`, `from-any`), whose score *is* one
+    /// cosine, so they leave this at `1.0`.
+    ///
+    /// `from-seeds` scores `Σ wᵢ·simᵢ` instead, so a raw cosine bonus is in
+    /// the wrong units there — and, because the tethered-drift weights span
+    /// 3.0 (anchor) to ~0.05 (frontier tail), *inconsistently* so: the flat
+    /// bonus barely moves a candidate several heavily-weighted seeds agree
+    /// on, while overwhelming one surfaced only by a faint frontier seed.
+    /// Backwards, since the latter has the weaker acoustic evidence.
+    bonus_scale: f32,
+}
+
+impl Rescore<'_> {
+    /// Set the cosine→score-units conversion factor (see `bonus_scale`).
+    fn with_bonus_scale(mut self, scale: f32) -> Self {
+        self.bonus_scale = scale;
+        self
+    }
 }
 
 /// Build the per-request rescoring context. The like boost is always
@@ -1998,7 +2030,33 @@ async fn rescore_ctx(state: &AppState, user_id: i64) -> Rescore<'_> {
         liked_artists,
         album_bonus: state.like_bonus_album(),
         artist_bonus: state.like_bonus_artist(),
+        // Single-cosine default; the multi-seed path overrides it.
+        bonus_scale: 1.0,
     }
+}
+
+/// Total weight of the seeds that actually produced ANN results — the
+/// factor that converts a cosine-scale bonus into `from-seeds`' Σ-similarity
+/// units.
+///
+/// The identity: since `score = Σ wᵢ·simᵢ`, adding `b` to *every* seed's
+/// similarity adds `b·Σwᵢ` to the score. So scaling a bonus by this makes it
+/// mean exactly what it means on `/next` — "as if this candidate measured
+/// `b` more similar" — no matter how many seeds are in play or how they are
+/// weighted.
+///
+/// Summing over *all* queried seeds rather than only the ones that surfaced
+/// a given candidate is deliberate: it makes the factor request-constant, so
+/// preference lifts every candidate by the same absolute amount. Scaling per
+/// candidate would instead scale with centrality, amplifying exactly the
+/// candidates the aggregation is already most confident about.
+///
+/// Guarded to a floor of 1.0. An all-zero-weight request scores everything
+/// at 0.0, and a 0.0 factor there would silently drop the bonus channel on a
+/// pool where it is the only remaining signal.
+fn seed_weight_total(weights: &[f32]) -> f32 {
+    let total: f32 = weights.iter().filter(|w| w.is_finite()).sum();
+    total.max(1.0)
 }
 
 /// Liked entity ids of a kind as a membership set, degrading to empty on
@@ -2211,6 +2269,15 @@ async fn affinity_bonuses(
             Err(err) => {
                 tracing::warn!(error = %err, "affinity lookup failed; recommending without preference bonus");
             }
+        }
+    }
+
+    // Convert every channel from cosine units into the caller's score units
+    // in one place — they are all tuned on the same scale, so they all take
+    // the same factor. A no-op at the single-seed default of 1.0.
+    if rescore.bonus_scale != 1.0 {
+        for bonus in out.values_mut() {
+            *bonus *= rescore.bonus_scale;
         }
     }
 
@@ -2608,6 +2675,44 @@ mod tests {
     fn sims_as_json_handles_negative_values() {
         // Cosine sims are bounded in [-1, 1]; negatives are legal.
         assert_eq!(sims_as_json(&[-0.25_f32, 0.75_f32]), "[-0.250000,0.750000]");
+    }
+
+    #[test]
+    fn seed_weight_total_sums_the_supplied_weights() {
+        // The autoplay shape: anchor 3.0, user-picked 2.0, frontier tail.
+        assert!((seed_weight_total(&[3.0, 2.0, 0.15, 0.08]) - 5.23).abs() < 1e-5);
+    }
+
+    #[test]
+    fn seed_weight_total_counts_unweighted_seeds_as_one_each() {
+        // No `seed_weights` in the request → every seed defaults to 1.0, so
+        // the factor degrades to the seed count.
+        assert!((seed_weight_total(&[1.0, 1.0, 1.0]) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn seed_weight_total_is_one_for_a_single_unweighted_seed() {
+        // The single-cosine case: scaling must be a no-op, matching /next.
+        assert!((seed_weight_total(&[1.0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn seed_weight_total_floors_at_one() {
+        // An all-zero-weight request scores every candidate 0.0; a 0.0
+        // factor would zero the bonus too, dropping the only signal left.
+        assert!((seed_weight_total(&[0.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!((seed_weight_total(&[]) - 1.0).abs() < 1e-6);
+        // Sub-unit frontier-only weights floor rather than shrink the bonus.
+        assert!((seed_weight_total(&[0.15, 0.08]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn seed_weight_total_ignores_non_finite_weights() {
+        // Weights arrive over the wire; one NaN must not poison the factor
+        // into NaN and silently blank every bonus.
+        let total = seed_weight_total(&[3.0, f32::NAN, 2.0, f32::INFINITY]);
+        assert!(total.is_finite(), "factor stayed finite");
+        assert!((total - 5.0).abs() < 1e-6);
     }
 
     #[test]

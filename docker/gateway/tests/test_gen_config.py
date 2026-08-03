@@ -408,7 +408,7 @@ def test_discovery_rejects_bad_boolean() -> None:
 # --- [recommend] preference knobs -----------------------------------------
 #
 # Optional and independent of the dim. Each field is omitted when its env
-# var is unset (gateway applies its own default: preference_enabled=false,
+# var is unset (gateway applies its own default: preference_enabled=true,
 # weight=0.15, half_life=30 days). The section appears if ANY key is set.
 
 
