@@ -14,8 +14,13 @@ import { Cover } from "../components/Cover";
 import { EntityRating } from "../components/EntityRating";
 import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
+import { TrackTable } from "../components/TrackTable";
 import { useCoverPalette } from "../components/ArtworkPalette";
-import { artistTracksFrom } from "../sync/artistTracks";
+import {
+  artistSongsQuery,
+  artistTracksFrom,
+  mostPlayedForArtist,
+} from "../sync/artistTracks";
 import { usePlayback } from "../sync/usePlayback";
 import type { Artist as ArtistType } from "../api/types";
 
@@ -107,6 +112,8 @@ export function Artist({ id }: { id: string }) {
         </div>
       </div>
 
+      <MostPlayedSection artist={artist} />
+
       <div className="section">
         <div className="section-head">
           <h2>albums</h2>
@@ -134,6 +141,66 @@ export function Artist({ id }: { id: string }) {
         seedAlbumIds={albums.map((a) => a.id)}
       />
     </Layout>
+  );
+}
+
+// The artist's own chart, ranked by *our* play counts — not the
+// Last.fm-derived getTopSongs the hero's play button uses. Collapsed to
+// MOST_PLAYED_COLLAPSED rows so it introduces the artist without pushing
+// the discography below the fold; expandable to MOST_PLAYED_MAX, which
+// is where a per-artist chart stops being interesting and starts being
+// the discography again.
+//
+// Hidden entirely for a never-played artist rather than rendered empty —
+// same "no dead empty block" rule as similar artists below. That's the
+// common case on a fresh library, so it must degrade quietly.
+const MOST_PLAYED_COLLAPSED = 5;
+const MOST_PLAYED_MAX = 10;
+
+function MostPlayedSection({ artist }: { artist: ArtistType }) {
+  const { playList } = usePlayback();
+  const [expanded, setExpanded] = useState(false);
+
+  // A failed fetch leaves `data` undefined, which collapses to the
+  // never-played case below — the section hides rather than reporting
+  // on the state of Navidrome's search index.
+  const q = useQuery(artistSongsQuery(artist.name));
+
+  // Ranked once at MOST_PLAYED_MAX, then sliced for display: expanding
+  // must not re-sort, or a row could move under the user's cursor.
+  const ranked = useMemo(
+    () => mostPlayedForArtist(q.data ?? [], artist, MOST_PLAYED_MAX),
+    [q.data, artist],
+  );
+  const shown = expanded ? ranked : ranked.slice(0, MOST_PLAYED_COLLAPSED);
+
+  if (ranked.length === 0) return null;
+
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>most played</h2>
+        {ranked.length > MOST_PLAYED_COLLAPSED && (
+          <button
+            type="button"
+            className="section-more"
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? "show less" : `show all ${ranked.length}`}
+          </button>
+        )}
+      </div>
+      {/* showAlbum: these rows span the discography, so the album is
+          worth a column — and it's the same flag that makes the "#"
+          cell show list rank instead of the album track number, which
+          is what a chart wants. */}
+      <TrackTable
+        tracks={shown}
+        showAlbum
+        showPlayCount
+        onPlay={(i) => playList(shown, i)}
+      />
+    </div>
   );
 }
 

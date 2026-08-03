@@ -64,6 +64,16 @@ apps/web/
 Pages today (`apps/web/src/pages/`):
 
 - `Home`, `Albums`, `Album`, `Artists`, `Artist`, `Tracks` — catalog.
+  `Artist` carries a **"most played"** chart above the discography,
+  ranked by our own play counts and hidden entirely for an artist
+  that's never been played. It does *not* come from `getTopSongs`:
+  Navidrome backs that endpoint with Last.fm's top-tracks chart mapped
+  onto local files, and its rows mostly carry no `playCount` at all.
+  Real counts only ride `search3` song rows, so the section pulls the
+  artist's catalog via `searchArtistSongs` and ranks client-side in
+  `sync/mostPlayed.ts` — Subsonic has no "this artist's songs, by
+  plays" endpoint. The hero's play button still uses `getTopSongs`,
+  which is the right source for "start with the hits."
 - `Search`, `SearchBucket`, `searchRanking.ts`, `listMode.ts` —
   search with bucketed top-results re-ranking.
 - `Playlist` — playlist view + management.
@@ -481,12 +491,13 @@ The docker gateway image bakes the built SPA in.
 
 ## Tests
 
-279 Vitest tests across 31 files at last count — pure-logic helpers
+289 Vitest tests across 32 files at last count — pure-logic helpers
 (search ranking, latent-space binning, sync reducer, recommend
 filter shape, scrobble/skip producers, autoplay seeds + settings,
 auto-skip predicates, output-device preference, install prompt,
-settings nav, row-menu placement, bulk-download outcomes) plus the
-IndexedDB audio-cache suite (fake-indexeddb).
+settings nav, row-menu placement, bulk-download outcomes,
+most-played ranking) plus the IndexedDB audio-cache suite
+(fake-indexeddb).
 React-component tests and Playwright end-to-end suites are not yet
 in. The build still runs `tsc -b` which catches refactor breakage.
 
