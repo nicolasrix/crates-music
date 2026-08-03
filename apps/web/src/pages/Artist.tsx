@@ -5,13 +5,7 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play } from "lucide-react";
 import { useMemo, useState } from "react";
-import {
-  coverArtUrl,
-  getAlbum,
-  getArtist,
-  getTopSongs,
-  listArtists,
-} from "../api/client";
+import { coverArtUrl, getAlbum, getArtist, listArtists } from "../api/client";
 import { fetchSimilarArtists } from "../api/recommend";
 import { AlbumCard } from "../components/AlbumCard";
 import { ArtistHeroCard } from "../components/ArtistHeroCard";
@@ -21,13 +15,9 @@ import { EntityRating } from "../components/EntityRating";
 import { HeroBackdrop } from "../components/HeroBackdrop";
 import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
+import { artistTracksFrom } from "../sync/artistTracks";
 import { usePlayback } from "../sync/usePlayback";
 import type { Artist as ArtistType } from "../api/types";
-
-// Album-order fallback for "play artist" when getTopSongs has nothing
-// (no play history yet). Bounded so a 50-album discography doesn't fan
-// out 50 getAlbum calls from one click.
-const PLAY_FALLBACK_ALBUMS = 10;
 
 export function Artist({ id }: { id: string }) {
   const q = useQuery({
@@ -66,24 +56,10 @@ export function Artist({ id }: { id: string }) {
   async function playArtist() {
     setPlayPending(true);
     try {
-      // Top songs first (play-count-backed); empty for never-played
-      // artists, so fall back to the albums grid's listing order.
-      // getTopSongs failures degrade to the fallback too.
-      let tracks = await getTopSongs(artist.name).catch(() => []);
-      if (tracks.length === 0) {
-        const details = await Promise.all(
-          albums.slice(0, PLAY_FALLBACK_ALBUMS).map((a) =>
-            queryClient
-              .fetchQuery({
-                queryKey: ["album", a.id],
-                queryFn: () => getAlbum(a.id),
-                staleTime: 5 * 60_000,
-              })
-              .catch(() => null),
-          ),
-        );
-        tracks = details.flatMap((d) => d?.tracks ?? []);
-      }
+      // Top songs first, discography order as the fallback — the rule
+      // lives in sync/artistTracks so the artist ⋯ menus play the same
+      // thing this button does.
+      const tracks = await artistTracksFrom(queryClient, artist.name, albums);
       if (tracks.length > 0) playList(tracks, 0);
     } finally {
       setPlayPending(false);

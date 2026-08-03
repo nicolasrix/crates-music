@@ -9,7 +9,7 @@ use std::sync::Arc;
 use music_cache::Cache;
 use music_gateway::Config;
 use music_gateway::config::{
-    CacheConfig, OauthConfig, RecommendConfig, ServerConfig, UpstreamConfig,
+    CacheConfig, DiscoveryConfig, OauthConfig, RecommendConfig, ServerConfig, UpstreamConfig,
 };
 use music_gateway::diagnostics::TraceStore;
 use music_gateway::embedder::EmbedderHandle;
@@ -76,6 +76,13 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         },
         embedder: None,
         search: Default::default(),
+        // Discovery is a background timer against the upstream; tests
+        // that want a scan drive `CatalogWatcher` directly so nothing
+        // races with their wiremock expectations.
+        discovery: DiscoveryConfig {
+            enabled: false,
+            ..DiscoveryConfig::default()
+        },
     }
 }
 

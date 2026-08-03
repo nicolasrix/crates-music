@@ -23,8 +23,12 @@ body {
 
 /* App shell — sidebar + main + bottom-fixed player. The player row is
    `auto` (not a fixed track) so the bar can grow for the two-row mobile
-   layout and the iOS home-indicator safe-area; on desktop .player keeps
-   height: var(--player-h), so the resolved track height is identical. */
+   layout and the bottom safe-area inset (--safe-b); on desktop that inset
+   is 0, so the resolved track height is exactly var(--player-h).
+
+   Note the shell is the full 100dvh *including* whatever the system bars
+   paint over (viewport-fit=cover). Nothing here shrinks to avoid them —
+   the player pads itself instead, which is why --safe-b has to be right. */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
@@ -763,10 +767,11 @@ button.cover-thumb:focus-visible .thumb-play {
   color: var(--fg);
 }
 
-/* Track row context menu — fixed-positioned popover, computed in JS.
-   The width is clamped to the viewport so the menu never renders wider
-   than a small phone screen (the JS clamps `left` but assumes 220px
-   fits). */
+/* Row context menu (track / album / artist) — fixed-positioned popover,
+   placed in JS by rowMenuCoords. The width cap is the other half of that
+   placement: on a viewport narrower than 220px + margins the JS floors
+   `left` at the left edge and lets the panel overflow right, and this cap
+   is what catches it. */
 .row-menu {
   position: fixed;
   width: min(220px, calc(100vw - 16px));
@@ -795,14 +800,27 @@ button.cover-thumb:focus-visible .thumb-play {
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-out-soft);
 }
-.row-menu-item:hover { background: var(--surface-2); }
+.row-menu-item:hover:not(:disabled) { background: var(--surface-2); }
 .row-menu-item.is-back { color: var(--fg-muted); }
-.row-menu-item .truncate {
+/* Entries go disabled while a menu action is in flight (fetching an
+   album's tracks, waiting on a rating PUT). Without a visual the menu
+   just looks unresponsive. */
+.row-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Icons must not absorb the label's flex shrink. */
+.row-menu-item > svg { flex-shrink: 0; }
+/* Labels ellipsise rather than wrap — playlist names are user-supplied
+   and the panel is a fixed 220px. `flex: 1` also right-aligns whatever
+   `trailing` content follows (the submenu chevron). */
+.row-menu-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+  text-align: left;
 }
 .row-menu-sep {
   height: 1px;
@@ -822,7 +840,10 @@ button.cover-thumb:focus-visible .thumb-play {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(var(--player-h) + 12px);
+  /* Clears the bar's real height, which includes the bottom safe-area
+     inset — the ≤640px override below pins it higher again for the
+     two-row layout. */
+  bottom: calc(var(--player-h) + var(--safe-b) + 12px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1032,7 +1053,13 @@ button.cover-thumb:focus-visible .thumb-play {
   background: color-mix(in oklab, var(--surface-0) 88%, transparent);
   backdrop-filter: blur(20px);
   border-top: 1px solid var(--border-subtle);
-  height: var(--player-h);
+  /* Taller by the system-chrome inset, and padded by the same amount, so
+     the controls sit *above* the home indicator / gesture pill instead of
+     under it. The shell is a 100dvh grid whose player row is `auto`, so
+     the extra height comes out of main, not off the bottom of the screen.
+     Both terms collapse to the plain bar on desktop, where --safe-b is 0. */
+  height: calc(var(--player-h) + var(--safe-b));
+  padding-bottom: var(--safe-b);
 }
 /* The bar carries the *playing* track's tint (mounted by PlayerBar via
    artAttrs), independent of whichever page is open above it. */
@@ -1622,6 +1649,11 @@ button.cover-thumb:focus-visible .thumb-play {
   background: var(--surface-3);
 }
 .search-hero-cover {
+  /* `display: block` because this class lands on an <a> as often as a
+     <button> (artist + album heroes navigate; the track hero plays), and
+     width/height are ignored on a non-replaced *inline* element — the
+     link variant would collapse to nothing without it. */
+  display: block;
   width: 72px;
   height: 72px;
   flex-shrink: 0;
@@ -1632,6 +1664,7 @@ button.cover-thumb:focus-visible .thumb-play {
   padding: 0;
   background: var(--surface-3);
   color: var(--fg);
+  text-decoration: none;
 }
 button.search-hero-cover {
   cursor: pointer;
@@ -1658,8 +1691,24 @@ button.search-hero-cover {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Grow so the trailing ⋯ cluster is pushed to the card's right edge
+     without a margin hack; `min-width: 0` keeps the title ellipsising
+     rather than forcing the card wider. */
+  flex: 1;
   min-width: 0;
 }
+/* Trailing ⋯ cluster. Top-aligned rather than centred so it reads as
+   chrome attached to the card, not as a third piece of metadata — and
+   so it doesn't drift as the meta column gains or loses its third
+   line (tracks have a duration, artists don't). */
+.search-hero-menu {
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+/* Match the table convention: the trigger is hover-revealed on fine
+   pointers. The global `@media (hover: none)` rule further down un-hides
+   it for touch, where :hover never fires. */
+.search-hero:hover .row-menu-trigger { opacity: 1; }
 .search-hero-title {
   font-size: var(--text-base);
   font-weight: var(--weight-medium);
@@ -1889,7 +1938,7 @@ a.search-hero-title:hover {
       transform var(--dur-2) var(--ease-out-soft),
       visibility 0s var(--dur-2);
     border-right: 1px solid var(--border-subtle);
-    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(var(--space-5) + var(--safe-b));
   }
   .shell > .sidebar.is-open {
     transform: translateX(0);
@@ -1951,7 +2000,7 @@ a.search-hero-title:hover {
     height: auto;
     gap: var(--space-2);
     row-gap: 2px;
-    padding: 8px var(--space-3) calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 8px var(--space-3) calc(8px + var(--safe-b));
   }
   .np { grid-area: np; }
   .transport-col { display: contents; }
@@ -1962,7 +2011,7 @@ a.search-hero-title:hover {
   /* The two-row player is height:auto here, so --player-h understates
      it — pin the toast stack above the real-world worst case. */
   .toast-viewport {
-    bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(118px + var(--safe-b));
   }
   /* Squeeze-outs: the now-playing ⋯-menu (same actions are on every
      row), the rate-rec / rating pills (hidden at ≤900px already), the

@@ -255,6 +255,37 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Catalog discovery: keep the embedding queue in step with Navidrome
+    // so newly-added music becomes recommendable on its own, rather than
+    // waiting for a manual `scripts/enqueue_all_tracks.py` run. Runs even
+    // when the embedder is down — queued rows are durable and drain when
+    // the sidecar returns.
+    let _discovery_handle = {
+        let discovery_cfg = state.config().discovery.clone();
+        if discovery_cfg.enabled {
+            let watcher = music_gateway::discovery::CatalogWatcher::new(
+                &state.config().upstream,
+                state.embedding_store().clone(),
+                state.recommend_model_version().clone(),
+                discovery_cfg.recent_albums,
+            )
+            .context("building catalog discovery watcher")?;
+            tracing::info!(
+                interval_seconds = discovery_cfg.interval_seconds,
+                full_interval_seconds = discovery_cfg.full_interval_seconds,
+                recent_albums = discovery_cfg.recent_albums,
+                "discovery: catalog watch started"
+            );
+            music_gateway::discovery::spawn_catalog_watch(watcher, &discovery_cfg)
+        } else {
+            tracing::info!(
+                "discovery: disabled; tracks enter the queue only via \
+                 POST /v1/recommend/enqueue or /v1/admin/discovery/scan"
+            );
+            None
+        }
+    };
+
     let router = build_router(state);
 
     tracing::info!(%listen, "music-gateway listening");

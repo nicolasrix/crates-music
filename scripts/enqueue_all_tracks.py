@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Walk a Navidrome catalog and enqueue every track for embedding.
 
-The gateway has no Navidrome-side track discovery — every embedding goes
-through `POST /v1/recommend/enqueue` (see `crates/music-gateway/src/recommend.rs`).
-This script is the bulk-loader that closes that gap.
+**Mostly superseded.** The gateway now discovers new tracks by itself:
+`crates/music-gateway/src/discovery.rs` sweeps the catalog at boot and on
+a timer, and `POST /v1/admin/discovery/scan` runs a full sweep on demand.
+Reach for one of those first — they need no Navidrome credentials and no
+local Python.
+
+This script is still the tool for the cases the in-gateway watcher can't
+cover: enqueueing from *outside* the gateway (a different machine, a
+cron host), running against a Navidrome the gateway isn't pointed at, or
+counting a catalog without writing anything (`DRY_RUN=1`).
 
 Pipeline:
     1. Page Navidrome's `/rest/getAlbumList2?type=alphabeticalByName` until empty.

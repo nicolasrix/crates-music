@@ -18,7 +18,8 @@ Optional env (with defaults):
     GATEWAY_TLS_KEY             /data/certs/gateway.local-key.pem
     GATEWAY_STATE_DB            /data/state/gateway-state.sqlite
     GATEWAY_CACHE_DB            /data/state/gateway-cache.sqlite
-    GATEWAY_BROWSE_TTL_SECONDS  86400
+    GATEWAY_BROWSE_TTL_SECONDS  86400   (getAlbum / getArtist)
+    GATEWAY_LIST_TTL_SECONDS    60      (getAlbumList2 / getArtists / search3)
     OAUTH_WEB_REDIRECT_URIS     https://gateway.local:8443/oauth/callback
     EMBEDDER_URL                (unset → no [embedder] section)
     EMBEDDER_FALLBACK_URLS      (comma-separated failover endpoints, tried
@@ -62,6 +63,21 @@ Optional env (with defaults):
 
 The [recommend] section is emitted when any RECOMMEND_* key above is set;
 each field is omitted individually when its env var is unset.
+
+    DISCOVERY_ENABLED                   (bool; gateway default true —
+                                         auto-enqueue newly-added Navidrome
+                                         tracks for embedding)
+    DISCOVERY_INTERVAL_SECONDS          (int >= 0; gateway default 300 —
+                                         "newest albums" scan cadence; 0 →
+                                         boot sweep only)
+    DISCOVERY_FULL_INTERVAL_SECONDS     (int >= 0; gateway default 86400 —
+                                         full-catalog sweep cadence; 0 →
+                                         boot sweep only)
+    DISCOVERY_RECENT_ALBUMS             (int > 0; gateway default 50 —
+                                         albums expanded per recent scan)
+
+The [discovery] section follows the same rule: emitted when any DISCOVERY_*
+key is set, each field omitted individually when unset.
 """
 
 from __future__ import annotations
@@ -76,6 +92,7 @@ DEFAULT_TLS_KEY = "/data/certs/gateway.local-key.pem"
 DEFAULT_STATE_DB = "/data/state/gateway-state.sqlite"
 DEFAULT_CACHE_PATH = "/data/state/gateway-cache.sqlite"
 DEFAULT_BROWSE_TTL = 86400
+DEFAULT_LIST_TTL = 60
 DEFAULT_EMBEDDER_TIMEOUT = 30
 DEFAULT_REDIRECT_URI = "https://gateway.local:8443/oauth/callback"
 
@@ -119,6 +136,11 @@ def build_config(env: Mapping[str, str]) -> str:
         browse_ttl = int(env.get("GATEWAY_BROWSE_TTL_SECONDS", DEFAULT_BROWSE_TTL))
     except ValueError as e:
         raise ConfigError(f"GATEWAY_BROWSE_TTL_SECONDS must be an integer: {e}") from e
+
+    try:
+        list_ttl = int(env.get("GATEWAY_LIST_TTL_SECONDS", DEFAULT_LIST_TTL))
+    except ValueError as e:
+        raise ConfigError(f"GATEWAY_LIST_TTL_SECONDS must be an integer: {e}") from e
 
     redirect_raw = env.get("OAUTH_WEB_REDIRECT_URIS", DEFAULT_REDIRECT_URI)
     redirect_uris = [u.strip() for u in redirect_raw.split(",") if u.strip()]
@@ -228,6 +250,22 @@ def build_config(env: Mapping[str, str]) -> str:
         env, "RECOMMEND_EXPLORE_TEMPERATURE", non_negative=True
     )
 
+    # Optional [discovery] section — the background catalog watcher that
+    # keeps the embedding queue in step with Navidrome. On by default
+    # gateway-side, so an unset block is the intended production shape;
+    # these knobs exist to slow it down (or switch it off) on a deploy
+    # where the upstream walk is expensive.
+    discovery_enabled = _parse_bool(env, "DISCOVERY_ENABLED")
+    discovery_interval = _parse_int(
+        env, "DISCOVERY_INTERVAL_SECONDS", non_negative=True
+    )
+    discovery_full_interval = _parse_int(
+        env, "DISCOVERY_FULL_INTERVAL_SECONDS", non_negative=True
+    )
+    discovery_recent_albums = _parse_int(
+        env, "DISCOVERY_RECENT_ALBUMS", positive=True
+    )
+
     parts: list[str] = []
 
     parts.append("[server]")
@@ -249,6 +287,7 @@ def build_config(env: Mapping[str, str]) -> str:
     parts.append("[cache]")
     parts.append(f'path = {_str(cache_path)}')
     parts.append(f"browse_ttl_seconds = {browse_ttl}")
+    parts.append(f"list_ttl_seconds = {list_ttl}")
     parts.append("")
 
     parts.append("[oauth]")
@@ -324,6 +363,24 @@ def build_config(env: Mapping[str, str]) -> str:
         parts.extend(recommend_lines)
         parts.append("")
 
+    discovery_lines: list[str] = []
+    if discovery_enabled is not None:
+        discovery_lines.append(
+            f"enabled = {'true' if discovery_enabled else 'false'}"
+        )
+    if discovery_interval is not None:
+        discovery_lines.append(f"interval_seconds = {discovery_interval}")
+    if discovery_full_interval is not None:
+        discovery_lines.append(
+            f"full_interval_seconds = {discovery_full_interval}"
+        )
+    if discovery_recent_albums is not None:
+        discovery_lines.append(f"recent_albums = {discovery_recent_albums}")
+    if discovery_lines:
+        parts.append("[discovery]")
+        parts.extend(discovery_lines)
+        parts.append("")
+
     return "\n".join(parts) + "\n"
 
 
@@ -353,6 +410,32 @@ def _parse_bool(env: Mapping[str, str], key: str) -> bool | None:
     raise ConfigError(
         f"{key} must be a boolean (true/false), got {env.get(key)!r}"
     )
+
+
+def _parse_int(
+    env: Mapping[str, str],
+    key: str,
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> int | None:
+    """Parse an integer env var. Empty/unset → None (omit the field).
+    `positive` requires > 0; `non_negative` requires >= 0. Separate from
+    `_parse_float` because these render into TOML integer fields — a
+    float here ("300.0") would fail the gateway's own deserialization at
+    boot, long after this script has exited successfully."""
+    raw = env.get(key, "").strip()
+    if raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ConfigError(f"{key} must be an integer: {e}") from e
+    if positive and value <= 0:
+        raise ConfigError(f"{key} must be positive, got {value}")
+    if non_negative and value < 0:
+        raise ConfigError(f"{key} must be non-negative, got {value}")
+    return value
 
 
 def _parse_float(

@@ -81,8 +81,22 @@ On first run you'll see a warning like:
 WARN  gateway is unconfigured — visit https://gateway.local:8443/oauth/setup with token: <hex>
 ```
 
-Open that URL in your browser. Set a master password. The setup token
-is single-use; after this run, the warning won't appear again.
+`/oauth/setup` is **POST-only** — there is no browser page behind that
+URL, and the `listen` address it prints (`0.0.0.0:8443`) isn't dialable.
+Bootstrap with a form POST instead, substituting the token and your own
+password (minimum 12 characters):
+
+```bash
+curl -k -X POST https://localhost:8443/oauth/setup \
+  -d "token=<hex from the log>" \
+  -d "password=<at least 12 chars>"
+```
+
+200 (empty body) on success; 403 = bad token, 400 = password too short,
+410 = already bootstrapped. The setup token is single-use and is burned
+only on success, so a failed attempt doesn't lock you out. This seeds the
+owner as `id=1, username='owner', role='admin'` — log in with username
+`owner` (or leave the username field blank, which means the same thing).
 
 The gateway also creates four SQLite files next to the config:
 - `gateway-state.sqlite` — OAuth state (irreplaceable: holds your

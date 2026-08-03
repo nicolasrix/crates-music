@@ -43,11 +43,16 @@ $EDITOR .env   # NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD
 # 3. Build and bring up the stack.
 docker compose up --build
 
-# 4. The gateway logs a one-time setup token URL on first boot:
+# 4. The gateway logs a one-time setup token on first boot:
 #       "gateway is unconfigured — visit https://0.0.0.0:8443/oauth/setup with token: …"
-#    Open the URL in a browser (accept the self-signed cert warning),
-#    set a master password, then sign in to the web app at the same
-#    origin.
+#    Ignore the URL in that message: /oauth/setup is POST-only (no browser
+#    page), and `listen` renders as the unroutable 0.0.0.0. Bootstrap with
+#    a form POST — password must be >= 12 chars:
+curl -k -X POST https://localhost:8443/oauth/setup \
+     -d "token=<hex from the log>" -d "password=<at least 12 chars>"
+
+# 5. Sign in to the web app at the same origin. Username `owner` (or
+#    blank, which resolves to the owner), password as set above.
 ```
 
 On second and later boots the gateway reuses the bearer token, TLS

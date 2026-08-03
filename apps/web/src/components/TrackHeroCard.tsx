@@ -4,11 +4,16 @@
 // What's distinct here: the cover doubles as a play button (clicking
 // it replaces the queue and plays the track), and the meta column
 // has artist + album as inline links.
+//
+// The ⋯ menu is the same one the track *rows* carry, so the top-3 strip
+// isn't a second-class result surface — a hit landing at rank 1 is
+// exactly as actionable as one landing at rank 4.
 
 import { Play } from "lucide-react";
 import { Track } from "../api/types";
 import { Cover } from "./Cover";
 import { Link } from "../router";
+import { TrackRowMenu } from "./TrackRowMenu";
 import { fmtDuration } from "../utils/format";
 
 interface Props {
@@ -57,6 +62,9 @@ export function TrackHeroCard({ track, onPlay }: Props) {
         <div className="search-hero-time tabular">
           {fmtDuration(track.duration)}
         </div>
+      </div>
+      <div className="search-hero-menu">
+        <TrackRowMenu track={track} />
       </div>
     </div>
   );

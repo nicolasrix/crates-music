@@ -71,9 +71,12 @@ A dim change is **non-migratable** for the ANN sidecar. In order:
    `gateway-state.ann.keys`. Do **not** wipe the `embedding_whitening`
    table — a stale-dim cached row is detected at boot and refit
    automatically.
-4. Start; re-embed via `scripts/enqueue_all_tracks.py`. The recommender
-   runs degraded (tag-only) until the queue drains — watch
-   `GET /v1/diagnostics/queue_depth`.
+4. Start. The discovery watcher's boot sweep re-enqueues the whole
+   catalog at the *new* `model_version` on its own — no manual
+   bulk-enqueue run needed (`POST /v1/admin/discovery/scan` forces it
+   early; `scripts/enqueue_all_tracks.py` remains the out-of-band
+   fallback). The recommender runs degraded (tag-only) until the queue
+   drains — watch `GET /v1/diagnostics/queue_depth`.
 5. Keep the **upstream checkpoint filename** — the filename IS the
    embedding `model_version`; renaming split-brains the store.
 

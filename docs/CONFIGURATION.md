@@ -39,10 +39,23 @@ L2 metadata cache. SQLite-backed.
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `path` | path | no | `gateway-cache.sqlite` | SQLite file path. |
-| `browse_ttl_seconds` | u64 | no | `86400` (24 h) | TTL applied to cached browse-endpoint responses. |
+| `browse_ttl_seconds` | u64 | no | `86400` (24 h) | TTL for *entity* browse responses (`getAlbum`, `getArtist`) — these only change when a record's tags are edited. |
+| `list_ttl_seconds` | u64 | no | `60` | TTL for *list* browse responses (`getAlbumList2`, `getArtists`, `search3`). Keep this short: lists are views over the whole catalog, so adding an album changes the answer without touching anything already in the response. A long value here makes newly-added music invisible for up to that long — and because `size` is part of the cache key, two pages asking at different sizes can hold snapshots from different days and visibly disagree. |
 
 The cache is throwaway — deleting the file at any time is safe. ETags
 get re-derived on the next refresh.
+
+Note that `ttl_seconds` is stored **per row**, at the moment the row is
+written. Changing either TTL therefore only affects entries written
+afterwards; rows already in the file keep the value they were cached
+with. After lowering a TTL, clear the cache (`POST
+/v1/admin/cache/invalidate`, or just delete the file) or the old
+entries will outlive the new setting.
+
+When upstream is unreachable — a refused connection, or a `5xx` from
+whatever answers on Navidrome's behalf — a stale entry is served in
+preference to failing, carrying a `Warning: 110` header. Availability
+is deliberately not bounded by the TTL; only freshness is.
 
 ### `[oauth]`
 
@@ -132,6 +145,38 @@ served_cooldown_hours         = 2.0  # autoplay: cooldown on recently-served tra
 explore_temperature           = 0.15 # autoplay: sample the pick, don't always argmax
 ```
 
+### `[discovery]` (optional)
+
+Automatic catalog discovery — the background watcher that enqueues
+newly-added Navidrome tracks for embedding, so new music becomes
+recommendable without a manual `scripts/enqueue_all_tracks.py` run.
+On by default; the whole section can be omitted.
+
+Two scan tiers, because Navidrome's `newest` album ordering keys on
+*album* creation: a brand-new album shows up in the recent scan within
+one `interval_seconds`, but a track added to an album that already
+existed is only found by the full sweep.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | bool | no | `true` | Master switch. When `false`, tracks enter the ingest queue only via `POST /v1/recommend/enqueue` or `POST /v1/admin/discovery/scan`. |
+| `interval_seconds` | u64 | no | `300` | Cadence of the cheap "newest albums" scan (one `getAlbumList2` + one `getAlbum` per album). `0` runs the boot sweep and then stops — a usable "scan once at startup" mode. |
+| `full_interval_seconds` | u64 | no | `86400` | Cadence of the full catalog sweep (paged `search3`). Also runs once at boot, which self-seeds a fresh deployment. `0` disables the periodic sweep; the boot one still runs. |
+| `recent_albums` | u32 | no | `50` | How many albums the recent scan expands per tick — i.e. how much new music can land between two ticks without waiting for the full sweep. |
+
+```toml
+[discovery]
+enabled               = true
+interval_seconds      = 300     # newest-albums scan every 5 min
+full_interval_seconds = 86400   # whole-catalog sweep once a day
+recent_albums         = 50
+```
+
+Discovery runs whether or not the embedder is reachable — queue rows are
+durable, and the ingest worker drains them when the sidecar comes back.
+Enqueueing during an embedder outage is the point: nothing is lost, it
+just waits.
+
 ## CLI config (`~/.config/crates-music/config.toml`)
 
 The `music` CLI looks up its config via [`directories`](https://crates.io/crates/directories):
@@ -189,6 +234,10 @@ Cache directory follows the same XDG layout under
 | `RECOMMEND_LEASH_TAU` | — | `gen_config.py` → `[recommend] leash_tau`. Unset → gateway default `0.28`. |
 | `RECOMMEND_LEASH_LAMBDA` | — | `gen_config.py` → `[recommend] leash_lambda`. Unset → gateway default `16`. `0` disables the anchor leash. |
 | `RECOMMEND_LOG_PROVENANCE` | — | `gen_config.py` → `[recommend] log_provenance`. Unset → gateway default `true`. Set `false` to stop capturing recommendation provenance. |
+| `DISCOVERY_ENABLED` | — | `gen_config.py` → `[discovery] enabled`. Unset → gateway default `true` (auto-enqueue newly-added tracks for embedding). |
+| `DISCOVERY_INTERVAL_SECONDS` | — | `gen_config.py` → `[discovery] interval_seconds`. Unset → gateway default `300`. `0` → boot sweep only. |
+| `DISCOVERY_FULL_INTERVAL_SECONDS` | — | `gen_config.py` → `[discovery] full_interval_seconds`. Unset → gateway default `86400`. `0` → boot sweep only. |
+| `DISCOVERY_RECENT_ALBUMS` | — | `gen_config.py` → `[discovery] recent_albums`. Unset → gateway default `50`. Must be > 0. |
 
 ### Embedder
 

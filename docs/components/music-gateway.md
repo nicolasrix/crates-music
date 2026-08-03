@@ -29,6 +29,7 @@ crates/music-gateway/
 │   ├── events.rs                # POST /v1/events
 │   ├── embedder.rs              # EmbedderHandle + degraded-mode boot probe
 │   ├── ingest.rs                # background ingest worker glue
+│   ├── discovery.rs             # catalog watcher: auto-enqueue new tracks
 │   ├── diagnostics/             # trace ring, RUM, /v1/diagnostics/* handlers
 │   ├── oauth/                   # OAuth 2.1 server
 │   ├── sync/                    # sync transport (HTTP snapshot + WS fan-out)
@@ -249,6 +250,42 @@ See per-component docs:
   `sync/ws.rs`.
 - Events handler in `events.rs` is small: validate input, batch, call
   `EventStore::append_batch`.
+
+## Catalog discovery (`discovery.rs`)
+
+Keeps the embedding queue in step with Navidrome, so newly-added music
+becomes recommendable on its own. Before this existed, the only door into
+the ingest queue was `POST /v1/recommend/enqueue` — in practice a manual
+`scripts/enqueue_all_tracks.py` run — so new tracks browsed and played
+fine but were invisible to `/v1/recommend/*` until someone remembered.
+
+Stateless by construction: it enumerates the catalog and re-offers every
+id to `EmbeddingStore::enqueue_many`, whose `INSERT OR IGNORE` on
+`(track_id, model_version)` decides what's actually new. There is no
+"last seen" cursor to persist, skew, or corrupt.
+
+Two tiers, mirroring the browse cache's list-vs-entity TTL split:
+
+| Tier | Default cadence | Upstream calls | Catches |
+|---|---|---|---|
+| Recent | every 5 min | `getAlbumList2?type=newest` + one `getAlbum` per album | a freshly-imported album |
+| Full | boot, then every 24 h | paged empty-query `search3` | tracks added to a **pre-existing** album, and a fresh install's whole catalog |
+
+The full tier isn't redundant: Navidrome's `newest` ordering keys on
+*album* creation, so a track dropped into an album that already existed
+never appears in the recent scan.
+
+Runs whether or not the embedder is up — queue rows are durable and the
+ingest worker drains them when the sidecar returns. Scan errors are
+logged, never propagated: a transient upstream hiccup must not kill the
+loop, and the queue is unchanged in the meantime.
+
+Like `search/catalog.rs`, it uses `music_subsonic::Client` directly
+rather than our own `/rest` proxy, so it neither reads nor pollutes the
+L2 browse cache.
+
+`POST /v1/admin/discovery/scan` runs the full sweep on demand (admin
+only, works even when `[discovery] enabled = false`).
 
 ## Gateway-owned playlists (`playlists/`)
 

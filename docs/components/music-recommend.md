@@ -309,6 +309,11 @@ let store = EmbeddingStore::open_in_memory().await?;        // tests
 let key = EmbeddingKey::new(TrackId::from("t1"), ModelVersion::from("clap-v1"));
 store.enqueue(&key).await?;                                  // INSERT OR IGNORE
 
+// Bulk form: one transaction, returns how many rows were *actually*
+// inserted. That delta is what the gateway's catalog watcher logs, and
+// it's why re-offering the whole catalog every sweep is cheap and safe.
+let new_count = store.enqueue_many(&track_ids, &model_version).await?;
+
 let claimed = store.claim_next(&model_version).await?;       // returns Option<EmbeddingKey>
 store.mark_done(&embedding).await?;
 store.mark_failed(&key, "fetch failed").await?;

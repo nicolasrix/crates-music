@@ -30,6 +30,12 @@ Local-network-first. Everything runs on your own hardware; nothing phones home.
 The gateway holds anything worth sharing between clients — metadata cache,
 recommender, cross-device sync. The clients stay thin.
 
+> **Just want to run it?** The [**tutorials**](./docs/tutorials/README.md)
+> are a step-by-step path from nothing to music on your phone, using
+> containers and assuming no prior experience with Rust, Docker, or TLS.
+> Start at [01 — Get your music library online](./docs/tutorials/01-navidrome.md).
+> The rest of this README is written for developers.
+
 ## What it does
 
 **Playback** — gapless native playback in the CLI (rodio + symphonia); an
@@ -81,7 +87,11 @@ Two boundaries that matter more than the tree: `music-recommend` is
 **server-only** and must never be linked into a client, and clients consume
 `music-core` types while talking to the gateway over HTTP/WS.
 
-## Getting started
+## Getting started (developers)
+
+Not a developer? Use the [tutorials](./docs/tutorials/README.md) instead —
+they cover the same ground with containers and no toolchain setup.
+
 
 Requires Rust 1.95 (pinned in `rust-toolchain.toml`), a current Node LTS for the
 web app (Vite 8), and a reachable Navidrome instance. The recommender
@@ -101,6 +111,8 @@ the Vite dev server — is in
 
 | Doc | What you'll learn |
 |---|---|
+| [tutorials/](./docs/tutorials/README.md) | Non-technical step-by-step setup guides |
+| [explainers/](./docs/explainers/) | Plain-language background — how it works, certificates, glossary |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Gateway, clients, cache layers, auth, recommender |
 | [GETTING-STARTED.md](./docs/GETTING-STARTED.md) | Bring the stack up locally |
 | [CONFIGURATION.md](./docs/CONFIGURATION.md) | Every config block and environment variable |

@@ -35,7 +35,10 @@ owner (id=1, admin). The protected surface is split into two tiers:
   control, ratings/events, `whoami`.
 - **Admin-only** (`require_admin`, 403 otherwise) — `/v1/admin/*`,
   `/v1/diagnostics/*`, and recommender maintenance (`refit_whitening`,
-  `enqueue`).
+  `enqueue`). One exception:
+  [`POST /v1/diagnostics/client_events`](#post-v1diagnosticsclient_events)
+  is any-authenticated, because a client uploading its own RUM is not an
+  administrative action — see the note there.
 
 Real accounts (admin/user) are provisioned by an admin (see
 [`/v1/admin/users`](#post-v1adminusers)); guests come later (PR D).
@@ -843,6 +846,33 @@ No body. Response:
 Surfaced as a "Refresh metadata" button on the web `/diagnostics`
 page.
 
+#### `POST /v1/admin/discovery/scan`
+
+Run a **full catalog sweep now** instead of waiting for the background
+watcher's timer: pages Navidrome's whole song list and enqueues every
+track that has no embedding row for the current `model_version`.
+
+Use after a bulk import, or after re-pointing the gateway at a different
+Navidrome. This replaces `scripts/enqueue_all_tracks.py` for everyday
+use — the script remains useful only when you need to enqueue from
+outside the gateway.
+
+No body. Response:
+```json
+{"seen": 7349, "enqueued": 12}
+```
+
+`seen` is how many track ids the catalog returned; `enqueued` is how many
+of those were new. Re-running is harmless — enqueue is
+`INSERT OR IGNORE` on `(track_id, model_version)`, so already-embedded
+and already-queued tracks are untouched.
+
+Works regardless of `[discovery] enabled`, so a deployment that runs
+discovery manually still has a supported trigger. `502` if the upstream
+catalog can't be read (retryable). The sweep is synchronous — expect a
+few seconds on a ~10⁴-track library — but *embedding* the queued tracks
+happens in the background afterwards, at roughly 3.5 s/track.
+
 ### Diagnostics
 
 Authenticated read-mostly endpoints under `/v1/diagnostics/*` that
@@ -945,6 +975,14 @@ the `/rest/scrobble` interceptor.
 
 Browser RUM batch upload (web vitals + custom marks).
 
+**Any authenticated principal** — the one endpoint under
+`/v1/diagnostics/*` that is not admin-only. A client reporting its own
+timings is not an administrative action, and gating it meant every
+non-admin device silently 403'd its telemetry — exactly the devices whose
+latency is worth measuring. The sibling `GET` on this path stays
+admin-only (it exposes every session's page paths and user agents) and
+enforces that inside the handler rather than at the route layer.
+
 Body:
 ```json
 {
@@ -972,6 +1010,10 @@ Response: `{"accepted": N}`.
 
 Most recent RUM events, newest received first. Two timestamps preserved:
 client-supplied `occurred_ms` and gateway-stamped `received_ms`.
+
+**Admin-only**, self-enforced in the handler (403 otherwise) because the
+path is registered in the any-authenticated router for the sake of its
+`POST` sibling.
 
 | Query param | Default | Description |
 |---|---|---|
@@ -1126,8 +1168,10 @@ Endpoints currently augmented with caching:
 
 | Endpoint | Cache |
 |---|---|
-| `/rest/getAlbumList2` | L2 (`browse_ttl_seconds`). Bypassed when `type=random`. |
-| `/rest/getAlbum` | L2 (`browse_ttl_seconds`) |
+| `/rest/getAlbumList2` | L2 (`list_ttl_seconds`, default 60 s). Bypassed when `type=random`. |
+| `/rest/getAlbum` | L2 (`browse_ttl_seconds`, default 24 h) |
+| `/rest/getArtists`, `/rest/search3` | L2 (`list_ttl_seconds`) |
+| `/rest/getArtist` | L2 (`browse_ttl_seconds`) |
 | `/rest/getCoverArt` | L2 (separate budget; see above) |
 | `/rest/scrobble` | intercepted (see above) |
 | `/rest/ping` | not cached |

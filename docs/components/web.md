@@ -220,6 +220,32 @@ scrobbles are batched into `/v1/events` every 5s. Media Session
 action handlers (play/pause/next/prev/seek) + `setPositionState`
 drive lock-screen / notification controls on phones.
 
+### Two notions of "the current track"
+
+`PlayerContext` tracks these separately, and the distinction is
+load-bearing:
+
+- **`currentTrackId`** — `queue.items[now_playing_index]`, i.e. what
+  *sync state* says the room is on. Drives queue mechanics: dislike
+  auto-skip, next/prev bounds, the auto-advance index.
+- **`loadedTrackId`** (`claimTrack`) — what this device's `<audio>`
+  element is actually pointed at. Drives everything that describes
+  what you can *hear*: player bar, Media Session metadata, scrobbles,
+  the skip signal, the `playback.start` mark.
+
+They agree whenever sync is healthy. They diverge whenever it isn't,
+because step 1 above is synchronous while the matching sync op takes a
+WS round-trip — so a click during an outage plays the right audio
+against a stale cursor. Reading the cursor for playback identity is how
+a play of one track ended up on another track's play count (and in the
+recommender's recency clock) on 2026-08-03. `claimTrack` is called at
+every `src` assignment and also resets the per-track scrobble flags, so
+those two can't drift apart either.
+
+A silent remote (`outputEnabled` false) never loads audio, so
+`loadedTrackId` stays null and both notions fall back to the cursor —
+which is correct: it should display and report the room's track.
+
 ### Per-device audio output (`player/outputDevice.ts`)
 
 Two devices signed into the same account share one room and both obey
@@ -265,6 +291,49 @@ Enforcement is *also* server-side and always-on (dislikes are excluded from
 recommendations, likes boost them) — the client maps only drive the UI and
 the optimistic auto-skip.
 
+## Row menus (`components/RowMenu.tsx`)
+
+The "⋯" popover carried by every result surface — track rows, album rows,
+artist rows, and all three search hero cards. One shell, three action
+lists.
+
+- **`RowMenu`** owns the trigger, placement, portalling, and dismissal.
+  Callers pass entries through a render prop that receives `close`.
+- **`rowMenuCoords.ts`** is the placement rule, split out so it can be
+  unit-tested as arithmetic. It right-aligns the panel to the trigger,
+  flips it *above* when it wouldn't fit below, and clamps into the
+  viewport. The flip anchors by `bottom` rather than `top` specifically
+  so the panel's real height never has to be predicted — it varies from
+  3 entries (player) to ~9 (album menu), and one `MENU_H_GUESS` can't
+  serve both.
+- **`RowMenuItem` / `RowMenuSep` / `RowMenuExtras`** are the entry
+  primitives. `RowMenuExtras` renders caller-supplied entries plus their
+  trailing separator, or nothing — the Queue page uses it for reorder
+  actions, which are the only touch-reachable path on phones.
+- **`PlaylistPicker.tsx`** holds the "add to playlist…" submenu *and*
+  `usePlaylistAdd`, the mutation shared by all three menus. The submenu
+  replaces the root body in place rather than opening a second floating
+  panel — nested fixed-position elements fight both outside-click
+  detection and the viewport clamping above.
+
+Two things that look incidental but aren't:
+
+- **The panel body mounts only while open.** That's what makes the
+  playlist submenu reset to the root view on every open without the
+  shell knowing such state exists.
+- **The menus resolve their tracklist at click time, not at render.**
+  An album row only holds an `Album`; every action needs songs. Each one
+  fetches through the shared `["album", id]` query key, which is the
+  album page's own — so a warm cache resolves in a microtask and the
+  click's transient user activation survives into `audio.play()`.
+  Resolving eagerly instead would fire a `getAlbum` per visible row.
+
+Artist menus are deliberately shorter than album menus: an artist has no
+canonical tracklist (`sync/artistTracks.ts` synthesises one from top
+songs, falling back to a bounded slice of the discography), which is
+right for "play" and "queue" but a surprising thing to silently pin to
+disk or paste into a playlist. Those stay album-level.
+
 ## RUM (`rum/`)
 
 Browser-side performance telemetry. Two emitters feed
@@ -300,6 +369,15 @@ After a PWA relaunch-from-snapshot, queue items arrive as bare ids; a
 `getSong` backfill effect re-hydrates `trackMeta` so the player bar,
 Media Session, and row menus aren't blank.
 
+**Reconnect.** `onclose` schedules a retry on the backoff in
+`sync/reconnect.ts` (500 ms doubling to a 30 s cap, with equal jitter so
+devices that dropped together don't return together), and `online` /
+`visibilitychange→visible` reconnect immediately rather than waiting the
+backoff out. This is not optional polish: a phone changes network
+constantly, and without it a single WiFi→cellular handover wedged the tab
+on a stale snapshot permanently. Ops submitted while the socket is down
+buffer in `outboxRef` and flush on the next `onopen`.
+
 ## Offline cache + PWA (`cache/`, `pwa/`)
 
 `cache/audioCache.ts` is an IndexedDB reimplementation of the
@@ -312,11 +390,39 @@ Service-Worker + Cache-API approach because the gateway stream
 endpoint has no HTTP Range support, so the browser must seek locally
 against a stored file.
 
-Played tracks are auto-cached (regular budget); "save for offline"
-pins (pinned budget) — mirroring CLI semantics. `downloadQuality`
-(original | opus128 | mp3128, in `cacheSettings.ts`) transcodes-to-fit
-via the `/rest/*` proxy's `format`/`maxBitRate` params. Budget sliders
-live in the Storage settings panel; lowering a cap evicts immediately.
+Tracks around the cursor are auto-cached (regular budget); "save for
+offline" pins (pinned budget) — mirroring CLI semantics.
+`downloadQuality` (original | opus128 | mp3128, in `cacheSettings.ts`)
+transcodes-to-fit via the `/rest/*` proxy's `format`/`maxBitRate`
+params. Budget sliders live in the Storage settings panel; lowering a
+cap evicts immediately.
+
+### The download pass, and why it isn't cache-on-play
+
+Auto-caching runs as a debounced pass over the queue window
+(`DOWNLOAD_AHEAD` items ahead, `PREFETCH_BEHIND` behind), not on the
+track you just started. The selection rule is
+`cache/prefetchWindow.ts:downloadTargets`.
+
+It used to fetch on play, which meant an uncached track was pulled
+**twice at once** — the `<audio>` element streaming it, and the cache
+downloading it — racing each other for the same link. On mobile data
+that showed up as two 2,026,005-byte requests for one 2 MB song, one
+carrying `access_token` (the element) and one not (the cache).
+
+So the pass deliberately **skips the track at the cursor while it is not
+blob-backed**: that means the element is streaming it right now, and
+downloading it is precisely the duplicate. It becomes eligible on the
+next advance, when it falls into the behind-window and its stream has
+finished. Fetching one track *ahead* costs the same bytes as fetching
+the current one late, except those bytes replace the next streaming
+fetch instead of duplicating this one — so steady-state playback through
+a queue is one fetch per track instead of two.
+
+`DOWNLOAD_SETTLE_MS` debounces the pass so skipping through six tracks
+downloads only where you land, and `cacheTrack` is inflight-deduped so
+the pass, a bulk "cache liked" sweep and a manual download can't each
+pull the same file.
 
 The service worker (vite-plugin-pwa, `autoUpdate`) precaches the app
 shell only — API routes are NetworkOnly and audio bypasses the SW
@@ -325,12 +431,45 @@ module load (Chromium fires it once, early) and surfaces an "Install
 as app" button in Settings; iOS gets a Share → Add to Home Screen
 hint instead.
 
+### System bars and `--safe-b`
+
+`index.html` sets `viewport-fit=cover`, so the app paints **behind** the
+system chrome — the iPhone notch and home indicator, Android's
+gesture-nav pill. Nothing in the layout shrinks to avoid them: `.shell`
+is a full `100dvh` grid and the player bar pads *itself* back out. That
+makes the inset value load-bearing.
+
+Every bottom-anchored rule reads `--safe-b` (`tokens.css`), never raw
+`env(safe-area-inset-bottom)` — the player bar's height and padding, the
+toast stack's offset, the mobile sidebar drawer. Change the token, not
+the call sites.
+
+The token exists because **Chrome on Android reports
+`env(safe-area-inset-bottom): 0` for the gesture bar in an installed
+PWA** while still honouring `viewport-fit=cover`: we opt into
+edge-to-edge and then compensate by zero, so the pill lands on top of the
+player bar (reported on a Pixel, 2026-08-03 — the whole bar was
+unreachable). No API reports the real height when `env()` lies, so
+`--safe-b` applies a **floor** of 32px instead, scoped to
+`(display-mode: standalone) and (pointer: coarse)`:
+
+- iOS reports a true 34px, which is larger, so `max()` leaves it alone.
+- A desktop browser or an ordinary mobile tab — where Chrome insets the
+  viewport itself and 0 *is* correct — never matches the query.
+- 32px covers Android gesture nav (24–32dp). A device on three-button
+  navigation (48dp) would still clip; bump the floor if that turns up.
+
+The top inset is deliberately not compensated — Chrome lays the PWA out
+below the status bar in practice, and padding it too would double the
+gap. If content ever appears under the status bar, that's the same bug
+at the other end and wants a matching `--safe-t`.
+
 ## Build
 
 ```bash
 npm run build
 # Outputs to apps/web/dist/
-# Main bundle: ~144 KB JS gzipped; the 3-D latent-space view is
+# Main bundle: ~151 KB JS gzipped; the 3-D latent-space view is
 # code-split into a lazy ~246 KB chunk (three.js) loaded on demand.
 ```
 
@@ -342,11 +481,12 @@ The docker gateway image bakes the built SPA in.
 
 ## Tests
 
-207 Vitest tests across 19 files at last count — pure-logic helpers
+279 Vitest tests across 31 files at last count — pure-logic helpers
 (search ranking, latent-space binning, sync reducer, recommend
 filter shape, scrobble/skip producers, autoplay seeds + settings,
 auto-skip predicates, output-device preference, install prompt,
-settings nav) plus the IndexedDB audio-cache suite (fake-indexeddb).
+settings nav, row-menu placement, bulk-download outcomes) plus the
+IndexedDB audio-cache suite (fake-indexeddb).
 React-component tests and Playwright end-to-end suites are not yet
 in. The build still runs `tsc -b` which catches refactor breakage.
 

@@ -22,13 +22,14 @@ fn upstream(url: &str) -> UpstreamConfig {
 
 /// Subsonic getSong response wrapper for a track of the given duration.
 fn get_song_body(track_id: &str, duration: Option<u32>) -> serde_json::Value {
-    get_song_body_with_suffix(track_id, duration, None)
+    get_song_body_with_suffix(track_id, duration, None, None)
 }
 
 fn get_song_body_with_suffix(
     track_id: &str,
     duration: Option<u32>,
     suffix: Option<&str>,
+    bit_rate: Option<u32>,
 ) -> serde_json::Value {
     let mut song = serde_json::json!({
         "id": track_id,
@@ -39,6 +40,9 @@ fn get_song_body_with_suffix(
     }
     if let Some(s) = suffix {
         song["suffix"] = serde_json::json!(s);
+    }
+    if let Some(b) = bit_rate {
+        song["bitRate"] = serde_json::json!(b);
     }
     serde_json::json!({
         "subsonic-response": {
@@ -140,8 +144,8 @@ async fn mp3_source_also_transcodes() {
     // MP3 sources transcode too. The old raw-MP3 fast path (no
     // ?format=mp3) mis-decoded VBR-header MP3s when the byte Range
     // truncated them: the file's Xing header claims the full track
-    // length, so a truncated clip decodes to ~0.1 s — below MERT's 6 s
-    // floor. Forcing a transcode yields a fresh header-less stream that
+    // length, so a truncated clip decodes to ~0.1 s — below the
+    // embedder's 1 s floor. Forcing a transcode yields a fresh stream that
     // survives the Range cap. Navidrome honours the Range for MP3→MP3,
     // so the clip stays bounded.
     let server = MockServer::start().await;
@@ -154,6 +158,7 @@ async fn mp3_source_also_transcodes() {
                 "t-mp3",
                 Some(1042),
                 Some("mp3"),
+                None,
             )),
         )
         .mount(&server)
@@ -189,6 +194,7 @@ async fn flac_source_keeps_transcode_params() {
                 "t-flac",
                 Some(1042),
                 Some("flac"),
+                None,
             )),
         )
         .mount(&server)
@@ -230,4 +236,119 @@ async fn get_song_failure_falls_back_to_offset_zero() {
 
     let fetcher = SubsonicAudioFetcher::new(&upstream(&server.uri())).unwrap();
     fetcher.fetch_clip(&TrackId::from("t-fail")).await.unwrap();
+}
+
+/// Build an ID3v2.4 tag declaring `payload` bytes, then `audio` bytes
+/// of stand-in frame data — the shape Navidrome returns when it decides
+/// the request doesn't constrain the source and streams the original
+/// file's bytes instead of transcoding.
+fn id3_body(payload: usize, audio: usize) -> Vec<u8> {
+    let mut v = vec![b'I', b'D', b'3', 4, 0, 0];
+    v.extend_from_slice(&[
+        ((payload >> 21) & 0x7f) as u8,
+        ((payload >> 14) & 0x7f) as u8,
+        ((payload >> 7) & 0x7f) as u8,
+        (payload & 0x7f) as u8,
+    ]);
+    v.resize(10 + payload, 0);
+    v.resize(10 + payload + audio, 0xff);
+    v
+}
+
+#[tokio::test]
+async fn id3_dominated_passthrough_refetches_below_the_source_bitrate() {
+    // Reproduces the blink-182 / Deftones / Alchemist failure: the
+    // source is MP3 at <= the bitrate we ask for, so Navidrome ignores
+    // the transcode request and serves the raw file, whose cover-art
+    // tag is larger than our fetch window. The clip that comes back is
+    // pure metadata and ffmpeg can't find two consecutive frames.
+    //
+    // The fix asks again one kbps under the source, which leaves
+    // Navidrome no choice but to re-encode.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/getSong"))
+        .and(query_param("id", "t-art"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(get_song_body_with_suffix(
+                "t-art",
+                Some(148),
+                Some("mp3"),
+                Some(192),
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    // First attempt at the standard 192: all tag, no audio.
+    Mock::given(method("GET"))
+        .and(path("/rest/stream"))
+        .and(query_param("maxBitRate", "192"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(id3_body(400_000, 0)))
+        .mount(&server)
+        .await;
+
+    // Retry at 191 forces a real transcode — no tag, just frames.
+    Mock::given(method("GET"))
+        .and(path("/rest/stream"))
+        .and(query_param("maxBitRate", "191"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(vec![0xff; 4096]))
+        .mount(&server)
+        .await;
+
+    let fetcher = SubsonicAudioFetcher::new(&upstream(&server.uri())).unwrap();
+    let bytes = fetcher.fetch_clip(&TrackId::from("t-art")).await.unwrap();
+
+    assert_eq!(bytes.len(), 4096, "should return the re-fetched clip");
+    assert_eq!(
+        bytes.first(),
+        Some(&0xff),
+        "re-fetched clip should open on a frame sync, not an ID3 tag"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_tagged_passthrough_is_left_alone() {
+    // A passthrough file with a normal-sized tag still carries plenty
+    // of audio inside the window. It embeds fine today, so it must not
+    // take the retry path — a second fetch at a different bitrate would
+    // silently change the vector we store for it.
+    //
+    // Modelled on a real library track: a 271,906-byte tag followed by
+    // ~4.8 s of audio at 192 kbps.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/getSong"))
+        .and(query_param("id", "t-ok"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(get_song_body_with_suffix(
+                "t-ok",
+                Some(200),
+                Some("mp3"),
+                Some(192),
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    // Only the 192 request is mounted. If the fetcher retried at 191
+    // the request would 404 against the mock and the test would fail —
+    // which is exactly the regression we want caught.
+    Mock::given(method("GET"))
+        .and(path("/rest/stream"))
+        .and(query_param("maxBitRate", "192"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(id3_body(271_906, 114_388)))
+        .mount(&server)
+        .await;
+
+    let fetcher = SubsonicAudioFetcher::new(&upstream(&server.uri())).unwrap();
+    let bytes = fetcher.fetch_clip(&TrackId::from("t-ok")).await.unwrap();
+
+    assert_eq!(
+        bytes.len(),
+        10 + 271_906 + 114_388,
+        "clip passed through untouched"
+    );
 }

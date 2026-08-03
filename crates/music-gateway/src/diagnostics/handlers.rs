@@ -30,6 +30,7 @@ use crate::diagnostics::{
     ChildAgg, ChildBreakdown, ClientEventRecord, HistogramBucket, RecommendSummary, SpanPoint,
     SpanRecord,
 };
+use crate::principal::{AuthPrincipal, Capability};
 use crate::state::AppState;
 
 const DEFAULT_TRACE_LIMIT: usize = 100;
@@ -516,8 +517,23 @@ pub async fn submit_client_events(
 
 pub async fn list_client_events(
     State(state): State<AppState>,
+    AuthPrincipal(principal): AuthPrincipal,
     Query(q): Query<ClientEventsQuery>,
 ) -> Result<Json<ClientEventsResponse>, (StatusCode, Json<Value>)> {
+    // Self-gated rather than layer-gated: this path is registered in the
+    // any-authenticated router so its sibling `POST` can accept RUM from
+    // ordinary clients. The read side still exposes every session's
+    // page paths and user agents, so it stays admin-only.
+    if !principal.can(Capability::AdminTools) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "forbidden",
+                "message": "your role does not permit this action",
+            })
+            .into(),
+        ));
+    }
     let limit = q
         .limit
         .unwrap_or(DEFAULT_TRACE_LIMIT)

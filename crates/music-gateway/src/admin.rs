@@ -1,4 +1,4 @@
-//! Operator endpoints for cache management.
+//! Operator endpoints for cache and discovery management.
 //!
 //! `POST /v1/admin/cache/invalidate` — clears browse-cache rows
 //! (`getAlbumList2`, `getAlbum`, etc.). Cover-art rows are preserved.
@@ -6,10 +6,14 @@
 //! `POST /v1/admin/cache/invalidate_covers` — clears cover-art rows.
 //! Use when cover art is stuck on stale placeholders despite the
 //! background revalidation mechanism.
+//!
+//! `POST /v1/admin/discovery/scan` — runs a full catalog sweep now
+//! instead of waiting for the timer.
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 
+use crate::discovery::CatalogWatcher;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -44,6 +48,49 @@ pub async fn invalidate_covers(State(state): State<AppState>) -> impl IntoRespon
         Err(e) => {
             tracing::error!(error = %e, "cover-art cache invalidate failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Run a full catalog sweep synchronously and report what it queued.
+///
+/// The background watcher already does this on a timer; this is the
+/// "don't wait" button — after a bulk import, or after re-pointing the
+/// gateway at a different Navidrome. It deliberately ignores
+/// `[discovery] enabled`, so an operator who runs discovery manually
+/// (`enabled = false`) still has a supported way to do it, and it
+/// replaces `scripts/enqueue_all_tracks.py` for that use.
+///
+/// Overlapping with an in-flight scheduled scan is harmless: enqueueing
+/// is `INSERT OR IGNORE`, so the duplicate ids are no-ops.
+#[tracing::instrument(name = "admin.discovery.scan", skip_all)]
+pub async fn discovery_scan(State(state): State<AppState>) -> impl IntoResponse {
+    let watcher = match CatalogWatcher::new(
+        &state.config().upstream,
+        state.embedding_store().clone(),
+        state.recommend_model_version().clone(),
+        state.config().discovery.recent_albums,
+    ) {
+        Ok(built) => built,
+        Err(e) => {
+            tracing::error!(error = %e, "discovery: building watcher failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    match watcher.scan_full().await {
+        Ok(summary) => {
+            tracing::info!(
+                seen = summary.seen,
+                enqueued = summary.enqueued,
+                "discovery: manual full sweep complete"
+            );
+            (StatusCode::OK, Json(summary)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "discovery: manual full sweep failed");
+            // The upstream catalog was unreadable — that's a dependency
+            // failure, not a bad request, and it's retryable.
+            (StatusCode::BAD_GATEWAY, format!("catalog scan failed: {e}")).into_response()
         }
     }
 }

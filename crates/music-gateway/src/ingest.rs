@@ -58,6 +58,27 @@ const CLIP_HEADROOM_BYTES: u64 = 96 * 1024;
 const MAX_CLIP_BYTES: u64 =
     (TRANSCODE_MAX_BITRATE as u64 * 1000 / 8) * WINDOW_SECONDS as u64 + CLIP_HEADROOM_BYTES;
 
+/// Minimum seconds of decodable audio we require to sit *after* a
+/// leading ID3 tag before we accept a clip.
+///
+/// The embedder's floor is 1 s: `Clamp3Embedder` slices the waveform
+/// into `SLIDING_WINDOW_SEC`-long chunks and drops a trailing chunk
+/// shorter than one second, so a clip under 1 s yields no chunks at all
+/// and raises "audio too short". We use double that, deliberately: the
+/// point is to retry only clips that are near-certain to fail, and to
+/// leave anything that decodes today untouched. Real observed values
+/// straddle this threshold with room to spare — a working clip in the
+/// library carries ~4.8 s past its tag, while the broken ones carry
+/// 0–1.1 s.
+const MIN_AUDIO_SECONDS_AFTER_TAG: u32 = 2;
+
+/// `maxBitRate` to request when we can't read the source bitrate and
+/// have to force a transcode blind. Low enough to be under any MP3 a
+/// music library realistically holds (the format's floor is 32 kbps),
+/// high enough not to mangle the audio we hand the model. Only reached
+/// when `getSong` failed, which also costs us the centred `timeOffset`.
+const FALLBACK_FORCED_BITRATE: u32 = 96;
+
 /// Idle backoff between queue polls. Snappy enough for manual testing
 /// while keeping per-tick cost trivial (one indexed lookup in SQLite).
 const IDLE_TICK: Duration = Duration::from_secs(5);
@@ -119,8 +140,8 @@ impl SubsonicAudioFetcher {
 /// header whose frame count describes the *whole* track. Range-capping
 /// that file to `MAX_CLIP_BYTES` leaves the bogus full-length header in
 /// place; the decoder trusts it, finds almost no frames in the
-/// truncated data, and yields a ~0.1 s clip — below MERT's 6 s floor,
-/// so the embed fails with "audio too short". This silently broke
+/// truncated data, and yields a ~0.1 s clip — below the embedder's 1 s
+/// floor, so the embed fails with "audio too short". This silently broke
 /// ingest for every VBR-header MP3 in the library (~270 tracks).
 ///
 /// A transcode side-steps it: Navidrome streams a *fresh* MP3 with no
@@ -131,16 +152,94 @@ impl SubsonicAudioFetcher {
 /// it ignores Range and streams the whole transcode — `fetch_clip` then
 /// reads the full body, as it has all along; that path was never the
 /// one that broke.
-fn apply_clip_query_params(url: &mut url::Url, offset: u32) {
+/// Caveat that motivates `clip_needs_transcode_retry`: "always
+/// transcode" describes what we *ask for*, not what we get. Navidrome
+/// only re-encodes when the request actually constrains the source, so
+/// asking for `mp3@192` from a file that is already `mp3@<=192` is a
+/// no-op and it streams the original bytes with our Range applied. When
+/// such a file opens with a large embedded cover art, the ID3v2 tag can
+/// exceed `MAX_CLIP_BYTES` outright and the "clip" we get back is pure
+/// metadata — ffmpeg then fails with "Failed to find two consecutive
+/// MPEG audio frames". Observed on three albums whose tags run
+/// 363–677 KB against a 386 KB window.
+fn apply_clip_query_params(url: &mut url::Url, offset: u32, max_bitrate: u32) {
     let mut q = url.query_pairs_mut();
     q.append_pair("format", "mp3")
-        .append_pair("maxBitRate", &TRANSCODE_MAX_BITRATE.to_string());
+        .append_pair("maxBitRate", &max_bitrate.to_string());
     // Only attach timeOffset when non-zero. Some Subsonic
     // implementations interpret the parameter strictly and may
     // re-prime the transcoder on its presence; sending 0 gratuitously
     // is just wasteful.
     if offset > 0 {
         q.append_pair("timeOffset", &offset.to_string());
+    }
+}
+
+/// Total byte length of a leading ID3v2 tag, header included, or `None`
+/// when the buffer doesn't start with one.
+///
+/// The declared size is a *syncsafe* integer: four bytes each carrying
+/// seven significant bits, so that a tag length can never contain a
+/// `0xFF` byte a decoder might mistake for a frame sync. A footer, when
+/// the flags advertise one, adds a further ten bytes that the declared
+/// size excludes.
+fn id3_tag_len(bytes: &[u8]) -> Option<usize> {
+    // 10-byte header: "ID3" + version(2) + flags(1) + size(4).
+    let header = bytes.get(..10)?;
+    if &header[..3] != b"ID3" {
+        return None;
+    }
+    let size = header.get(6..10)?;
+    // Reject a malformed size rather than silently decoding it wrong —
+    // a set high bit means this isn't a syncsafe integer at all.
+    if size.iter().any(|b| b & 0x80 != 0) {
+        return None;
+    }
+    let declared = size
+        .iter()
+        .fold(0usize, |acc, b| (acc << 7) | (*b as usize & 0x7f));
+    let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+    Some(10 + declared + footer)
+}
+
+/// Whether a fetched clip is so dominated by its leading ID3 tag that
+/// the embed is near-certain to fail, and is worth one re-fetch that
+/// forces Navidrome to actually transcode.
+///
+/// Returns false for the overwhelming majority of clips: a transcoded
+/// stream carries no cover art, so there's no tag to trip on, and a
+/// passthrough file with ordinary tags leaves plenty of audio inside
+/// the window.
+fn clip_needs_transcode_retry(clip: &[u8], bit_rate_kbps: Option<u32>) -> bool {
+    let Some(tag_len) = id3_tag_len(clip) else {
+        return false;
+    };
+    let audio_bytes = clip.len().saturating_sub(tag_len);
+    // Unknown bitrate: fall back to the highest rate we ever request,
+    // which yields the *largest* byte requirement and so errs toward
+    // retrying. A needless retry costs one request; a missed one costs
+    // a permanently unembeddable track.
+    let kbps = bit_rate_kbps.unwrap_or(TRANSCODE_MAX_BITRATE).max(1);
+    let required = (kbps as usize * 1000 / 8) * MIN_AUDIO_SECONDS_AFTER_TAG as usize;
+    audio_bytes < required
+}
+
+/// `maxBitRate` that forces Navidrome to re-encode a source it would
+/// otherwise pass through verbatim.
+///
+/// Navidrome transcodes only when the request constrains the source, so
+/// the request has to land *strictly below* the source bitrate. One
+/// kbps under is enough, and keeps the audio we hand the model as close
+/// to the original as the format allows — 191 kbps in place of 192,
+/// rather than a blanket downgrade that would also change every track
+/// the normal path already handles.
+fn forced_transcode_bitrate(bit_rate_kbps: Option<u32>) -> u32 {
+    match bit_rate_kbps {
+        // Clamp to the MP3 floor so a nonsense source bitrate can't
+        // produce an unencodable request.
+        Some(kbps) if kbps > 32 => (kbps - 1).min(TRANSCODE_MAX_BITRATE),
+        Some(_) => 32,
+        None => FALLBACK_FORCED_BITRATE,
     }
 }
 
@@ -236,29 +335,64 @@ impl AudioFetcher for SubsonicAudioFetcher {
         // separately from the transcoded body read.
         // We only need the duration (to centre the `timeOffset`); the
         // source codec no longer matters since we always transcode.
-        let duration_seconds = match self
+        let (duration_seconds, bit_rate_kbps) = match self
             .client
             .get_song(track_id)
             .instrument(tracing::info_span!("fetch_clip.get_song"))
             .await
         {
-            Ok(track) => track.duration_seconds.unwrap_or(0),
+            Ok(track) => (track.duration_seconds.unwrap_or(0), track.bit_rate_kbps),
             Err(e) => {
                 tracing::debug!(
                     track = %track_id,
                     error = %e,
                     "ingest: getSong failed; using offset=0"
                 );
-                0
+                (0, None)
             }
         };
         let offset = pick_offset_seconds(duration_seconds, WINDOW_SECONDS);
 
+        let clip = self
+            .fetch_at_bitrate(track_id, offset, TRANSCODE_MAX_BITRATE)
+            .await?;
+        if !clip_needs_transcode_retry(&clip, bit_rate_kbps) {
+            return Ok(clip);
+        }
+
+        // Navidrome passed the source through verbatim and its cover-art
+        // tag swallowed the window. Ask again just under the source
+        // bitrate, which leaves it no choice but to re-encode — the
+        // stream that comes back has no embedded art at all.
+        let retry_bitrate = forced_transcode_bitrate(bit_rate_kbps);
+        tracing::info!(
+            track = %track_id,
+            clip_bytes = clip.len(),
+            id3_bytes = id3_tag_len(&clip).unwrap_or(0),
+            retry_bitrate,
+            "ingest: clip is ID3-dominated; refetching with a forced transcode"
+        );
+        self.fetch_at_bitrate(track_id, offset, retry_bitrate).await
+    }
+}
+
+impl SubsonicAudioFetcher {
+    /// One `/rest/stream` clip fetch at an explicit `maxBitRate`.
+    ///
+    /// Split out so the ID3 retry can re-run the identical exchange
+    /// with a different bitrate rather than duplicating the span and
+    /// error mapping.
+    async fn fetch_at_bitrate(
+        &self,
+        track_id: &TrackId,
+        offset: u32,
+        max_bitrate: u32,
+    ) -> Result<Bytes, FetchError> {
         let mut url = self
             .client
             .stream_url(track_id)
             .map_err(|e| FetchError::Transport(format!("stream_url: {e}")))?;
-        apply_clip_query_params(&mut url, offset);
+        apply_clip_query_params(&mut url, offset, max_bitrate);
 
         let range = format!("bytes=0-{}", MAX_CLIP_BYTES - 1);
         // Split the HTTP exchange into two subspans: "stream_request"
@@ -465,8 +599,23 @@ mod tests {
 
     fn build(offset: u32) -> url::Url {
         let mut url = url::Url::parse("http://nav.test/rest/stream?id=abc").unwrap();
-        apply_clip_query_params(&mut url, offset);
+        apply_clip_query_params(&mut url, offset, TRANSCODE_MAX_BITRATE);
         url
+    }
+
+    /// An ID3v2.4 header declaring `payload` bytes of tag, followed by
+    /// `audio` bytes of stand-in frame data.
+    fn id3_clip(payload: usize, audio: usize) -> Vec<u8> {
+        let mut v = vec![b'I', b'D', b'3', 4, 0, 0];
+        v.extend_from_slice(&[
+            ((payload >> 21) & 0x7f) as u8,
+            ((payload >> 14) & 0x7f) as u8,
+            ((payload >> 7) & 0x7f) as u8,
+            (payload & 0x7f) as u8,
+        ]);
+        v.resize(10 + payload, 0);
+        v.resize(10 + payload + audio, 0xff);
+        v
     }
 
     fn params(url: &url::Url) -> std::collections::BTreeMap<String, String> {
@@ -493,5 +642,80 @@ mod tests {
         assert_eq!(p.get("format").map(String::as_str), Some("mp3"));
         assert_eq!(p.get("maxBitRate").map(String::as_str), Some("192"));
         assert!(!p.contains_key("timeOffset"), "zero offset is the default");
+    }
+
+    #[test]
+    fn id3_tag_len_decodes_a_syncsafe_size() {
+        // 0x00 0x29 0x27 0x48 is the real header from the blink-182
+        // track that exposed this bug: 676,808 bytes of cover art.
+        let mut clip = vec![b'I', b'D', b'3', 4, 0, 0, 0x00, 0x29, 0x27, 0x48];
+        clip.resize(4096, 0);
+        assert_eq!(id3_tag_len(&clip), Some(10 + 676_808));
+    }
+
+    #[test]
+    fn id3_tag_len_accounts_for_a_footer() {
+        let mut clip = id3_clip(100, 0);
+        clip[5] = 0x10; // footer-present flag
+        assert_eq!(id3_tag_len(&clip), Some(10 + 100 + 10));
+    }
+
+    #[test]
+    fn id3_tag_len_ignores_non_id3_and_malformed_sizes() {
+        // A transcoded stream starts on a frame sync, not a tag.
+        assert_eq!(id3_tag_len(&[0xff, 0xfb, 0x90, 0x00]), None);
+        assert_eq!(id3_tag_len(b"ID3"), None, "truncated header");
+        let mut bad = id3_clip(10, 10);
+        bad[7] = 0x80; // high bit set — not a syncsafe integer
+        assert_eq!(id3_tag_len(&bad), None);
+    }
+
+    #[test]
+    fn transcode_retry_fires_when_the_tag_eats_the_window() {
+        // blink-182: the tag alone exceeds MAX_CLIP_BYTES, so the clip
+        // is pure metadata and ffmpeg finds no frames at all.
+        let clip = id3_clip(MAX_CLIP_BYTES as usize, 0);
+        assert!(clip_needs_transcode_retry(&clip, Some(192)));
+
+        // The Alchemist: a sliver of audio survives (~1.1 s), still
+        // under the floor we require.
+        let clip = id3_clip(363_488, 22_806);
+        assert!(clip_needs_transcode_retry(&clip, Some(171)));
+    }
+
+    #[test]
+    fn transcode_retry_leaves_working_clips_alone() {
+        // A transcoded clip has no tag to trip on.
+        assert!(!clip_needs_transcode_retry(&[0xff; 4096], Some(192)));
+
+        // Sum 41: passthrough with an ordinary tag, ~4.8 s of audio
+        // past it. This embeds fine today and must keep its exact
+        // bytes — a retry here would silently change its vector.
+        let clip = id3_clip(271_906, 114_388);
+        assert!(!clip_needs_transcode_retry(&clip, Some(192)));
+    }
+
+    #[test]
+    fn transcode_retry_errs_toward_retrying_without_a_bitrate() {
+        // Unknown bitrate assumes the highest rate we request, so the
+        // byte requirement is the largest — a borderline clip retries
+        // rather than being written off.
+        let clip = id3_clip(300_000, 40_000);
+        assert!(clip_needs_transcode_retry(&clip, None));
+    }
+
+    #[test]
+    fn forced_bitrate_lands_just_under_the_source() {
+        // One kbps under is all Navidrome needs to stop passing the
+        // file through, and keeps the audio near-identical.
+        assert_eq!(forced_transcode_bitrate(Some(192)), 191);
+        assert_eq!(forced_transcode_bitrate(Some(171)), 170);
+        // Never above what the normal path would have asked for.
+        assert_eq!(forced_transcode_bitrate(Some(320)), TRANSCODE_MAX_BITRATE);
+        // Degenerate sources clamp to the MP3 floor instead of
+        // underflowing into an unencodable request.
+        assert_eq!(forced_transcode_bitrate(Some(32)), 32);
+        assert_eq!(forced_transcode_bitrate(Some(0)), 32);
+        assert_eq!(forced_transcode_bitrate(None), FALLBACK_FORCED_BITRATE);
     }
 }

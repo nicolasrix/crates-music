@@ -142,7 +142,7 @@ capability checks):
 
 1. **Any authenticated** — browse, play, recommend reads, room control, ratings/events, `whoami`.
 2. **Write-capable (admin + user, not guest)** — playlist CRUD, persisted ratings/taste. Guests get 403; guest taste signal is dropped from training.
-3. **Admin-only** — `/v1/admin/*`, `/v1/diagnostics/*`, recommender maintenance (`refit_whitening`, `enqueue`).
+3. **Admin-only** — `/v1/admin/*`, `/v1/diagnostics/*`, recommender maintenance (`refit_whitening`, `enqueue`). Exception: `POST /v1/diagnostics/client_events` (RUM ingest) is tier 1 — a client reporting its own timings isn't an admin action, and gating it blinded us to exactly the devices worth measuring. Its `GET` sibling stays admin-only via an in-handler check.
 
 **Rooms** are the sync partition: a User owns one room
 (`room_id == user_id`); a Guest attaches to its host's

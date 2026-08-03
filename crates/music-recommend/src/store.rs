@@ -21,6 +21,12 @@ use crate::{Error, Result};
 /// workspace.
 pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Rows per transaction in [`EmbeddingStore::enqueue_many`]. Bounds how
+/// long a bulk enqueue holds SQLite's write lock against the concurrent
+/// ingest workers; 1000 inserts is a few milliseconds, comfortably
+/// inside the pool's `busy_timeout`.
+const ENQUEUE_CHUNK: usize = 1000;
+
 #[derive(Clone, Debug)]
 pub struct EmbeddingStore {
     pool: SqlitePool,
@@ -96,6 +102,55 @@ impl EmbeddingStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Enqueue many tracks for one model version. Returns the number of
+    /// rows *actually inserted* — i.e. tracks that had no row yet, which
+    /// is exactly the "newly discovered" count the catalog watcher wants
+    /// to log.
+    ///
+    /// Same `INSERT OR IGNORE` semantics as [`Self::enqueue`], so it is
+    /// safe to hand it the whole catalog on every scan: already-known
+    /// tracks (in any state, including `done` and `failed`) are ignored
+    /// and don't inflate the return value.
+    ///
+    /// Batched rather than N autocommits, because the discovery sweep
+    /// passes ~10⁴ ids and a per-statement fsync each would turn a few
+    /// milliseconds of work into tens of seconds of disk.
+    ///
+    /// Chunked rather than one giant transaction, because a write
+    /// transaction blocks the ingest workers' `claim_next`.
+    /// `ENQUEUE_CHUNK` keeps each lock window to a few milliseconds —
+    /// well inside the pool's `busy_timeout` — instead of holding the
+    /// write lock for as long as it takes to walk the whole catalog. A
+    /// failure part-way leaves earlier chunks committed, which is fine:
+    /// the operation is idempotent, so the next sweep finishes the job.
+    pub async fn enqueue_many(
+        &self,
+        track_ids: &[TrackId],
+        model_version: &ModelVersion,
+    ) -> Result<u64> {
+        let now = now_ms();
+        let mut inserted = 0u64;
+        for chunk in track_ids.chunks(ENQUEUE_CHUNK) {
+            let mut tx = self.pool.begin().await?;
+            for track_id in chunk {
+                let r = sqlx::query(
+                    "INSERT OR IGNORE INTO track_embeddings
+                         (track_id, model_version, dim, vector, status, error, created_at, updated_at)
+                     VALUES (?, ?, 0, NULL, 'not_started', NULL, ?, ?)",
+                )
+                .bind(track_id.as_str())
+                .bind(model_version.as_str())
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                inserted += r.rows_affected();
+            }
+            tx.commit().await?;
+        }
+        Ok(inserted)
     }
 
     /// Atomically claim the oldest `not_started` row for the given

@@ -48,6 +48,7 @@ def test_minimum_env_produces_valid_toml() -> None:
 
     assert parsed["cache"]["path"] == "/data/state/gateway-cache.sqlite"
     assert parsed["cache"]["browse_ttl_seconds"] == 86400
+    assert parsed["cache"]["list_ttl_seconds"] == 60
 
     assert parsed["oauth"]["state_db"] == "/data/state/gateway-state.sqlite"
     # Default web + cli clients always registered.
@@ -210,6 +211,12 @@ def test_browse_ttl_seconds_override() -> None:
     assert parsed["cache"]["browse_ttl_seconds"] == 3600
 
 
+def test_list_ttl_seconds_override() -> None:
+    env = _minimum_env() | {"GATEWAY_LIST_TTL_SECONDS": "300"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["cache"]["list_ttl_seconds"] == 300
+
+
 def test_listen_override() -> None:
     env = _minimum_env() | {"GATEWAY_LISTEN": "127.0.0.1:9000"}
     parsed = tomllib.loads(build_config(env))
@@ -334,6 +341,67 @@ def test_recommend_embedding_dim_rejects_non_integer() -> None:
 def test_recommend_embedding_dim_rejects_non_positive() -> None:
     env = _minimum_env() | {"RECOMMEND_EMBEDDING_DIM": "0"}
     with pytest.raises(ConfigError, match="positive"):
+        build_config(env)
+
+
+# --- [discovery] section --------------------------------------------------
+#
+# The catalog watcher that auto-enqueues newly-added tracks for embedding.
+# On by default gateway-side, so an unset block is the intended shape; the
+# knobs exist to slow it down or switch it off.
+
+
+def test_discovery_section_omitted_when_unset() -> None:
+    parsed = tomllib.loads(build_config(_minimum_env()))
+    assert "discovery" not in parsed
+
+
+def test_discovery_knobs_emitted_when_set() -> None:
+    env = _minimum_env() | {
+        "DISCOVERY_ENABLED": "true",
+        "DISCOVERY_INTERVAL_SECONDS": "600",
+        "DISCOVERY_FULL_INTERVAL_SECONDS": "43200",
+        "DISCOVERY_RECENT_ALBUMS": "25",
+    }
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["discovery"] == {
+        "enabled": True,
+        "interval_seconds": 600,
+        "full_interval_seconds": 43200,
+        "recent_albums": 25,
+    }
+
+
+def test_discovery_can_be_switched_off_alone() -> None:
+    env = _minimum_env() | {"DISCOVERY_ENABLED": "false"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["discovery"] == {"enabled": False}
+
+
+def test_discovery_interval_zero_is_allowed() -> None:
+    # 0 is meaningful here — "sweep once at boot, then stop" — so it must
+    # not be rejected the way a zero dim or zero album count is.
+    env = _minimum_env() | {"DISCOVERY_INTERVAL_SECONDS": "0"}
+    parsed = tomllib.loads(build_config(env))
+    assert parsed["discovery"]["interval_seconds"] == 0
+
+
+def test_discovery_rejects_non_integer_interval() -> None:
+    env = _minimum_env() | {"DISCOVERY_INTERVAL_SECONDS": "5m"}
+    with pytest.raises(ConfigError, match="DISCOVERY_INTERVAL_SECONDS"):
+        build_config(env)
+
+
+def test_discovery_rejects_zero_recent_albums() -> None:
+    # A zero-album recent scan would silently do nothing every tick.
+    env = _minimum_env() | {"DISCOVERY_RECENT_ALBUMS": "0"}
+    with pytest.raises(ConfigError, match="positive"):
+        build_config(env)
+
+
+def test_discovery_rejects_bad_boolean() -> None:
+    env = _minimum_env() | {"DISCOVERY_ENABLED": "maybe"}
+    with pytest.raises(ConfigError, match="DISCOVERY_ENABLED"):
         build_config(env)
 
 

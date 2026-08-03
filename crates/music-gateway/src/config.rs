@@ -26,6 +26,63 @@ pub struct Config {
     /// proxied Navidrome `search3` when disabled or still building.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Automatic catalog discovery — enqueues newly-added Navidrome
+    /// tracks for embedding without a manual bulk-enqueue run.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// `[discovery]` — the background catalog watcher that feeds the
+/// embedding queue. See `crate::discovery` for the two-tier scan design.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveryConfig {
+    /// Master switch. When false, tracks only enter the ingest queue via
+    /// `POST /v1/recommend/enqueue` (the pre-discovery behaviour).
+    #[serde(default = "default_discovery_enabled")]
+    pub enabled: bool,
+    /// Cadence of the cheap "newest albums" scan. `0` runs the boot
+    /// sweep and then stops — a usable "scan once at startup" mode.
+    #[serde(default = "default_discovery_interval_seconds")]
+    pub interval_seconds: u64,
+    /// Cadence of the full catalog sweep, which also runs once at boot.
+    /// Needed because Navidrome's `newest` ordering is by *album*
+    /// creation, so a track added to a pre-existing album never appears
+    /// in the recent scan. `0` disables the periodic sweep (the boot one
+    /// still runs).
+    #[serde(default = "default_discovery_full_interval_seconds")]
+    pub full_interval_seconds: u64,
+    /// How many albums the recent scan expands per tick. Each costs one
+    /// `getAlbum` call, so this is the knob for "how much new music can
+    /// land between two ticks without waiting for the full sweep".
+    #[serde(default = "default_discovery_recent_albums")]
+    pub recent_albums: u32,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_discovery_enabled(),
+            interval_seconds: default_discovery_interval_seconds(),
+            full_interval_seconds: default_discovery_full_interval_seconds(),
+            recent_albums: default_discovery_recent_albums(),
+        }
+    }
+}
+
+fn default_discovery_enabled() -> bool {
+    true
+}
+
+fn default_discovery_interval_seconds() -> u64 {
+    300
+}
+
+fn default_discovery_full_interval_seconds() -> u64 {
+    24 * 60 * 60
+}
+
+fn default_discovery_recent_albums() -> u32 {
+    50
 }
 
 /// `[search]` — the fuzzy catalog index behind `GET /v1/search`.
@@ -114,8 +171,23 @@ impl std::fmt::Debug for UpstreamConfig {
 pub struct CacheConfig {
     /// Path to the SQLite file backing the L2 metadata cache.
     pub path: PathBuf,
-    /// TTL applied to browse-endpoint responses (in seconds).
+    /// TTL applied to *entity* browse responses — `getAlbum`, `getArtist`.
+    /// Long by design: a given album's track list only changes when its
+    /// tags are edited, which at our scale is approximately never.
     pub browse_ttl_seconds: u64,
+    /// TTL applied to *list* browse responses — `getAlbumList2`,
+    /// `getArtists`, `search3`.
+    ///
+    /// These must expire on the order of a page-load, not a day, because
+    /// they are views over the whole catalog: adding an album changes the
+    /// answer without touching anything already in the response. Sharing
+    /// one TTL with the entity endpoints meant a newly-added album stayed
+    /// invisible for up to `browse_ttl_seconds`, and — since the cache key
+    /// includes `size` — different pages asking the same question at
+    /// different sizes held independently-aged snapshots and visibly
+    /// disagreed with each other.
+    #[serde(default = "default_list_ttl_seconds")]
+    pub list_ttl_seconds: u64,
 }
 
 impl Default for CacheConfig {
@@ -123,8 +195,13 @@ impl Default for CacheConfig {
         Self {
             path: PathBuf::from("gateway-cache.sqlite"),
             browse_ttl_seconds: 24 * 60 * 60,
+            list_ttl_seconds: default_list_ttl_seconds(),
         }
     }
+}
+
+fn default_list_ttl_seconds() -> u64 {
+    60
 }
 
 /// OAuth 2.1 state DB (users, clients, codes, tokens). Deliberately a

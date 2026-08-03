@@ -93,6 +93,7 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/cache/invalidate_covers",
             post(admin::invalidate_covers),
         )
+        .route("/v1/admin/discovery/scan", post(admin::discovery_scan))
         .route(
             "/v1/admin/users",
             get(crate::users::list_users).post(crate::users::create_user),
@@ -122,11 +123,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/diagnostics/recently_played",
             get(diagnostics_handlers::recently_played),
-        )
-        .route(
-            "/v1/diagnostics/client_events",
-            get(diagnostics_handlers::list_client_events)
-                .post(diagnostics_handlers::submit_client_events),
         )
         .route(
             "/v1/diagnostics/recommend/queue_fill",
@@ -186,6 +182,26 @@ pub fn build_router(state: AppState) -> Router {
         // Navidrome search3 until the index is built).
         .route("/v1/search", get(search_handlers::search))
         .route("/v1/events", post(events::submit))
+        // Browser RUM. Deliberately *not* in the admin tier: a client
+        // reporting its own Web Vitals is not an administrative action,
+        // and gating it meant every non-admin device silently 403'd its
+        // telemetry — precisely the devices whose latency we most need to
+        // see (a phone on a flaky link). Observed live on 2026-08-03: a
+        // playback problem on mobile data left no client-side trace at all
+        // because both upload attempts were rejected.
+        //
+        // The route is registered once, here, because the *read* side must
+        // stay admin-only (it exposes every session's browsing path) —
+        // `list_client_events` self-gates on `AdminTools`, the same pattern
+        // the playlist handlers use for their write verbs. Registering the
+        // two verbs in separate routers would merge two differently-layered
+        // method routers on one path, which is exactly the kind of subtle
+        // wiring a future reader would get wrong.
+        .route(
+            "/v1/diagnostics/client_events",
+            get(diagnostics_handlers::list_client_events)
+                .post(diagnostics_handlers::submit_client_events),
+        )
         // Host-side guest-code management (PR D). Any authenticated real
         // account manages its *own* codes; the handlers 403 a guest.
         .route(

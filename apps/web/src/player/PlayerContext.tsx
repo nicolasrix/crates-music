@@ -102,8 +102,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const currentItem = now_playing_index !== null ? queue.items[now_playing_index] : undefined;
   const currentTrackId = currentItem?.track_id;
+
+  // The track this device's <audio> element is actually pointed at.
+  //
+  // Distinct from `currentTrackId`, which is derived from *sync state*.
+  // The two agree whenever the sync socket is healthy — but primePlayback
+  // sets `src` synchronously off the click (it has to; the autoplay policy
+  // won't accept a deferred play()) while the matching op takes a WS
+  // round-trip. So with sync down, the element can be playing track A
+  // while the cursor still says track B, and every consumer that reads the
+  // cursor then describes the wrong song. That is not cosmetic: it put a
+  // play of THE LOOP onto Veridis Quo's play count on 2026-08-03, and fed
+  // the recommender's recency clock the same lie.
+  //
+  // Rule: anything that describes *what is coming out of the speaker*
+  // (player bar, Media Session, scrobbles, the skip signal, the latency
+  // mark) reads this. Anything that describes *the room's queue* (auto-
+  // skip, indices, next/prev bounds) keeps reading the cursor.
+  const loadedTrackIdRef = useRef<string | null>(null);
+  const [loadedTrackId, setLoadedTrackId] = useState<string | null>(null);
+  // Falls back to the cursor so a silent remote — which never loads audio
+  // at all — still shows and reports the room's track.
+  const playingTrackId = loadedTrackId ?? currentTrackId;
+
   const nowPlaying: Track | null =
-    currentTrackId !== undefined ? trackMeta.get(currentTrackId) ?? null : null;
+    playingTrackId !== undefined ? trackMeta.get(playingTrackId) ?? null : null;
 
   // --- Dislike auto-skip --------------------------------------------------
   //
@@ -200,6 +223,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     hasEmittedNowPlaying: false,
     hasEmittedSubmission: false,
   });
+
+  // Claim the element for `trackId`: publish the id every "what's playing"
+  // consumer reads, and reset the per-track scrobble state so the flags
+  // can't leak across a track change. Called synchronously the moment we
+  // know which track we're moving to — *before* any await — so the player
+  // bar never lags a cache lookup behind the audio.
+  //
+  // Single funnel for that bookkeeping: previously the reset lived only in
+  // the sync-driven track-change effect, which meant a primePlayback while
+  // sync was down left `hasEmittedSubmission` set from the *previous*
+  // track and the new one silently never scrobbled at all.
+  const claimTrack = useCallback((trackId: string | null) => {
+    loadedTrackIdRef.current = trackId;
+    setLoadedTrackId(trackId);
+    scrobbleStateRef.current = {
+      trackDurationMs: 0,
+      elapsedMs: 0,
+      hasEmittedNowPlaying: false,
+      hasEmittedSubmission: false,
+    };
+  }, []);
+
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -207,12 +252,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // already redirected the cursor. Don't load or play its audio; the next
     // track-change frame will set src for the track we land on.
     if (pendingSkipRef.current === currentTrackId) return;
-    scrobbleStateRef.current = {
-      trackDurationMs: 0,
-      elapsedMs: 0,
-      hasEmittedNowPlaying: false,
-      hasEmittedSubmission: false,
-    };
+    claimTrack(currentTrackId ?? null);
     if (!currentTrackId) {
       audio.pause();
       return;
@@ -249,17 +289,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // and fires the now_playing scrobble. Both are gated by their own
   // ref-state and so are safe against duplicate `playing` events
   // (which fire on every resume after a pause).
+  //
+  // Both handlers resolve the track id at *fire* time from
+  // `loadedTrackIdRef`, not from the closed-over cursor. These effects
+  // re-bind on `currentTrackId`, so with sync down they'd stay bound to a
+  // stale closure and credit the play to whatever the frozen cursor said.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrackId) return;
     const onPlaying = () => {
+      const playingId = loadedTrackIdRef.current ?? currentTrackId;
       const start = startTsRef.current;
       if (start !== null) {
         const elapsed = performance.now() - start;
         startTsRef.current = null; // one-shot — don't double-emit on resume
         markEvent("playback.start", {
           value_ms: elapsed,
-          fields: { track_id: currentTrackId },
+          fields: { track_id: playingId },
         });
       }
       // Now-playing scrobble. We pull duration off the audio element
@@ -275,7 +321,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const decision = evaluateScrobble(next);
       if (decision === "now_playing") {
         scrobbleStateRef.current = { ...next, hasEmittedNowPlaying: true };
-        void scrobble(currentTrackId, false).catch(() => {});
+        void scrobble(playingId, false).catch(() => {});
       } else {
         scrobbleStateRef.current = next;
       }
@@ -293,6 +339,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const audio = audioRef.current;
     if (!audio || !currentTrackId) return;
     const onTimeUpdate = () => {
+      const playingId = loadedTrackIdRef.current ?? currentTrackId;
       const durMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
       const next: ScrobbleState = {
         ...scrobbleStateRef.current,
@@ -302,13 +349,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const decision = evaluateScrobble(next);
       if (decision === "submission") {
         scrobbleStateRef.current = { ...next, hasEmittedSubmission: true };
-        void scrobble(currentTrackId, true).catch(() => {});
+        void scrobble(playingId, true).catch(() => {});
       } else if (decision === "now_playing") {
         // Rare path: `playing` never fired but timeupdates already are
         // (some autoplay-resume edge cases). Send the now_playing here
         // so the gateway sees a heartbeat for this track.
         scrobbleStateRef.current = { ...next, hasEmittedNowPlaying: true };
-        void scrobble(currentTrackId, false).catch(() => {});
+        void scrobble(playingId, false).catch(() => {});
       } else {
         scrobbleStateRef.current = next;
       }
@@ -380,6 +427,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       // Load the audio if the element isn't already pointed at a real source
       // (a silent remote never set src; `src=""` resolves to the page URL).
       if (!a.src || a.src === window.location.href) {
+        claimTrack(currentTrackId);
         a.src = cachedUrl ?? streamUrl(currentTrackId);
         startTsRef.current = performance.now();
         notePlayed(currentTrackId);
@@ -472,20 +520,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const ms = navigator.mediaSession;
     const i = now_playing_index;
     const total = queue.items.length;
-    const leaving = i !== null ? queue.items[i]?.track_id : undefined;
+    // Resolved at *fire* time, not bind time: the track we're abandoning
+    // is the one in the element, which can outrun the cursor whenever sync
+    // is lagging or down. Falls back to the cursor for a silent remote,
+    // which never loads audio.
+    const leaving = () =>
+      loadedTrackIdRef.current ?? (i !== null ? queue.items[i]?.track_id : undefined);
     ms.setActionHandler("play", () => submit({ type: "set_playing", is_playing: true }));
     ms.setActionHandler("pause", () => submit({ type: "set_playing", is_playing: false }));
     ms.setActionHandler("nexttrack", () => {
       if (i !== null && i + 1 < total) {
         advanceDirRef.current = 1;
-        maybeEmitSkip(leaving);
+        maybeEmitSkip(leaving());
         submit({ type: "set_now_playing", index: i + 1 });
       }
     });
     ms.setActionHandler("previoustrack", () => {
       if (i !== null && i > 0) {
         advanceDirRef.current = -1;
-        maybeEmitSkip(leaving);
+        maybeEmitSkip(leaving());
         submit({ type: "set_now_playing", index: i - 1 });
       }
     });
@@ -591,14 +644,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       next: () => {
         if (i !== null && i + 1 < queue.items.length) {
           advanceDirRef.current = 1;
-          maybeEmitSkip(currentTrackId);
+          maybeEmitSkip(playingTrackId);
           submit({ type: "set_now_playing", index: i + 1 });
         }
       },
       prev: () => {
         if (i !== null && i > 0) {
           advanceDirRef.current = -1;
-          maybeEmitSkip(currentTrackId);
+          maybeEmitSkip(playingTrackId);
           submit({ type: "set_now_playing", index: i - 1 });
         }
       },
@@ -613,7 +666,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         // Picking a different track abandons the current one — report the
         // skip *before* clobbering src below (which resets currentTime).
         // Restarting the same track is not a skip.
-        if (currentTrackId && currentTrackId !== track.id) maybeEmitSkip(currentTrackId);
+        if (playingTrackId && playingTrackId !== track.id) maybeEmitSkip(playingTrackId);
         // Silent remote: the click still drives the room (the caller submits
         // the sync ops), but this device makes no sound — so skip the local
         // load/play entirely. The direction/skip bookkeeping above still runs.
@@ -625,6 +678,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         // Setting the same src twice is cheap — the browser dedups.
         // resolveSrc is synchronous: a warmed blob: URL if the track is in
         // the prefetch window, else the network stream URL.
+        //
+        // Claim *before* the src assignment, so the player bar, Media
+        // Session and scrobble producer switch to this track on the same
+        // tick the audio does — even if the matching sync op never makes
+        // it out (dead socket) or takes a slow round-trip.
+        claimTrack(track.id);
         a.src = resolveSrc(track.id);
         startTsRef.current = performance.now();
         void a.play().catch(() => {});
@@ -656,7 +715,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audio,
     outputEnabled,
     setOutputEnabled,
-    currentTrackId,
+    playingTrackId,
+    claimTrack,
     maybeEmitSkip,
     resolveSrc,
     ensureUrl,
