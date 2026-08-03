@@ -24,6 +24,11 @@ interface TrackRowProps {
    *  title. Defaults to `showAlbum` — the same "list spans multiple
    *  albums" signal — so consumers don't usually need to set it. */
   showCover?: boolean;
+  /** When true, render the track's total play count before the duration.
+   *  Only the artist page's "most played" list sets this — elsewhere the
+   *  number is noise, and in a list that isn't ordered by it, actively
+   *  confusing. */
+  showPlayCount?: boolean;
   onPlay: (index: number) => void;
   /** Extra entries prepended to this row's ⋯ menu (e.g. the Playlist
    *  page's "remove from playlist"). Passed straight to TrackRowMenu. */
@@ -35,7 +40,17 @@ interface TrackRowProps {
 
 export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
   function TrackRow(
-    { track, index, isPlaying, showAlbum, showCover, onPlay, extraMenuItems, ...rest },
+    {
+      track,
+      index,
+      isPlaying,
+      showAlbum,
+      showCover,
+      showPlayCount = false,
+      onPlay,
+      extraMenuItems,
+      ...rest
+    },
     ref,
   ) {
     const t = track;
@@ -133,6 +148,14 @@ export const TrackRow = forwardRef<HTMLTableRowElement, TrackRowProps>(
             ) : (
               (t.album ?? "—")
             )}
+          </td>
+        )}
+        {showPlayCount && (
+          <td className="col-plays">
+            {/* An unplayed track can only appear here as filler beside
+                played ones (mostPlayed filters zeroes), so "—" is the
+                honest cell rather than a fabricated 0. */}
+            {t.playCount != null && t.playCount > 0 ? t.playCount : "—"}
           </td>
         )}
         <td className="col-time">{fmtDuration(t.duration)}</td>
