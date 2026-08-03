@@ -312,11 +312,39 @@ Service-Worker + Cache-API approach because the gateway stream
 endpoint has no HTTP Range support, so the browser must seek locally
 against a stored file.
 
-Played tracks are auto-cached (regular budget); "save for offline"
-pins (pinned budget) — mirroring CLI semantics. `downloadQuality`
-(original | opus128 | mp3128, in `cacheSettings.ts`) transcodes-to-fit
-via the `/rest/*` proxy's `format`/`maxBitRate` params. Budget sliders
-live in the Storage settings panel; lowering a cap evicts immediately.
+Tracks around the cursor are auto-cached (regular budget); "save for
+offline" pins (pinned budget) — mirroring CLI semantics.
+`downloadQuality` (original | opus128 | mp3128, in `cacheSettings.ts`)
+transcodes-to-fit via the `/rest/*` proxy's `format`/`maxBitRate`
+params. Budget sliders live in the Storage settings panel; lowering a
+cap evicts immediately.
+
+### The download pass, and why it isn't cache-on-play
+
+Auto-caching runs as a debounced pass over the queue window
+(`DOWNLOAD_AHEAD` items ahead, `PREFETCH_BEHIND` behind), not on the
+track you just started. The selection rule is
+`cache/prefetchWindow.ts:downloadTargets`.
+
+It used to fetch on play, which meant an uncached track was pulled
+**twice at once** — the `<audio>` element streaming it, and the cache
+downloading it — racing each other for the same link. On mobile data
+that showed up as two 2,026,005-byte requests for one 2 MB song, one
+carrying `access_token` (the element) and one not (the cache).
+
+So the pass deliberately **skips the track at the cursor while it is not
+blob-backed**: that means the element is streaming it right now, and
+downloading it is precisely the duplicate. It becomes eligible on the
+next advance, when it falls into the behind-window and its stream has
+finished. Fetching one track *ahead* costs the same bytes as fetching
+the current one late, except those bytes replace the next streaming
+fetch instead of duplicating this one — so steady-state playback through
+a queue is one fetch per track instead of two.
+
+`DOWNLOAD_SETTLE_MS` debounces the pass so skipping through six tracks
+downloads only where you land, and `cacheTrack` is inflight-deduped so
+the pass, a bulk "cache liked" sweep and a manual download can't each
+pull the same file.
 
 The service worker (vite-plugin-pwa, `autoUpdate`) precaches the app
 shell only — API routes are NetworkOnly and audio bypasses the SW

@@ -31,6 +31,8 @@ import {
   type PinOutcome,
 } from "./audioCache";
 import { loadCacheSettings, qualityParams } from "./cacheSettings";
+import { downloadTargets } from "./prefetchWindow";
+import { useOnline } from "./useOnline";
 
 // Fetch a track at the user's configured offline quality and return the
 // triple to store it under. Settings are read at call time (cheap
@@ -44,9 +46,25 @@ async function fetchAtConfiguredQuality(trackId: string) {
 
 // How many upcoming queue items to pre-resolve into blob URLs (plus the one
 // behind, for a quick prev). Bounds the number of live object URLs / pinned
-// Blobs held in memory at once.
+// Blobs held in memory at once. Resolving is cheap — it only makes URLs for
+// blobs that are *already* stored.
 const PREFETCH_AHEAD = 3;
 const PREFETCH_BEHIND = 1;
+
+// How many upcoming queue items to actually *download*.
+//
+// Deliberately smaller than the resolve window: this spends bandwidth on
+// tracks the user may still skip past, and one track ahead is enough to make
+// the next advance play from a blob. Keeping it at 1 means the download pass
+// never moves more bytes than the old cache-on-play did — it just moves them
+// early enough to replace the streaming fetch instead of duplicating it.
+const DOWNLOAD_AHEAD = 1;
+
+// Let the queue window settle before spending bandwidth. Skipping through six
+// tracks used to fire six downloads; now only wherever you land survives the
+// debounce. Also keeps the pass from competing with the *current* track's
+// first seconds, which is when a slow link hurts most.
+const DOWNLOAD_SETTLE_MS = 3_000;
 
 interface AudioCacheCtx {
   /** Synchronous: a blob: URL if already warmed, else the network stream URL.
@@ -83,13 +101,16 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
   const { state } = useSync();
   const items = state.playback.queue.items;
   const cursor = state.playback.now_playing_index;
+  // Gates the download pass, and re-triggers it when connectivity returns
+  // to a queue that hasn't otherwise changed.
+  const online = useOnline();
 
   // trackId -> object URL. A ref (not state) because playback reads it
   // synchronously and we don't want renders on every warm/revoke.
   const urls = useRef<Map<string, string>>(new Map());
-  // Dedup concurrent ensureUrl / cache-on-play for the same track.
+  // Dedup concurrent ensureUrl / download for the same track.
   const urlInflight = useRef<Map<string, Promise<string | null>>>(new Map());
-  const fetchInflight = useRef<Set<string>>(new Set());
+  const fetchInflight = useRef<Map<string, Promise<"fetched" | "hit">>>(new Map());
 
   const [downloadedIds, setDownloadedIds] = useState<ReadonlySet<string>>(new Set());
   const [revision, setRevision] = useState(0);
@@ -138,66 +159,62 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const cacheOnPlay = useCallback(
-    async (trackId: string) => {
-      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
-      if (fetchInflight.current.has(trackId)) return;
-      fetchInflight.current.add(trackId);
-      try {
-        const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
-        await cache.put({ trackId, bitrate, codec }, blob);
-        bump();
-      } catch {
-        /* offline / auth / network — leave the track uncached */
-      } finally {
-        fetchInflight.current.delete(trackId);
-      }
-    },
-    [cache, bump],
-  );
+  /** Is this track backed by a warmed blob: URL? If not, `resolveSrc` handed
+   *  the element a network stream URL and the browser is fetching it now. */
+  const hasUrl = useCallback((trackId: string) => urls.current.has(trackId), []);
 
   const notePlayed = useCallback(
     (trackId: string) => {
       void (async () => {
         const meta = await cache.getMetaByTrack(trackId);
-        if (meta) {
-          await cache.touch(meta.key);
-          return;
-        }
-        await cacheOnPlay(trackId);
+        if (meta) await cache.touch(meta.key);
+        // A miss is deliberately *not* fetched here. It used to be, which
+        // meant every uncached track was pulled twice at once — once by the
+        // <audio> element streaming it and once by this. The download pass
+        // below fetches around the cursor instead, early enough that the
+        // next advance plays from the blob rather than the network.
       })();
     },
-    [cache, cacheOnPlay],
+    [cache],
   );
 
   const cacheTrack = useCallback(
-    async (trackId: string): Promise<"fetched" | "hit"> => {
-      const meta = await cache.getMetaByTrack(trackId);
-      if (meta) {
-        await cache.touch(meta.key);
-        return "hit";
-      }
-      const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
-      await cache.put({ trackId, bitrate, codec }, blob);
-      bump();
-      return "fetched";
+    (trackId: string): Promise<"fetched" | "hit"> => {
+      // Deduped like ensureUrl: the download pass, a bulk "cache liked"
+      // sweep and a manual download can all name the same track, and each
+      // extra fetch is a whole audio file.
+      const pending = fetchInflight.current.get(trackId);
+      if (pending) return pending;
+      const p = (async (): Promise<"fetched" | "hit"> => {
+        const meta = await cache.getMetaByTrack(trackId);
+        if (meta) {
+          await cache.touch(meta.key);
+          return "hit";
+        }
+        const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
+        await cache.put({ trackId, bitrate, codec }, blob);
+        bump();
+        return "fetched";
+      })().finally(() => fetchInflight.current.delete(trackId));
+      fetchInflight.current.set(trackId, p);
+      return p;
     },
     [cache, bump],
   );
 
   const download = useCallback(
     async (trackId: string): Promise<PinOutcome> => {
-      let meta = await cache.getMetaByTrack(trackId);
-      if (!meta) {
-        // Fetch then store; let a network failure propagate to the caller.
-        const { blob, codec, bitrate } = await fetchAtConfiguredQuality(trackId);
-        meta = await cache.put({ trackId, bitrate, codec }, blob);
-      }
+      // Routed through cacheTrack so a download pass already fetching this
+      // track is joined rather than raced. A network failure still
+      // propagates to the caller, which is what the UI reports.
+      await cacheTrack(trackId);
+      const meta = await cache.getMetaByTrack(trackId);
+      if (!meta) throw new Error(`download: ${trackId} was not stored`);
       const outcome = await cache.pin(meta.key);
       await refreshDownloaded();
       return outcome;
     },
-    [cache, refreshDownloaded],
+    [cache, cacheTrack, refreshDownloaded],
   );
 
   const removeDownload = useCallback(
@@ -253,6 +270,40 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       if (!window.has(id) && id !== currentId) revoke(id);
     }
   }, [items, cursor, ensureUrl, revoke]);
+
+  // Download pass: pull the tracks around the cursor into the cache so the
+  // *next* advance plays from a blob instead of fetching over the network
+  // again.
+  //
+  // This replaces cache-on-play, which fetched a track at the same moment the
+  // <audio> element was streaming it — two full downloads of the same song,
+  // racing each other for the link. Measured on mobile data 2026-08-03: two
+  // 2,026,005-byte requests for one 2 MB track, one carrying `access_token`
+  // (the element) and one not (the cache). Fetching one track *ahead* costs
+  // the same bytes as fetching the current one late, but they replace the
+  // streaming fetch instead of duplicating it.
+  //
+  // Deliberately skipped: the track the element is streaming right now (in
+  // the window but not blob-backed). Downloading that one is exactly the
+  // duplicate this pass exists to remove; it becomes eligible on the next
+  // advance, by which point its stream has finished and PREFETCH_BEHIND
+  // still covers it.
+  useEffect(() => {
+    if (cursor === null) return;
+    if (!online) return;
+    const timer = window.setTimeout(() => {
+      const targets = downloadTargets(
+        items,
+        cursor,
+        { behind: PREFETCH_BEHIND, ahead: DOWNLOAD_AHEAD },
+        hasUrl,
+      );
+      // Failures are expected and uninteresting (offline mid-pass, auth
+      // blip): the track simply stays uncached and the next pass retries.
+      for (const id of targets) void cacheTrack(id).catch(() => {});
+    }, DOWNLOAD_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [items, cursor, online, cacheTrack, hasUrl]);
 
   // Revoke everything on unmount.
   useEffect(() => {
