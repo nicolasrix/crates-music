@@ -35,7 +35,10 @@ owner (id=1, admin). The protected surface is split into two tiers:
   control, ratings/events, `whoami`.
 - **Admin-only** (`require_admin`, 403 otherwise) — `/v1/admin/*`,
   `/v1/diagnostics/*`, and recommender maintenance (`refit_whitening`,
-  `enqueue`).
+  `enqueue`). One exception:
+  [`POST /v1/diagnostics/client_events`](#post-v1diagnosticsclient_events)
+  is any-authenticated, because a client uploading its own RUM is not an
+  administrative action — see the note there.
 
 Real accounts (admin/user) are provisioned by an admin (see
 [`/v1/admin/users`](#post-v1adminusers)); guests come later (PR D).
@@ -972,6 +975,14 @@ the `/rest/scrobble` interceptor.
 
 Browser RUM batch upload (web vitals + custom marks).
 
+**Any authenticated principal** — the one endpoint under
+`/v1/diagnostics/*` that is not admin-only. A client reporting its own
+timings is not an administrative action, and gating it meant every
+non-admin device silently 403'd its telemetry — exactly the devices whose
+latency is worth measuring. The sibling `GET` on this path stays
+admin-only (it exposes every session's page paths and user agents) and
+enforces that inside the handler rather than at the route layer.
+
 Body:
 ```json
 {
@@ -999,6 +1010,10 @@ Response: `{"accepted": N}`.
 
 Most recent RUM events, newest received first. Two timestamps preserved:
 client-supplied `occurred_ms` and gateway-stamped `received_ms`.
+
+**Admin-only**, self-enforced in the handler (403 otherwise) because the
+path is registered in the any-authenticated router for the sake of its
+`POST` sibling.
 
 | Query param | Default | Description |
 |---|---|---|
