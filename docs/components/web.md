@@ -388,6 +388,39 @@ module load (Chromium fires it once, early) and surfaces an "Install
 as app" button in Settings; iOS gets a Share → Add to Home Screen
 hint instead.
 
+### System bars and `--safe-b`
+
+`index.html` sets `viewport-fit=cover`, so the app paints **behind** the
+system chrome — the iPhone notch and home indicator, Android's
+gesture-nav pill. Nothing in the layout shrinks to avoid them: `.shell`
+is a full `100dvh` grid and the player bar pads *itself* back out. That
+makes the inset value load-bearing.
+
+Every bottom-anchored rule reads `--safe-b` (`tokens.css`), never raw
+`env(safe-area-inset-bottom)` — the player bar's height and padding, the
+toast stack's offset, the mobile sidebar drawer. Change the token, not
+the call sites.
+
+The token exists because **Chrome on Android reports
+`env(safe-area-inset-bottom): 0` for the gesture bar in an installed
+PWA** while still honouring `viewport-fit=cover`: we opt into
+edge-to-edge and then compensate by zero, so the pill lands on top of the
+player bar (reported on a Pixel, 2026-08-03 — the whole bar was
+unreachable). No API reports the real height when `env()` lies, so
+`--safe-b` applies a **floor** of 32px instead, scoped to
+`(display-mode: standalone) and (pointer: coarse)`:
+
+- iOS reports a true 34px, which is larger, so `max()` leaves it alone.
+- A desktop browser or an ordinary mobile tab — where Chrome insets the
+  viewport itself and 0 *is* correct — never matches the query.
+- 32px covers Android gesture nav (24–32dp). A device on three-button
+  navigation (48dp) would still clip; bump the floor if that turns up.
+
+The top inset is deliberately not compensated — Chrome lays the PWA out
+below the status bar in practice, and padding it too would double the
+gap. If content ever appears under the status bar, that's the same bug
+at the other end and wants a matching `--safe-t`.
+
 ## Build
 
 ```bash

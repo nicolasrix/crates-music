@@ -23,8 +23,12 @@ body {
 
 /* App shell — sidebar + main + bottom-fixed player. The player row is
    `auto` (not a fixed track) so the bar can grow for the two-row mobile
-   layout and the iOS home-indicator safe-area; on desktop .player keeps
-   height: var(--player-h), so the resolved track height is identical. */
+   layout and the bottom safe-area inset (--safe-b); on desktop that inset
+   is 0, so the resolved track height is exactly var(--player-h).
+
+   Note the shell is the full 100dvh *including* whatever the system bars
+   paint over (viewport-fit=cover). Nothing here shrinks to avoid them —
+   the player pads itself instead, which is why --safe-b has to be right. */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
@@ -822,7 +826,10 @@ button.cover-thumb:focus-visible .thumb-play {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(var(--player-h) + 12px);
+  /* Clears the bar's real height, which includes the bottom safe-area
+     inset — the ≤640px override below pins it higher again for the
+     two-row layout. */
+  bottom: calc(var(--player-h) + var(--safe-b) + 12px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1032,7 +1039,13 @@ button.cover-thumb:focus-visible .thumb-play {
   background: color-mix(in oklab, var(--surface-0) 88%, transparent);
   backdrop-filter: blur(20px);
   border-top: 1px solid var(--border-subtle);
-  height: var(--player-h);
+  /* Taller by the system-chrome inset, and padded by the same amount, so
+     the controls sit *above* the home indicator / gesture pill instead of
+     under it. The shell is a 100dvh grid whose player row is `auto`, so
+     the extra height comes out of main, not off the bottom of the screen.
+     Both terms collapse to the plain bar on desktop, where --safe-b is 0. */
+  height: calc(var(--player-h) + var(--safe-b));
+  padding-bottom: var(--safe-b);
 }
 /* The bar carries the *playing* track's tint (mounted by PlayerBar via
    artAttrs), independent of whichever page is open above it. */
@@ -1889,7 +1902,7 @@ a.search-hero-title:hover {
       transform var(--dur-2) var(--ease-out-soft),
       visibility 0s var(--dur-2);
     border-right: 1px solid var(--border-subtle);
-    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(var(--space-5) + var(--safe-b));
   }
   .shell > .sidebar.is-open {
     transform: translateX(0);
@@ -1951,7 +1964,7 @@ a.search-hero-title:hover {
     height: auto;
     gap: var(--space-2);
     row-gap: 2px;
-    padding: 8px var(--space-3) calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 8px var(--space-3) calc(8px + var(--safe-b));
   }
   .np { grid-area: np; }
   .transport-col { display: contents; }
@@ -1962,7 +1975,7 @@ a.search-hero-title:hover {
   /* The two-row player is height:auto here, so --player-h understates
      it — pin the toast stack above the real-world worst case. */
   .toast-viewport {
-    bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(118px + var(--safe-b));
   }
   /* Squeeze-outs: the now-playing ⋯-menu (same actions are on every
      row), the rate-rec / rating pills (hidden at ≤900px already), the

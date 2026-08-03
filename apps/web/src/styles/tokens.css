@@ -291,6 +291,34 @@
   --player-h-mobile: 84px;
   --content-max: 1280px;
   --header-h: 56px;
+
+  /* Bottom system-chrome inset — the iOS home indicator, Android's
+     gesture-nav pill. `viewport-fit=cover` (index.html) makes us paint
+     *behind* that chrome, so anything anchored to the bottom has to pad
+     itself back out. Everything bottom-anchored uses this, never raw
+     env(): see the standalone override below for why. */
+  --safe-b: env(safe-area-inset-bottom, 0px);
+}
+
+/* Chrome on Android reports `env(safe-area-inset-bottom): 0` for the
+   gesture-navigation bar in an installed PWA, while still honouring
+   viewport-fit=cover and painting under it. Net effect: we opt into
+   edge-to-edge and then compensate by zero, so the system pill sits on
+   top of the player bar — reported on a Pixel, 2026-08-03, where the
+   whole bar was unreachable behind the nav chrome.
+
+   There is no API that reports the real height when env() lies, so this
+   applies a floor instead: 32px clears Android's gesture bar (24–32dp
+   across devices). Where env() *is* correct the max() keeps the true
+   value — iOS reports 34px, which is larger and wins untouched.
+
+   Scoped to standalone + coarse pointer so a desktop browser and an
+   ordinary mobile tab (where Chrome insets the viewport itself, and 0 is
+   the right answer) are unaffected. */
+@media (display-mode: standalone) and (pointer: coarse) {
+  :root {
+    --safe-b: max(env(safe-area-inset-bottom, 0px), 32px);
+  }
 }
 
 :root[data-theme="light"] {
