@@ -123,6 +123,93 @@ async fn unauthenticated_is_rejected_on_admin_route() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Browser RUM ingest is any-authenticated while the read side stays
+/// admin-only — the two verbs live on one path with different tiers, so
+/// they're asserted together.
+///
+/// The gate used to be route-level, which silently 403'd every non-admin
+/// device's telemetry. That is the wrong way round: the phone reporting a
+/// bad `playback.start` is exactly the client whose numbers we need, and
+/// it has nothing administrative about it.
+#[tokio::test]
+async fn non_admin_may_post_rum_but_not_read_it() {
+    const RUM_ROUTE: &str = "/v1/diagnostics/client_events";
+
+    let oauth = store_with_owner_and_client().await;
+    let user_id = oauth
+        .insert_user(NewUser {
+            username: Some("dave".to_string()),
+            display_name: Some("Dave".to_string()),
+            role: "user".to_string(),
+            password_hash: Some("$argon2id$dummy".to_string()),
+            host_user_id: None,
+            expires_at_unix_ms: None,
+        })
+        .await
+        .unwrap();
+    let user = oauth
+        .mint_access_token_for_user("web", None, Duration::from_hours(1), Some(user_id))
+        .await
+        .unwrap();
+    let admin = oauth
+        .mint_access_token_for_user("web", None, Duration::from_hours(1), Some(1))
+        .await
+        .unwrap();
+
+    let app = build_router(
+        common::build_state_with_oauth(common::test_config(), oauth, SetupToken::none()).await,
+    );
+
+    let batch = serde_json::json!({
+        "events": [{
+            "session_id": "s-dave",
+            "occurred_ms": 1_700_000_000_000i64,
+            "name": "playback.start",
+            "value_ms": 4950.0,
+            "page_path": "/album/abc",
+        }]
+    });
+    let post = app
+        .clone()
+        .oneshot(
+            Request::post(RUM_ROUTE)
+                .header(AUTHORIZATION, format!("Bearer {}", user.token))
+                .header("content-type", "application/json")
+                .body(Body::from(batch.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK, "a user must be able to report its own RUM");
+
+    let read_as_user = app
+        .clone()
+        .oneshot(
+            Request::get(RUM_ROUTE)
+                .header(AUTHORIZATION, format!("Bearer {}", user.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read_as_user.status(),
+        StatusCode::FORBIDDEN,
+        "the read side exposes every session's paths — admin only"
+    );
+
+    let read_as_admin = app
+        .oneshot(
+            Request::get(RUM_ROUTE)
+                .header(AUTHORIZATION, format!("Bearer {}", admin.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read_as_admin.status(), StatusCode::OK, "admin still reads RUM");
+}
+
 #[tokio::test]
 async fn whoami_reports_role_and_identity() {
     let oauth = store_with_owner_and_client().await;

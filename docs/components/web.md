@@ -220,6 +220,32 @@ scrobbles are batched into `/v1/events` every 5s. Media Session
 action handlers (play/pause/next/prev/seek) + `setPositionState`
 drive lock-screen / notification controls on phones.
 
+### Two notions of "the current track"
+
+`PlayerContext` tracks these separately, and the distinction is
+load-bearing:
+
+- **`currentTrackId`** — `queue.items[now_playing_index]`, i.e. what
+  *sync state* says the room is on. Drives queue mechanics: dislike
+  auto-skip, next/prev bounds, the auto-advance index.
+- **`loadedTrackId`** (`claimTrack`) — what this device's `<audio>`
+  element is actually pointed at. Drives everything that describes
+  what you can *hear*: player bar, Media Session metadata, scrobbles,
+  the skip signal, the `playback.start` mark.
+
+They agree whenever sync is healthy. They diverge whenever it isn't,
+because step 1 above is synchronous while the matching sync op takes a
+WS round-trip — so a click during an outage plays the right audio
+against a stale cursor. Reading the cursor for playback identity is how
+a play of one track ended up on another track's play count (and in the
+recommender's recency clock) on 2026-08-03. `claimTrack` is called at
+every `src` assignment and also resets the per-track scrobble flags, so
+those two can't drift apart either.
+
+A silent remote (`outputEnabled` false) never loads audio, so
+`loadedTrackId` stays null and both notions fall back to the cursor —
+which is correct: it should display and report the room's track.
+
 ### Per-device audio output (`player/outputDevice.ts`)
 
 Two devices signed into the same account share one room and both obey
@@ -299,6 +325,15 @@ versions:
 After a PWA relaunch-from-snapshot, queue items arrive as bare ids; a
 `getSong` backfill effect re-hydrates `trackMeta` so the player bar,
 Media Session, and row menus aren't blank.
+
+**Reconnect.** `onclose` schedules a retry on the backoff in
+`sync/reconnect.ts` (500 ms doubling to a 30 s cap, with equal jitter so
+devices that dropped together don't return together), and `online` /
+`visibilitychange→visible` reconnect immediately rather than waiting the
+backoff out. This is not optional polish: a phone changes network
+constantly, and without it a single WiFi→cellular handover wedged the tab
+on a stale snapshot permanently. Ops submitted while the socket is down
+buffer in `outboxRef` and flush on the next `onopen`.
 
 ## Offline cache + PWA (`cache/`, `pwa/`)
 
