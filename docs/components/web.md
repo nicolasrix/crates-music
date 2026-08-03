@@ -291,6 +291,49 @@ Enforcement is *also* server-side and always-on (dislikes are excluded from
 recommendations, likes boost them) — the client maps only drive the UI and
 the optimistic auto-skip.
 
+## Row menus (`components/RowMenu.tsx`)
+
+The "⋯" popover carried by every result surface — track rows, album rows,
+artist rows, and all three search hero cards. One shell, three action
+lists.
+
+- **`RowMenu`** owns the trigger, placement, portalling, and dismissal.
+  Callers pass entries through a render prop that receives `close`.
+- **`rowMenuCoords.ts`** is the placement rule, split out so it can be
+  unit-tested as arithmetic. It right-aligns the panel to the trigger,
+  flips it *above* when it wouldn't fit below, and clamps into the
+  viewport. The flip anchors by `bottom` rather than `top` specifically
+  so the panel's real height never has to be predicted — it varies from
+  3 entries (player) to ~9 (album menu), and one `MENU_H_GUESS` can't
+  serve both.
+- **`RowMenuItem` / `RowMenuSep` / `RowMenuExtras`** are the entry
+  primitives. `RowMenuExtras` renders caller-supplied entries plus their
+  trailing separator, or nothing — the Queue page uses it for reorder
+  actions, which are the only touch-reachable path on phones.
+- **`PlaylistPicker.tsx`** holds the "add to playlist…" submenu *and*
+  `usePlaylistAdd`, the mutation shared by all three menus. The submenu
+  replaces the root body in place rather than opening a second floating
+  panel — nested fixed-position elements fight both outside-click
+  detection and the viewport clamping above.
+
+Two things that look incidental but aren't:
+
+- **The panel body mounts only while open.** That's what makes the
+  playlist submenu reset to the root view on every open without the
+  shell knowing such state exists.
+- **The menus resolve their tracklist at click time, not at render.**
+  An album row only holds an `Album`; every action needs songs. Each one
+  fetches through the shared `["album", id]` query key, which is the
+  album page's own — so a warm cache resolves in a microtask and the
+  click's transient user activation survives into `audio.play()`.
+  Resolving eagerly instead would fire a `getAlbum` per visible row.
+
+Artist menus are deliberately shorter than album menus: an artist has no
+canonical tracklist (`sync/artistTracks.ts` synthesises one from top
+songs, falling back to a bounded slice of the discography), which is
+right for "play" and "queue" but a surprising thing to silently pin to
+disk or paste into a playlist. Those stay album-level.
+
 ## RUM (`rum/`)
 
 Browser-side performance telemetry. Two emitters feed
@@ -426,7 +469,7 @@ at the other end and wants a matching `--safe-t`.
 ```bash
 npm run build
 # Outputs to apps/web/dist/
-# Main bundle: ~144 KB JS gzipped; the 3-D latent-space view is
+# Main bundle: ~151 KB JS gzipped; the 3-D latent-space view is
 # code-split into a lazy ~246 KB chunk (three.js) loaded on demand.
 ```
 
@@ -438,11 +481,12 @@ The docker gateway image bakes the built SPA in.
 
 ## Tests
 
-207 Vitest tests across 19 files at last count — pure-logic helpers
+279 Vitest tests across 31 files at last count — pure-logic helpers
 (search ranking, latent-space binning, sync reducer, recommend
 filter shape, scrobble/skip producers, autoplay seeds + settings,
 auto-skip predicates, output-device preference, install prompt,
-settings nav) plus the IndexedDB audio-cache suite (fake-indexeddb).
+settings nav, row-menu placement, bulk-download outcomes) plus the
+IndexedDB audio-cache suite (fake-indexeddb).
 React-component tests and Playwright end-to-end suites are not yet
 in. The build still runs `tsc -b` which catches refactor breakage.
 

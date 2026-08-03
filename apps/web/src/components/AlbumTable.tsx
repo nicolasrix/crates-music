@@ -10,10 +10,13 @@
 //
 // Leading column is a square album-cover thumbnail, matching the
 // AlbumHeroCard convention so the hero strip and table view feel like
-// two presentations of the same data.
+// two presentations of the same data. Trailing column is the ⋯ menu,
+// matching TrackTable — queue / station / rating / offline actions
+// without a trip to the album page.
 
 import { Play } from "lucide-react";
 import { Album } from "../api/types";
+import { AlbumRowMenu } from "./AlbumRowMenu";
 import { Cover } from "./Cover";
 import { Link, navigate } from "../router";
 
@@ -33,6 +36,7 @@ export function AlbumTable({ albums, onPlayAlbum }: Props) {
           <th className="col-title">album</th>
           <th className="col-artist">artist</th>
           <th className="col-time">year</th>
+          <th className="col-menu" aria-hidden />
         </tr>
       </thead>
       <tbody>
@@ -81,6 +85,9 @@ export function AlbumTable({ albums, onPlayAlbum }: Props) {
               )}
             </td>
             <td className="col-time">{a.year ?? "—"}</td>
+            <td className="col-menu" onClick={(e) => e.stopPropagation()}>
+              <AlbumRowMenu album={a} />
+            </td>
           </tr>
         ))}
       </tbody>

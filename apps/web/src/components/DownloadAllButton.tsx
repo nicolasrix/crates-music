@@ -1,12 +1,14 @@
-// Bulk "download for offline" action for an album or playlist. Pins each
-// track via the AudioCacheContext, tolerating individual failures, and shows
-// inline progress. Designed to drop into a hero `.actions` row next to the
+// Bulk "download for offline" action for an album or playlist. The pin
+// loop itself lives in cache/downloadTracks (the album ⋯ menu runs the
+// same one); this is the hero-row button around it, adding inline N/M
+// progress. Designed to drop into a hero `.actions` row next to the
 // play / station / queue icon buttons.
 
 import { Download } from "lucide-react";
 import { useState } from "react";
 
 import { useAudioCache } from "../cache/AudioCacheContext";
+import { downloadTracks } from "../cache/downloadTracks";
 import { formatBytes } from "../cache/format";
 import { useToast } from "../toast/ToastContext";
 import type { Track } from "../api/types";
@@ -25,38 +27,25 @@ export function DownloadAllButton({
   async function downloadAll() {
     if (progress || tracks.length === 0) return;
     setProgress({ done: 0, total: tracks.length });
-    let budgetHit = false;
-    let failed = 0;
-    for (let i = 0; i < tracks.length; i++) {
-      try {
-        const outcome = await cache.download(tracks[i]!.id);
-        if (outcome.kind === "would-exceed-budget") {
-          budgetHit = true;
-          toast(
-            `Download budget full — short by ${formatBytes(outcome.overBy)}. ` +
-              `Raise it in Settings to finish.`,
-            { variant: "error" },
-          );
-          break;
-        }
-      } catch {
-        // Tolerate per-track failures (offline / catalog gap) but count
-        // them — completing "N/N" while tracks are missing lies to the
-        // user about what's actually playable offline.
-        failed++;
-      }
-      setProgress({ done: i + 1, total: tracks.length });
-    }
+    const result = await downloadTracks(
+      cache,
+      tracks.map((t) => t.id),
+      (done, total) => setProgress({ done, total }),
+    );
     setProgress(null);
-    if (!budgetHit) {
-      if (failed > 0) {
-        toast(
-          `saved ${tracks.length - failed}/${tracks.length} for offline — ${failed} failed`,
-          { variant: "error" },
-        );
-      } else {
-        toast(`${tracks.length} tracks saved for offline`, { variant: "success" });
-      }
+    if (result.shortBy !== null) {
+      toast(
+        `Download budget full — short by ${formatBytes(result.shortBy)}. ` +
+          `Raise it in Settings to finish.`,
+        { variant: "error" },
+      );
+    } else if (result.failed > 0) {
+      toast(
+        `saved ${result.saved}/${tracks.length} for offline — ${result.failed} failed`,
+        { variant: "error" },
+      );
+    } else {
+      toast(`${result.saved} tracks saved for offline`, { variant: "success" });
     }
   }
 

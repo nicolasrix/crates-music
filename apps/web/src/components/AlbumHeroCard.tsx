@@ -10,6 +10,7 @@
 
 import { Play } from "lucide-react";
 import { Album } from "../api/types";
+import { AlbumRowMenu } from "./AlbumRowMenu";
 import { Cover } from "./Cover";
 import { Link } from "../router";
 
@@ -67,6 +68,9 @@ export function AlbumHeroCard({
             </>
           )}
         </div>
+      </div>
+      <div className="search-hero-menu">
+        <AlbumRowMenu album={album} />
       </div>
     </div>
   );
