@@ -212,7 +212,7 @@ raw top-N can be pulled in (`rescore_ann_by_preference` + `affinity_bonuses`
 in `recommend.rs`):
 
 - **Decayed affinity** (`preference` module, gated by
-  `[recommend].preference_enabled`, default off). Each track carries a
+  `[recommend].preference_enabled`, default on). Each track carries a
   half-life-decayed counter (`track_affinity`) fed by likes/plays (positive)
   and skips (negative). `preference_bonus` maps `affinity ∈ [-1, 1]` to
   `β · affinity` with `β = preference_weight` (default `0.15`). Always
@@ -227,6 +227,25 @@ in `recommend.rs`):
 These two channels are deliberately separate — folding ratings into the
 decaying affinity would let a dislike fade and would double-count. See
 `RatingStore` / `TrackAffinityStore` below.
+
+**Bonus units.** Every bonus above is tuned on the **cosine** scale — each
+reads as "treat this candidate as if it measured `bonus` more similar". That
+is directly addable on the single-seed paths (`/next`, `from-any`), whose
+score *is* one cosine. `from-seeds` is not: it scores `Σ wᵢ·simᵢ`, so the
+gateway multiplies the whole bonus map by `seed_weight_total` (the summed
+weight of the seeds that produced results) before applying it. The identity
+is just distributivity — adding `b` to every seed's similarity adds `b·Σwᵢ`
+to the score.
+
+Skipping that conversion does not merely weaken preference on the autoplay
+path, it inverts it: the tethered-drift client weights anchors at `3.0` and
+frontier-tail seeds at `~0.05`, so a flat bonus barely moves a candidate
+several heavy seeds agree on while swamping one surfaced by a single faint
+frontier seed — strongest exactly where the acoustic evidence is weakest.
+The factor is summed over *all* queried seeds, not per candidate, so it stays
+request-constant; scaling it per candidate would instead scale with
+centrality and amplify the candidates the aggregation is already most sure
+of. Pinned by `from_seeds_scales_preference_bonus_into_sigma_similarity_units`.
 
 ### 4c. Anchor leash — travelling stations
 

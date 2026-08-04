@@ -120,8 +120,8 @@ override when running CLaMP 3.
 |---|---|---|---|---|
 | `embedding_dim` | usize | no | `512` | Must match the embedder backend's output dim. CLAP = 512, CLaMP 3 = 768. The ANN sidecar is not migratable across a dim change — wipe `gateway-state.ann` + `.ann.keys` when changing it. |
 | `whitening_enabled` | bool | no | `true` | All-but-the-Top whitening of the content ANN. De-cones the anisotropic CLaMP 3 vectors and enables cross-modal text-station centering. |
-| `preference_enabled` | bool | no | `false` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. |
-| `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. |
+| `preference_enabled` | bool | no | `true` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. Defaulted off until the bonus was made scale-correct on the multi-seed `from-seeds` path (see `preference_weight`); set `false` for pure acoustic + explicit-likes ranking. |
+| `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. **Expressed in cosine units**, so it is directly comparable to a similarity on `/next` and `from-any`; on `from-seeds` (score = `Σ wᵢ·simᵢ`) the gateway multiplies it by the summed seed weight to keep the same meaning — raise/lower this knob, never compensate for the scale by hand. |
 | `affinity_half_life_days` | f32 | no | `30.0` | Half-life of the per-track affinity decayed counter. Older signal fades toward zero with this half-life so taste can drift. |
 | `like_bonus` | f32 | no | `0.15` | Relevance boost added to a **liked track** (`PUT /v1/library/rating`). Distinct from `preference_*`: the like/dislike channel is durable, never decays, and is **always-on** regardless of `preference_enabled`. A dislike has no knob — it hard-excludes the entity from play entirely. |
 | `like_bonus_album` | f32 | no | `0.06` | Boost added to every track of a **liked album**. Additive with `like_bonus` and `like_bonus_artist`. |
@@ -137,7 +137,7 @@ override when running CLaMP 3.
 [recommend]
 embedding_dim          = 768   # CLaMP 3; default 512 (CLAP)
 whitening_enabled      = true
-preference_enabled     = false # tilt ranking by like/skip/play affinity
+preference_enabled     = true  # tilt ranking by like/skip/play affinity
 preference_weight      = 0.15
 affinity_half_life_days = 30.0
 recently_played_exclude_hours = 4.0  # autoplay: don't re-serve recently-heard tracks
@@ -225,7 +225,7 @@ Cache directory follows the same XDG layout under
 | `MUSIC_GATEWAY_CONFIG` | — | Path to `gateway.toml`. Overridden by `--config` flag. |
 | `RUST_LOG` | `info` | Tracing filter. `RUST_LOG=music_gateway=debug,sqlx=warn` is a good debug starting point. |
 | `RECOMMEND_EMBEDDING_DIM` | — | Consumed by `docker/gateway/gen_config.py` to emit the `[recommend] embedding_dim` section. Unset → no section → gateway defaults to 512. Set `768` for CLaMP 3. |
-| `RECOMMEND_PREFERENCE_ENABLED` | — | `gen_config.py` → `[recommend] preference_enabled`. `true` to turn on affinity re-scoring (see the `[recommend]` table). Unset → gateway default `false`. |
+| `RECOMMEND_PREFERENCE_ENABLED` | — | `gen_config.py` → `[recommend] preference_enabled`. `false` to turn off affinity re-scoring (see the `[recommend]` table). Unset → gateway default `true`. |
 | `RECOMMEND_PREFERENCE_WEIGHT` | — | `gen_config.py` → `[recommend] preference_weight`. Unset → gateway default `0.15`. |
 | `RECOMMEND_AFFINITY_HALF_LIFE_DAYS` | — | `gen_config.py` → `[recommend] affinity_half_life_days`. Unset → gateway default `30.0`. |
 | `RECOMMEND_LIKE_BONUS` | — | `gen_config.py` → `[recommend] like_bonus`. Unset → gateway default `0.15`. |
