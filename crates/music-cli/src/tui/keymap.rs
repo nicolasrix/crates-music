@@ -32,6 +32,9 @@ pub(crate) const KEY_HELP: &[(&str, &str)] = &[
     ("M", "mute / unmute"),
     ("L / D / u", "like / dislike / unrate"),
     ("r", "recommend from now playing → queue"),
+    ("y", "lyrics for the now-playing track"),
+    ("j k / enter", "lyrics: read · seek to line"),
+    ("R", "lyrics: look again (wrong song?)"),
     ("P", "play next (queue: move after current)"),
     ("x / c", "queue: remove / clear upcoming"),
     ("J / K", "queue: move row down / up"),
@@ -93,6 +96,25 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
             }
             _ => None,
         };
+    }
+
+    // Lyric pane: **permeable**, unlike the overlays above. It claims the
+    // reading keys and lets everything else fall through to the global
+    // table, because the whole point of the pane is to be open *while* you
+    // listen — a modal that swallowed space and n/p would make you close it
+    // to skip a track.
+    //
+    // Only the four keys it genuinely repurposes are listed. `esc` and `y`
+    // are deliberately absent: falling through, they already reach
+    // `Msg::Back` and `Msg::ToggleLyrics`, both of which close the pane.
+    if app.overlay == Overlay::Lyrics {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => return Some(Msg::LyricsMove(1)),
+            KeyCode::Char('k') | KeyCode::Up => return Some(Msg::LyricsMove(-1)),
+            KeyCode::Enter => return Some(Msg::LyricsSeek),
+            KeyCode::Char('R') => return Some(Msg::LyricsRefresh),
+            _ => {}
+        }
     }
 
     // Focused text input: keys type instead of acting.
@@ -173,6 +195,8 @@ pub(crate) fn action_for(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('D') => Some(Msg::Rate(Some(Rating::Dislike))),
         KeyCode::Char('u') => Some(Msg::Rate(None)),
         KeyCode::Char('r') => Some(Msg::RecommendFromNowPlaying),
+        // 'y' for lYrics — 'l' is already the kind/bucket cycle.
+        KeyCode::Char('y') => Some(Msg::ToggleLyrics),
         // Play-next works on any track row (moves within the queue view).
         KeyCode::Char('P') => Some(Msg::PlayNext),
         // Output toggle only matters with a live sync room, but it's
