@@ -218,6 +218,19 @@ mod tests {
     }
 
     #[test]
+    fn real_provider_shape_round_trips() {
+        // Verbatim shape of a live LRCLIB body: `[mm:ss.xx]`, a space
+        // after the bracket, repeated identical text. The space must not
+        // survive into the rendered line.
+        let raw = "[00:44.33] Lake\n[00:50.03] Lake\n[01:01.52] Lake\n";
+        let lines = parse_lrc(raw);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].start_ms, 44_330);
+        assert_eq!(lines[0].text, "Lake");
+        assert_eq!(lines[2].start_ms, 61_520);
+    }
+
+    #[test]
     fn fraction_scale_follows_digit_count() {
         // The bug this guards: treating every fraction as centiseconds
         // makes `.5` mean 50 ms and `.500` mean 5 s.
