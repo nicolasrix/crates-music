@@ -63,6 +63,34 @@
   gap: var(--space-1);
   flex-shrink: 0;
 }
+/* Timing nudge. Reads as one segmented control rather than three loose
+   buttons, so it is obvious the readout belongs to the ± either side of
+   it — and that it is itself clickable (reset). */
+.lyrics-offset {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+}
+.lyrics-offset-value {
+  min-width: 4rem;
+  padding: 0 var(--space-2);
+  background: none;
+  border: none;
+  color: var(--fg-strong);
+  font-size: 0.75rem;
+  /* Tabular figures so the readout doesn't jitter as digits change. */
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.lyrics-offset-value:disabled {
+  color: var(--fg-faint);
+  /* At zero it is a label, not an action — say so with the cursor. */
+  cursor: default;
+}
+
 .lyrics-actions .is-spinning {
   animation: lyrics-spin 900ms linear infinite;
 }
@@ -199,6 +227,15 @@
   }
   .lyrics-body {
     padding: 35vh var(--space-3);
+  }
+  /* The header has to fit a title, a nudge control and two buttons on a
+     phone; the readout is the only part that can give up width. */
+  .lyrics-head {
+    padding: var(--space-3);
+  }
+  .lyrics-offset-value {
+    min-width: 3rem;
+    padding: 0;
   }
   .lyrics-line {
     font-size: 1.125rem;

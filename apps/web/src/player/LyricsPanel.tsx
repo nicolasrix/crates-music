@@ -20,19 +20,27 @@
 //   and only call setState when the *line index* changes — roughly once
 //   every few seconds instead of 60×/s.
 
-import { MicVocal, RefreshCw, X } from "lucide-react";
+import { MicVocal, Minus, Plus, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   LyricsDisabledError,
   LyricsUnavailableError,
   type LyricLine,
   type LyricsDoc,
 } from "../api/lyrics";
+import { useSync } from "../sync/SyncContext";
 import { useToast } from "../toast/ToastContext";
 import { activeLineIndex, HIGHLIGHT_LEAD_MS, sortLines } from "./activeLine";
+import {
+  formatOffset,
+  OFFSET_STEP_MS,
+  readOffset,
+  writeOffset,
+} from "./lyricsOffset";
 import { usePlayer } from "./PlayerContext";
-import { useLyrics } from "./useLyrics";
+import { prefetchLyrics, useLyrics } from "./useLyrics";
 
 /** The button that lives in the player bar, plus the panel it opens. Kept
  *  together so PlayerBar only has to mount one thing. */
@@ -57,9 +65,21 @@ export function LyricsToggle() {
 function LyricsPanel({ onClose }: { onClose: () => void }) {
   const { nowPlaying, audio, isPlaying } = usePlayer();
   const trackId = nowPlaying?.id;
-  const { doc, loading, error, retry, refresh, refreshing, refreshError } =
+  const { doc, offline, loading, error, retry, refresh, refreshing, refreshError } =
     useLyrics(trackId);
   const toast = useToast();
+
+  // Warm the next queue item's lyrics, but only from here — i.e. only while
+  // the panel is actually open. See prefetchLyrics for why this is gated on
+  // the panel rather than fired on every track change.
+  const qc = useQueryClient();
+  const { state } = useSync();
+  const cursor = state.playback.now_playing_index;
+  const nextId =
+    cursor === null ? undefined : state.playback.queue.items[cursor + 1]?.track_id;
+  useEffect(() => {
+    prefetchLyrics(qc, nextId);
+  }, [qc, nextId]);
 
   // Escape closes, matching every other dismissable surface in the app.
   useEffect(() => {
@@ -78,6 +98,15 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
     [doc],
   );
 
+  // Per-track timing nudge. Held in state as well as localStorage so the
+  // highlight re-syncs on the same tick the button is pressed rather than
+  // on the next track change.
+  const [offset, setOffset] = useState(0);
+  const nudge = (delta: number) => {
+    if (!trackId) return;
+    setOffset(writeOffset(trackId, offset + delta));
+  };
+
   const [active, setActive] = useState(-1);
   // Mirrors `active` so the animation frame can compare without reading
   // state (which would make the effect depend on it and restart the loop).
@@ -94,7 +123,9 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
       return;
     }
     const sync = () => {
-      applyIndex(activeLineIndex(lines, audio.currentTime * 1000 + HIGHLIGHT_LEAD_MS));
+      applyIndex(
+        activeLineIndex(lines, audio.currentTime * 1000 + HIGHLIGHT_LEAD_MS + offset),
+      );
     };
     let raf: number | null = null;
     const tick = () => {
@@ -110,7 +141,7 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
       if (raf !== null) cancelAnimationFrame(raf);
       audio.removeEventListener("seeked", sync);
     };
-  }, [audio, isPlaying, lines, applyIndex]);
+  }, [audio, isPlaying, lines, offset, applyIndex]);
 
   // --- Auto-scroll, and getting out of the user's way ------------------
   //
@@ -123,9 +154,11 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
   const lineEls = useRef(new Map<number, HTMLElement>());
 
   useEffect(() => {
-    // A new track starts followed again, and at the top.
+    // A new track starts followed again, and at the top, with whatever
+    // nudge that track was last given.
     setFollowing(true);
     applyIndex(-1);
+    setOffset(trackId ? readOffset(trackId) : 0);
   }, [trackId, applyIndex]);
 
   useEffect(() => {
@@ -144,7 +177,11 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
 
   const seekToLine = (idx: number, startMs: number) => {
     if (!audio) return;
-    audio.currentTime = startMs / 1000;
+    // The offset runs the other way here: it is added to the *position* on
+    // lookup, so the audio time a line belongs to is its timestamp minus
+    // the nudge. Without this, clicking a line on a nudged track would
+    // land somewhere the highlight then immediately corrects away from.
+    audio.currentTime = Math.max(0, startMs - offset) / 1000;
     // Move the highlight now rather than waiting for `seeked` — the click
     // should feel instant, and while paused nothing else would update it.
     applyIndex(idx);
@@ -174,13 +211,46 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <div className="lyrics-actions">
+          {/* Only for timed lyrics — there is nothing to nudge on a plain
+              text document, and offering the control there would suggest
+              highlighting that is never coming. */}
+          {lines.length > 0 && (
+            <div className="lyrics-offset" role="group" aria-label="lyric timing">
+              <button
+                className="icon-btn"
+                onClick={() => nudge(-OFFSET_STEP_MS)}
+                aria-label="shift lyrics later"
+                title="lyrics running ahead? shift them later"
+              >
+                <Minus size={14} strokeWidth={2} />
+              </button>
+              <button
+                className="lyrics-offset-value"
+                onClick={() => nudge(-offset)}
+                disabled={offset === 0}
+                title={offset === 0 ? "lyric timing" : "reset timing"}
+              >
+                {formatOffset(offset) || "sync"}
+              </button>
+              <button
+                className="icon-btn"
+                onClick={() => nudge(OFFSET_STEP_MS)}
+                aria-label="shift lyrics earlier"
+                title="lyrics running behind? shift them earlier"
+              >
+                <Plus size={14} strokeWidth={2} />
+              </button>
+            </div>
+          )}
           {doc && (
             <button
               className="icon-btn"
               onClick={onRefresh}
-              disabled={refreshing}
+              // Re-resolving is a server round-trip by definition, so it
+              // has nothing to offer while we are reading the offline copy.
+              disabled={refreshing || offline}
               aria-label="look for better lyrics"
-              title="wrong lyrics? look again"
+              title={offline ? "offline — can't look again" : "wrong lyrics? look again"}
             >
               <RefreshCw
                 size={16}
@@ -223,7 +293,7 @@ function LyricsPanel({ onClose }: { onClose: () => void }) {
         </button>
       )}
 
-      {doc && <Attribution doc={doc} />}
+      {doc && <Attribution doc={doc} offline={offline} />}
     </aside>,
     document.body,
   );
@@ -331,7 +401,11 @@ function Body({
 // Where the words came from. Worth showing: a fuzzy provider match is the
 // one case where the lyrics can be confidently wrong, and knowing that is
 // what makes the refresh button meaningful rather than mysterious.
-function Attribution({ doc }: { doc: LyricsDoc }) {
+//
+// `offline` is appended rather than substituted — the provenance still
+// holds, it is just being read from the copy saved with the download, which
+// explains both why it might be behind the server and why refresh is off.
+function Attribution({ doc, offline }: { doc: LyricsDoc; offline: boolean }) {
   if (doc.source === "none") return null;
   const from =
     doc.source === "navidrome"
@@ -339,5 +413,10 @@ function Attribution({ doc }: { doc: LyricsDoc }) {
       : doc.match_kind === "search"
         ? "from lrclib.net — closest match by title and length"
         : "from lrclib.net";
-  return <footer className="lyrics-foot">{from}</footer>;
+  return (
+    <footer className="lyrics-foot">
+      {from}
+      {offline && " · saved copy"}
+    </footer>
+  );
 }
