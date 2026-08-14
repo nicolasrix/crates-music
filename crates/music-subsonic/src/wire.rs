@@ -32,6 +32,34 @@ pub struct SearchResult3 {
     pub tracks: Vec<Track>,
 }
 
+/// One lyrics block from the OpenSubsonic `songLyrics` extension
+/// (`getLyricsBySongId`). A track can carry several — one per language,
+/// or a synced and an unsynced copy of the same words.
+///
+/// Navidrome fills these from the file's own tags (`USLT`/`SYLT`/`LYRICS`)
+/// or a sidecar `.lrc`; it never fetches them from the internet. So an
+/// empty result is the norm for an untagged library, not an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredLyrics {
+    pub display_artist: Option<String>,
+    pub display_title: Option<String>,
+    /// ISO-639 code, or `"xxx"` when the tagger didn't say.
+    pub lang: Option<String>,
+    /// Milliseconds to add to every line's `start_ms`. Already applied by
+    /// [`parse_get_lyrics`], so consumers never see it twice.
+    pub offset_ms: i64,
+    pub synced: bool,
+    pub lines: Vec<SubsonicLyricLine>,
+}
+
+/// A single lyric line. `start_ms` is `None` on an unsynced block — the
+/// spec keeps the same `line[]` shape either way and just omits `start`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubsonicLyricLine {
+    pub start_ms: Option<i64>,
+    pub text: String,
+}
+
 /// Strip the `subsonic-response` envelope and surface API-level errors.
 fn unwrap_envelope(body: &str) -> Result<Value> {
     let raw: Value = serde_json::from_str(body)?;
@@ -208,6 +236,72 @@ pub fn parse_search3(body: &str) -> Result<SearchResult3> {
         albums,
         tracks,
     })
+}
+
+/// Parse `getLyricsBySongId` → `lyricsList.structuredLyrics[]`.
+///
+/// Three shapes all mean "no lyrics" and all return `Ok(vec![])`: the key
+/// absent entirely (server without the extension), `lyricsList` present
+/// but empty (Navidrome's answer for an untagged track), and a block with
+/// no lines. Only a malformed payload is an error.
+///
+/// The block-level `offset` is folded into each line here so that a
+/// consumer can treat `start_ms` as absolute. Applying it lazily is the
+/// classic source of double-offset bugs once a value is cached.
+pub fn parse_get_lyrics(body: &str) -> Result<Vec<StructuredLyrics>> {
+    let inner = unwrap_envelope(body)?;
+    let Some(blocks) = inner
+        .get("lyricsList")
+        .and_then(|l| l.get("structuredLyrics"))
+        .cloned()
+    else {
+        return Ok(Vec::new());
+    };
+    let wire: Vec<WireStructuredLyrics> = serde_json::from_value(blocks)?;
+    Ok(wire.into_iter().map(Into::into).collect())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireStructuredLyrics {
+    display_artist: Option<String>,
+    display_title: Option<String>,
+    lang: Option<String>,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    synced: bool,
+    #[serde(default)]
+    line: Vec<WireLyricLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireLyricLine {
+    start: Option<i64>,
+    #[serde(default)]
+    value: String,
+}
+
+impl From<WireStructuredLyrics> for StructuredLyrics {
+    fn from(w: WireStructuredLyrics) -> Self {
+        let offset_ms = w.offset;
+        let lines = w
+            .line
+            .into_iter()
+            .map(|l| SubsonicLyricLine {
+                start_ms: l.start.map(|s| s + offset_ms),
+                text: l.value,
+            })
+            .collect();
+        Self {
+            display_artist: w.display_artist,
+            display_title: w.display_title,
+            lang: w.lang,
+            offset_ms,
+            synced: w.synced,
+            lines,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +504,51 @@ mod tests {
     #[test]
     fn search3_no_result_key_is_default() {
         assert_eq!(parse_search3(&ok(r#""x":1"#)).unwrap(), SearchResult3::default());
+    }
+
+    #[test]
+    fn lyrics_parses_synced_block_and_folds_offset() {
+        let body = ok(
+            r#""lyricsList":{"structuredLyrics":[{
+                "displayArtist":"Boards of Canada","displayTitle":"Roygbiv",
+                "lang":"eng","offset":250,"synced":true,
+                "line":[{"start":1000,"value":"first"},{"start":4500,"value":"second"}]
+            }]}"#,
+        );
+        let blocks = parse_get_lyrics(&body).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].synced);
+        // Offset is folded in once, here — not left for the consumer.
+        assert_eq!(blocks[0].lines[0].start_ms, Some(1250));
+        assert_eq!(blocks[0].lines[1].start_ms, Some(4750));
+        assert_eq!(blocks[0].lines[1].text, "second");
+    }
+
+    #[test]
+    fn lyrics_unsynced_block_has_no_starts() {
+        let body = ok(
+            r#""lyricsList":{"structuredLyrics":[{
+                "lang":"xxx","synced":false,
+                "line":[{"value":"a plain line"}]
+            }]}"#,
+        );
+        let blocks = parse_get_lyrics(&body).unwrap();
+        assert!(!blocks[0].synced);
+        assert_eq!(blocks[0].lines[0].start_ms, None);
+        assert_eq!(blocks[0].lines[0].text, "a plain line");
+    }
+
+    #[test]
+    fn lyrics_absent_or_empty_is_ok() {
+        // Server without the songLyrics extension at all.
+        assert!(parse_get_lyrics(&ok(r#""x":1"#)).unwrap().is_empty());
+        // Navidrome's answer for a track with no tags: the key exists, empty.
+        assert!(parse_get_lyrics(&ok(r#""lyricsList":{}"#)).unwrap().is_empty());
+        assert!(
+            parse_get_lyrics(&ok(r#""lyricsList":{"structuredLyrics":[]}"#))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
