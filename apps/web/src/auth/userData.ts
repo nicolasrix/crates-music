@@ -10,6 +10,7 @@
 // sync room) and re-fetched on sign-in, so it is not a local bleed vector.
 
 import { getAudioCache } from "../cache/audioCache";
+import { getLyricsCache } from "../cache/lyricsCache";
 
 /** localStorage key namespaces holding user preferences/state. Swept by
  *  prefix so future `crates-music.*` keys are covered automatically. */
@@ -30,6 +31,13 @@ export async function clearUserData(): Promise<void> {
     await getAudioCache().wipe();
   } catch {
     /* best-effort; still clear localStorage below */
+  }
+  // Its own database, so its own wipe — and its own try, so a failure to
+  // drop the lyrics does not leave the audio cache un-wiped.
+  try {
+    await getLyricsCache().wipe();
+  } catch {
+    /* best-effort */
   }
   const toRemove: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {

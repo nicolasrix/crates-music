@@ -23,6 +23,7 @@ import {
 } from "react";
 
 import { fetchTrackBlob, streamUrl } from "../api/client";
+import { getLyrics } from "../api/lyrics";
 import { useSync } from "../sync/SyncContext";
 import {
   type AudioCacheStats,
@@ -31,6 +32,7 @@ import {
   type PinOutcome,
 } from "./audioCache";
 import { loadCacheSettings, qualityParams } from "./cacheSettings";
+import { getLyricsCache } from "./lyricsCache";
 import { downloadTargets } from "./prefetchWindow";
 import { useOnline } from "./useOnline";
 
@@ -38,6 +40,23 @@ import { useOnline } from "./useOnline";
 // triple to store it under. Settings are read at call time (cheap
 // localStorage read) so a quality change applies to the next fetch without
 // a reload. Already-cached variants are never re-fetched or migrated.
+// Pull a downloaded track's lyrics into the offline store, so "download"
+// means the whole track and not just its audio. Text is bytes-cheap and
+// should never be the reason an offline track looks half-broken.
+//
+// Best-effort by construction: a download that plays but has no words is a
+// far better outcome than a download that failed because a lyrics provider
+// was unreachable. Note this does reach the provider for every track of a
+// bulk album download — squarely within what the user asked for, and off
+// entirely when the gateway has `[lyrics] external_lookup = false`.
+async function captureLyrics(trackId: string): Promise<void> {
+  try {
+    await getLyricsCache().put(await getLyrics(trackId));
+  } catch {
+    /* no lyrics, no gateway, no store — the audio is downloaded either way */
+  }
+}
+
 async function fetchAtConfiguredQuality(trackId: string) {
   const q = qualityParams(loadCacheSettings().downloadQuality);
   const { blob, codec } = await fetchTrackBlob(trackId, q);
@@ -211,6 +230,12 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       const meta = await cache.getMetaByTrack(trackId);
       if (!meta) throw new Error(`download: ${trackId} was not stored`);
       const outcome = await cache.pin(meta.key);
+      // Only once the pin stuck: a budget refusal leaves the audio in the
+      // regular (LRU) budget, which is not a download and should not grow
+      // a lyrics row that nothing would ever collect.
+      if (outcome.kind === "pinned" || outcome.kind === "already-pinned") {
+        void captureLyrics(trackId);
+      }
       await refreshDownloaded();
       return outcome;
     },
@@ -222,6 +247,9 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
       const meta = await cache.getMetaByTrack(trackId);
       if (!meta) return;
       await cache.unpin(meta.key);
+      void getLyricsCache()
+        .delete(trackId)
+        .catch(() => {});
       await refreshDownloaded();
     },
     [cache, refreshDownloaded],
@@ -245,6 +273,13 @@ export function AudioCacheProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const off = cache.onDelete((trackIds) => {
       for (const id of trackIds) revoke(id);
+      // Lyrics only exist for tracks that were downloaded, so a deletion
+      // here is the one signal that a row has been orphaned. Without this
+      // the text store would be the only thing in the app that outlives
+      // the audio it describes.
+      void getLyricsCache()
+        .deleteMany(trackIds)
+        .catch(() => {});
       void refreshDownloaded();
     });
     return off;
