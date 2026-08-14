@@ -31,6 +31,7 @@ crates/music-gateway/
 │   ├── ingest.rs                # background ingest worker glue
 │   ├── discovery.rs             # catalog watcher: auto-enqueue new tracks
 │   ├── diagnostics/             # trace ring, RUM, /v1/diagnostics/* handlers
+│   ├── lyrics/                  # /v1/lyrics/* — tiered resolve, LRC parse, provider client
 │   ├── oauth/                   # OAuth 2.1 server
 │   ├── sync/                    # sync transport (HTTP snapshot + WS fan-out)
 │   └── bin/
@@ -314,6 +315,51 @@ playlists are copied into the owner (`user_id=1`) once by
 `scripts/import_navidrome_playlists.py` — idempotent by playlist name; it
 reads through the verbatim `/rest/*` proxy and writes through the new
 endpoints, so it needs only a gateway bearer.
+
+## Lyrics (`lyrics/`)
+
+Per-track lyrics for `/v1/lyrics/*`. The split to know: **storage lives in
+`music-recommend`** (`LyricsStore`, migration `0023_track_lyrics.sql`,
+`gateway-state.recommend.sqlite`) because the external lookup key — artist,
+title, album, duration — is already in `track_metadata` in that same pool.
+Everything *policy* lives here.
+
+- `lrc.rs` — LRC text → `[{start_ms, text}]`. Pure, dependency-free, and the
+  only place in the project that understands the format; the web client and
+  the TUI consume the parsed shape. Handles the quirks that matter: repeated
+  timestamps on one line (a chorus written once, sung twice — each stamp
+  becomes its own line), `[mm:ss.xx]` vs `[mm:ss:xx]`, fraction scale set by
+  digit count (`.5`/`.50`/`.500` all mean 500 ms), enhanced word-level
+  `<00:12.34>` tags, and `[ar:…]`-style metadata that is not a lyric.
+  Timestamped *empty* lines are deliberately kept — they mark instrumental
+  gaps, and dropping them leaves the previous line highlighted through a
+  whole solo.
+- `lrclib.rs` — client for the external community database. Its error type
+  has **no not-found variant**: absence is `Ok(None)`, only failure is
+  `Err`. The resolver depends on that split.
+- `resolver.rs` — the tiered lookup (cache → Navidrome → provider exact →
+  provider without album → duration-guarded fuzzy search → miss), with
+  single-flight per `track_id` and a semaphore bounding outbound
+  concurrency.
+- `handlers.rs` — `GET /v1/lyrics/:track_id` (any-authenticated, ETag'd) and
+  `POST /v1/lyrics/:track_id/refresh` (`WriteTaste`; guests 403).
+
+**The invariant worth preserving: a failure is never cached.** A provider
+404 is knowledge — it stores a `source='none'` row for `miss_ttl_days`, so
+an un-lyriced track isn't re-looked-up on every play. An unreachable
+provider is not knowledge: nothing is written, an expired cached hit is
+served if one exists, and otherwise the endpoint answers **503** rather than
+a 200 that would read as "this song has no lyrics".
+
+Navidrome always wins over the provider, because the file's own tags or
+`.lrc` sidecar are ground truth for *that file* — someone who re-timed a
+live version or fixed a transcription meant it. Note that Navidrome only
+*surfaces* tags; it never fetches lyrics from the internet, so on a library
+whose files carry none, the provider tiers do essentially all the work.
+
+`AppState::lyrics()` is `Option`: `[lyrics] enabled = false`, or a resolver
+that fails to build (an unparseable `provider_url`), degrades to `None` and
+the routes 404. A leaf feature must not block boot.
 
 ## Diagnostics
 

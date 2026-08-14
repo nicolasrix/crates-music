@@ -177,6 +177,53 @@ durable, and the ingest worker drains them when the sidecar comes back.
 Enqueueing during an embedder outage is the point: nothing is lost, it
 just waits.
 
+### `[lyrics]` (optional)
+
+Per-track lyrics behind `GET /v1/lyrics/:track_id`. On by default; the
+whole section can be omitted.
+
+Resolution is tiered: the file's own tags/`.lrc` sidecar (via Navidrome's
+OpenSubsonic `songLyrics` extension) win outright, and an external
+community database fills the — in practice very large — remainder. On a
+library whose files carry no lyric tags, Navidrome alone returns nothing:
+it surfaces tags, it never fetches from the internet.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | bool | no | `true` | Master switch. When `false`, `/v1/lyrics/*` returns 404 and nothing is fetched or stored. |
+| `external_lookup` | bool | no | `true` | Whether to consult the external provider. `false` keeps the feature on but limits it to what Navidrome already has — **zero egress**, at the cost of near-zero coverage on an untagged library. |
+| `provider_url` | string | no | `https://lrclib.net` | Provider root. |
+| `user_agent` | string | no | `crates-music/<version> (self-hosted)` | Outbound User-Agent; the provider asks clients to identify themselves. |
+| `timeout_seconds` | u64 | no | `8` | Per-request timeout against the provider. Deliberately short — a lookup sits in front of a UI panel. |
+| `hit_ttl_days` | u32 | no | `180` | TTL for a successful answer. Long: lyrics for a released track don't change. |
+| `miss_ttl_days` | u32 | no | `7` | TTL for a confirmed miss. Short: the community database grows, so today's miss is plausibly next month's hit. |
+| `max_concurrent` | usize | no | `4` | Ceiling on simultaneous outbound provider requests — politeness as much as resources. |
+| `duration_tolerance_seconds` | u32 | no | `2` | How far a fuzzy-search candidate's duration may differ from ours before it's rejected. This is what stops a live version's lyrics landing on the studio cut. |
+
+```toml
+[lyrics]
+enabled                    = true
+external_lookup            = true
+provider_url               = "https://lrclib.net"
+timeout_seconds            = 8
+hit_ttl_days               = 180
+miss_ttl_days              = 7
+max_concurrent             = 4
+duration_tolerance_seconds = 2
+```
+
+**The privacy knob is `external_lookup`.** With it on, the first play of
+a track sends its artist and title to the provider — once per track, from
+the gateway only, never from each device. With it off, nothing leaves the
+LAN. Answers are cached in `gateway-state.recommend.sqlite`
+(`track_lyrics`), shared across every client in the household, and
+available offline.
+
+A **failure is never cached**: a provider 404 stores a miss for
+`miss_ttl_days`, but an unreachable provider stores nothing and the
+endpoint answers 503, so a brief outage can't render as "this song has no
+lyrics" for a week.
+
 ## CLI config (`~/.config/crates-music/config.toml`)
 
 The `music` CLI looks up its config via [`directories`](https://crates.io/crates/directories):
