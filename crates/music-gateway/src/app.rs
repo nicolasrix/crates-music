@@ -18,6 +18,7 @@ use crate::diagnostics::handlers as diagnostics_handlers;
 use crate::events;
 use crate::guest_codes;
 use crate::library_rating;
+use crate::lyrics::handlers as lyrics_handlers;
 use crate::oauth::handlers as oauth_handlers;
 use crate::playlists::handlers as playlist_handlers;
 use crate::proxy::proxy;
@@ -178,6 +179,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/recommend/feedback", post(recommend_feedback::submit))
         .route("/v1/library/rating", put(library_rating::put_rating))
         .route("/v1/library/ratings", get(library_rating::list_ratings))
+        // Lyrics are catalog data, so the read is any-authenticated —
+        // guests included, same tier as browsing an album. The refresh
+        // verb self-gates on `WriteTaste` (a guest authenticates but gets
+        // 403), because it re-resolves a row the whole household shares.
+        .route("/v1/lyrics/:track_id", get(lyrics_handlers::get_lyrics))
+        .route(
+            "/v1/lyrics/:track_id/refresh",
+            post(lyrics_handlers::refresh_lyrics),
+        )
         // Typo-tolerant catalog search (fuzzy fst index; falls back to
         // Navidrome search3 until the index is built).
         .route("/v1/search", get(search_handlers::search))
