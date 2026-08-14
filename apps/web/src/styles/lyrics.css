@@ -1,0 +1,206 @@
+/* Lyrics panel. Its own file rather than another 200 lines on
+   components.css, which is already the largest stylesheet here.
+
+   Stacking: 30 sits above page content but below the phone sidebar
+   drawer (40) and its scrim (39), so opening the drawer over the panel
+   behaves the way it does over any other page, and below the row menus
+   (100) and toasts (110). */
+
+.lyrics-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  /* Clears the sidebar on desktop and the player bar always — the panel
+     replaces what you were reading, not the controls you were using. */
+  left: var(--sidebar-w);
+  bottom: calc(var(--player-h) + var(--safe-b));
+  z-index: 30;
+
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: color-mix(in oklab, var(--surface-0) 94%, transparent);
+  backdrop-filter: blur(24px);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* --- Header -------------------------------------------------------- */
+
+.lyrics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--fg-muted);
+}
+.lyrics-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.lyrics-track {
+  min-width: 0;
+}
+.lyrics-track .t {
+  color: var(--fg-strong);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lyrics-track .a {
+  font-size: 0.8125rem;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lyrics-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+.lyrics-actions .is-spinning {
+  animation: lyrics-spin 900ms linear infinite;
+}
+@keyframes lyrics-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Lines --------------------------------------------------------- */
+
+.lyrics-body {
+  overflow-y: auto;
+  /* Half-viewport padding top and bottom so the *first* and *last* lines
+     can still be scrolled to the vertical centre — without it,
+     scrollIntoView({block:"center"}) cannot centre them and the
+     highlight visibly sticks to the edges at both ends of a song. */
+  padding: 40vh var(--space-5);
+  scroll-behavior: smooth;
+}
+.lyrics-lines {
+  max-width: 46rem;
+  margin: 0 auto;
+  list-style: none;
+  padding: 0;
+}
+.lyrics-line {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  background: none;
+  border: none;
+  font-size: 1.25rem;
+  line-height: 1.5;
+  /* Unsung lines recede; the active one comes forward. Colour alone
+     carries the state, so this still reads with animations disabled. */
+  color: var(--fg-faint);
+  transition:
+    color var(--dur-2) var(--ease-out-soft),
+    opacity var(--dur-2) var(--ease-out-soft);
+}
+.lyrics-lines.is-synced .lyrics-line {
+  cursor: pointer;
+}
+.lyrics-lines.is-synced .lyrics-line:hover {
+  background: var(--surface-2);
+  color: var(--fg-muted);
+}
+.lyrics-line.is-past {
+  opacity: 0.55;
+}
+.lyrics-line.is-active {
+  color: var(--fg-strong);
+  font-weight: 600;
+  opacity: 1;
+}
+.lyrics-line:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Plain (untimed) lyrics: same rhythm, no affordance to click. */
+.lyrics-line.is-static {
+  color: var(--fg-muted);
+  cursor: default;
+}
+.lyrics-unsynced-note {
+  color: var(--fg-faint);
+  font-size: 0.8125rem;
+  margin-bottom: var(--space-4);
+}
+
+/* --- Messages and footer ------------------------------------------- */
+
+.lyrics-note {
+  max-width: 46rem;
+  margin: 0 auto;
+  color: var(--fg-faint);
+  text-align: center;
+  display: grid;
+  gap: var(--space-3);
+  justify-items: center;
+}
+.lyrics-btn {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  color: var(--fg-strong);
+  font-size: 0.875rem;
+}
+.lyrics-btn:hover {
+  background: var(--surface-3);
+}
+.lyrics-foot {
+  padding: var(--space-2) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--fg-faint);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+/* Escape hatch back to the highlight after scrolling away by hand.
+   Floats over the lines rather than taking a row in the grid, so its
+   appearance doesn't reflow the text mid-read. */
+.lyrics-follow {
+  position: absolute;
+  bottom: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--space-2) var(--space-4);
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  color: var(--fg-strong);
+  font-size: 0.8125rem;
+  box-shadow: var(--shadow-pop);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyrics-body {
+    scroll-behavior: auto;
+  }
+  .lyrics-actions .is-spinning {
+    animation: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .lyrics-panel {
+    left: 0;
+    bottom: calc(var(--player-h-mobile) + var(--safe-b));
+  }
+  .lyrics-body {
+    padding: 35vh var(--space-3);
+  }
+  .lyrics-line {
+    font-size: 1.125rem;
+  }
+}

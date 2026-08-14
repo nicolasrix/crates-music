@@ -27,6 +27,7 @@ import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
 import { useSync } from "../sync/SyncContext";
 import { useAutoplay } from "./AutoplayContext";
+import { LyricsToggle } from "./LyricsPanel";
 import { usePlayer } from "./PlayerContext";
 import { useRecommendationFeedback } from "./useRecommendationFeedback";
 import { VolumeControl } from "./VolumeControl";
@@ -183,6 +184,10 @@ export function PlayerBar() {
       <div className="right-cluster">
         <EntityRating kind="track" id={nowPlaying.id} />
         <RecommendationFeedback trackId={nowPlaying.id} />
+        {/* Owns its own open state and the panel it opens, so the bar
+            stays a bar — see LyricsPanel for why the panel portals out
+            of here rather than rendering as a child. */}
+        <LyricsToggle />
         <button
           className={`icon-btn ${outputEnabled ? "is-on" : ""}`}
           onClick={() => setOutputEnabled(!outputEnabled)}
