@@ -273,6 +273,36 @@ export async function listMostPlayedTracks(size = 100): Promise<Track[]> {
     .slice(0, size);
 }
 
+// One artist's catalog, as raw search3 rows carrying `playCount`.
+//
+// Deliberately NOT getTopSongs: despite the name, Navidrome backs that
+// with Last.fm's artist.getTopTracks — global popularity mapped onto
+// local files — and its rows mostly omit playCount entirely. It answers
+// "what is this artist known for", not "what have we played". Only
+// search3 rows carry our own counts.
+//
+// Same shape as listMostPlayedTracks (wide sample, filter client-side)
+// because Subsonic has no "this artist's songs, by plays" endpoint. The
+// sample is wide enough that a single artist is never truncated at this
+// library's scale: the widest artist observed returns ~235 rows.
+// Ranking lives in sync/mostPlayed so it stays testable.
+export async function searchArtistSongs(
+  artistName: string,
+  songCount = 500
+): Promise<Track[]> {
+  const params = new URLSearchParams({
+    query: artistName,
+    songCount: String(songCount),
+    albumCount: "0",
+    artistCount: "0",
+  });
+  const result = await getSubsonic<{ song?: Track[] }>(
+    `/rest/search3?${params.toString()}`,
+    "searchResult3"
+  );
+  return result.song ?? [];
+}
+
 export interface SearchResults {
   artists: Artist[];
   albums: Album[];

@@ -21,10 +21,11 @@ import { Layout } from "../components/Layout";
 import { useCoverPalette } from "../components/ArtworkPalette";
 import { TrackTable } from "../components/TrackTable";
 import { navigate } from "../router";
+import { usePlayMode } from "../player/PlayModeContext";
 import { usePlayback } from "../sync/usePlayback";
 import { useToast } from "../toast/ToastContext";
 import { fmtDuration } from "../utils/format";
-import { shuffle } from "../utils/shuffle";
+import { playlistAddMessage } from "../utils/playlistAddMessage";
 import type { PlaylistWithTracks, Track } from "../api/types";
 
 export function Playlist({ id }: { id: string }) {
@@ -39,6 +40,7 @@ export function Playlist({ id }: { id: string }) {
   const cover = coverArtUrl(seedCover, 600, q.data?.playlist.name);
   const palette = useCoverPalette(cover);
   const { playSingle, playList } = usePlayback();
+  const { mode } = usePlayMode();
   const queryClient = useQueryClient();
   const toast = useToast();
 
@@ -134,7 +136,15 @@ export function Playlist({ id }: { id: string }) {
     if (addingId) return;
     setAddingId(track.id);
     try {
-      await addTrackToPlaylist(id, track.id);
+      const result = await addTrackToPlaylist(id, track.id);
+      // Success is silent here — the track appearing in the list below is
+      // the feedback. A duplicate isn't: the row would vanish from the
+      // suggestions with nothing to show for it, so say why.
+      if (result.added === 0) {
+        const name = q.data?.playlist.name ?? "this playlist";
+        const { message, variant } = playlistAddMessage(name, result);
+        toast(message, { variant });
+      }
       // Refresh the playlist body so the tracklist + count + duration
       // reflect the new track without a manual reload.
       await queryClient.invalidateQueries({ queryKey: ["playlist", id] });
@@ -236,9 +246,16 @@ export function Playlist({ id }: { id: string }) {
             >
               <Play size={20} fill="currentColor" strokeWidth={0} />
             </button>
+            {/* Turns the *mode* on rather than shuffling a copy of the
+                list: the player bar's shuffle state and this button now
+                mean the same thing, so toggling it off afterwards can
+                still restore the playlist's own order. A playlist
+                already started in smart shuffle keeps its recs. */}
             <button
               className="icon-btn"
-              onClick={() => playList(shuffle(tracks), 0)}
+              onClick={() =>
+                playList(tracks, 0, mode === "in_order" ? "shuffle" : mode)
+              }
               disabled={tracks.length === 0}
               aria-label="shuffle playlist"
               title="shuffle play"
@@ -285,7 +302,7 @@ export function Playlist({ id }: { id: string }) {
         <TrackTable
           tracks={tracks}
           showAlbum
-          onPlay={(i) => playSingle(tracks[i]!)}
+          onPlay={(i) => playList(tracks, i)}
           rowMenuExtras={(track) => [
             {
               key: "remove-from-playlist",

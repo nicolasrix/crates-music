@@ -737,6 +737,17 @@ button.cover-thumb:focus-visible .thumb-play {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+/* Play count ("most played" on the artist page). Mirrors .col-time's
+   tabular treatment so the two numeric columns align as a pair, but
+   sits fainter — it explains the list's order rather than being
+   something the user reads per row. */
+.tracks .col-plays {
+  width: 64px;
+  text-align: right;
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
 .tracks .col-menu {
   width: 36px;
   text-align: right;
@@ -1166,6 +1177,16 @@ button.cover-thumb:focus-visible .thumb-play {
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 .icon-btn:disabled:hover { background: transparent; color: var(--fg-muted); }
 .icon-btn.is-on { color: var(--accent); }
+/* Tri-state shuffle: lit = shuffled, lit + sparkle = shuffled with
+   recommendations mixed in. The badge is positioned rather than a
+   second icon in flow so the button keeps the 36px transport rhythm. */
+.icon-btn.shuffle-btn { position: relative; }
+.icon-btn.shuffle-btn .shuffle-badge {
+  position: absolute;
+  top: 4px;
+  right: 3px;
+  color: var(--accent);
+}
 .icon-btn.play-bar {
   width: 40px;
   height: 40px;
@@ -1913,8 +1934,10 @@ a.search-hero-title:hover {
      tablet widths; they remain reachable from track rows / the queue. */
   .player .right-cluster .rec-feedback { display: none; }
   /* Album column is the first table casualty — title/artist/time keep
-     their slots. */
-  .tracks .col-album { display: none; }
+     their slots. Plays goes with it: the rank order it explains is
+     still legible from the row numbers alone. */
+  .tracks .col-album,
+  .tracks .col-plays { display: none; }
 }
 
 /* --- Phone (≤768px): sidebar becomes an off-canvas drawer. -------- */

@@ -4,6 +4,7 @@
    utility classes can still override component classes when applied on JSX. */
 @import "./styles/tokens.css";
 @import "./styles/components.css";
+@import "./styles/lyrics.css";
 
 @tailwind base;
 @tailwind components;

@@ -47,7 +47,7 @@ function TracksAll() {
         : allPages.length * ALL_PAGE_SIZE,
     staleTime: 60_000,
   });
-  const { playSingle } = usePlayback();
+  const { playList } = usePlayback();
   const tracks: Track[] = q.data?.pages.flat() ?? [];
 
   // Prefetch sentinel. An IntersectionObserver fires next-page fetches
@@ -99,7 +99,7 @@ function TracksAll() {
           <VirtualTrackTable
             tracks={tracks}
             showAlbum
-            onPlay={(i) => playSingle(tracks[i]!)}
+            onPlay={(i) => playList(tracks, i)}
           />
         )}
         {q.hasNextPage && (
@@ -128,7 +128,7 @@ function TracksHighlight({ mode }: { mode: Exclude<ListMode, "all"> }) {
     staleTime: mode === "random" ? 0 : 60_000,
     refetchOnMount: mode === "random" ? "always" : true,
   });
-  const { playSingle } = usePlayback();
+  const { playList } = usePlayback();
 
   const lead =
     mode === "recent"
@@ -162,7 +162,7 @@ function TracksHighlight({ mode }: { mode: Exclude<ListMode, "all"> }) {
           <TrackTable
             tracks={q.data}
             showAlbum
-            onPlay={(i) => playSingle(q.data![i]!)}
+            onPlay={(i) => playList(q.data!, i)}
           />
         )}
       </div>

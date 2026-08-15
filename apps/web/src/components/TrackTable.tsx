@@ -20,13 +20,23 @@ interface Props {
    *  cover is informative; when it doesn't (e.g. an album page), the
    *  same cover would repeat down every row, so it's hidden. */
   showCover?: boolean;
+  /** Render a play-count column between album and time. See TrackRow —
+   *  only lists actually ordered by plays should turn this on. */
+  showPlayCount?: boolean;
   onPlay: (index: number) => void;
   /** Per-row extra ⋯-menu entries (e.g. the Playlist page's "remove from
    *  playlist"). Called with the row's track + index. */
   rowMenuExtras?: (track: Track, index: number) => RowMenuExtraItem[];
 }
 
-export function TrackTable({ tracks, showAlbum = false, showCover, onPlay, rowMenuExtras }: Props) {
+export function TrackTable({
+  tracks,
+  showAlbum = false,
+  showCover,
+  showPlayCount = false,
+  onPlay,
+  rowMenuExtras,
+}: Props) {
   const { nowPlaying } = usePlayer();
   const playingId = nowPlaying?.id ?? null;
   const renderCover = showCover ?? showAlbum;
@@ -40,6 +50,7 @@ export function TrackTable({ tracks, showAlbum = false, showCover, onPlay, rowMe
           <th className="col-title">title</th>
           <th className="col-artist">artist</th>
           {showAlbum && <th className="col-album">album</th>}
+          {showPlayCount && <th className="col-plays">plays</th>}
           <th className="col-time">time</th>
           <th className="col-menu" aria-hidden />
         </tr>
@@ -53,6 +64,7 @@ export function TrackTable({ tracks, showAlbum = false, showCover, onPlay, rowMe
             isPlaying={t.id === playingId}
             showAlbum={showAlbum}
             showCover={renderCover}
+            showPlayCount={showPlayCount}
             onPlay={onPlay}
             extraMenuItems={rowMenuExtras?.(t, i)}
           />

@@ -15,6 +15,10 @@ mod browse;
 mod diagnostics;
 mod downloads;
 mod library;
+/// Public to the crate only so `views::lyrics` can reuse the pane's
+/// focus/active arithmetic instead of duplicating it — the gestures
+/// themselves stay `pub(super)`.
+pub(crate) mod lyrics;
 mod playback;
 mod playlists;
 mod room;
@@ -30,6 +34,8 @@ mod downloads_tests;
 mod settings_tests;
 #[cfg(test)]
 mod library_tests;
+#[cfg(test)]
+mod lyrics_tests;
 #[cfg(test)]
 mod playlist_tests;
 #[cfg(test)]
@@ -60,6 +66,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             let mut effects = playback::signal_tick(app);
             effects.extend(autoplay::maybe_refill(app));
+            effects.extend(lyrics::on_tick(app));
             if app.section == Section::Diagnostics {
                 effects.extend(diagnostics::on_tick(app));
             }
@@ -189,6 +196,12 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::PromptInput(im) => playlists::prompt_input(app, &im),
         Msg::PromptSubmit => playlists::prompt_submit(app),
         Msg::PromptClose => playlists::prompt_close(app),
+
+        // ── lyrics pane ───────────────────────────────────────────────
+        Msg::ToggleLyrics => lyrics::toggle(app),
+        Msg::LyricsMove(delta) => lyrics::mv(app, delta),
+        Msg::LyricsSeek => lyrics::seek_to_focus(app),
+        Msg::LyricsRefresh => lyrics::refresh(app),
 
         // ── effect completions ────────────────────────────────────────
         Msg::AlbumsLoaded { generation, result } => {
@@ -388,6 +401,7 @@ pub(crate) fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             vec![]
         }
+        Msg::LyricsLoaded { track_id, result } => lyrics::loaded(app, &track_id, result),
         Msg::DownloadsLoaded { stats, pinned } => downloads::on_loaded(app, stats, pinned),
         Msg::PinDone { note, is_error } => downloads::on_pin_done(app, note, is_error),
         Msg::AutoplayRefilled {
@@ -637,7 +651,7 @@ fn go_section(app: &mut App, section: Section) -> Vec<Effect> {
 }
 
 fn back(app: &mut App) -> Vec<Effect> {
-    if app.overlay == Overlay::Help {
+    if app.overlay == Overlay::Help || app.overlay == Overlay::Lyrics {
         app.overlay = Overlay::None;
     } else if app.section == Section::Search && app.search.focused {
         app.search.focused = false;

@@ -3,6 +3,7 @@ pub(crate) mod downloads;
 pub(crate) mod help;
 pub(crate) mod library;
 pub(crate) mod liked;
+pub(crate) mod lyrics;
 pub(crate) mod playlists;
 pub(crate) mod queue;
 pub(crate) mod search;

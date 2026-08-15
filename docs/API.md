@@ -775,11 +775,100 @@ unchanged. Bad visibility → 400. Returns the refreshed row.
 Set membership. Body `{ "track_ids": ["t1", …], "mode"?: "replace" }`.
 `mode` is `"replace"` (default — full set / reorder) or `"append"` (add
 after the current tail, used by the row-menu "add to playlist"). Empty
-track ids → 400; more than 10 000 ids → 400. Returns **204**.
+track ids → 400; more than 10 000 ids → 400.
+
+`"append"` is **de-duplicating**: an id the playlist already holds — or
+repeated within the same batch — is skipped rather than inserted twice,
+and an append that adds nothing leaves `updated_ms` alone. `"replace"`
+is literal, since its id list comes from stored membership and must not
+silently drop existing duplicates.
+
+Returns **200**:
+
+```json
+{ "added": 2, "skipped": 1 }
+```
+
+Clients report the *server's* counts, not the length of what they sent —
+that's what drives the web toast / TUI note "already in this playlist".
 
 #### `DELETE /v1/playlists/:id`
 
 Delete the playlist (members cascade). Returns **204**.
+
+### Lyrics
+
+Per-track lyrics, resolved and cached server-side. Configured by
+`[lyrics]` (see [CONFIGURATION.md](./CONFIGURATION.md)); when disabled,
+every endpoint here returns **404**.
+
+**Why the gateway resolves rather than each client.** One household
+shares one cache; the PWA needs the answer stored gateway-side to work
+offline; LRC is parsed exactly once instead of in both the web client and
+the TUI; and there is a single egress point with one User-Agent and one
+switch to stop talking to a third party.
+
+**Resolution order.** Cached row → Navidrome `getLyricsBySongId` (the
+file's own tags or `.lrc` sidecar — ground truth for that file, so it
+wins outright) → provider exact (artist + title + album + duration) →
+provider without album (tag albums drift: "Deluxe", "Remastered") →
+provider fuzzy search, accepted only when the candidate's duration is
+within `duration_tolerance_seconds` of ours → confirmed miss.
+
+**Authorization.** Reads are **any-authenticated** (guests included) —
+lyrics are catalog data, the same tier as browsing an album. `refresh`
+requires the `WriteTaste` capability (guests get **403**) because it
+re-resolves a row the whole household shares.
+
+#### `GET /v1/lyrics/:track_id`
+
+Resolves if needed, else serves the cached answer.
+
+```json
+{
+  "track_id": "tr-1",
+  "source": "lrclib",
+  "match_kind": "exact",
+  "synced": true,
+  "instrumental": false,
+  "lines": [
+    {"start_ms": 2500, "text": "first line"},
+    {"start_ms": 6100, "text": "second line"}
+  ],
+  "plain": "first line\nsecond line",
+  "provider_id": "771",
+  "fetched_at": 1712345678901
+}
+```
+
+- `source` — `"navidrome" | "lrclib" | "none"`. `"none"` is a *confirmed*
+  absence (the negative cache), not an error.
+- `match_kind` — `"exact" | "no_album" | "search"`, or `null` for a
+  Navidrome hit or a miss. An audit trail: when the wrong song's lyrics
+  show up, this says which tier to distrust.
+- `lines` — `null` unless `synced`, so a client can't mistake "no
+  timings" for "timings, but empty". `start_ms` is absolute from the
+  start of the track; any provider-side offset is already folded in.
+- `plain` — timestamp-free text, populated whenever any words were found
+  (including for synced hits), so a static view never strips timestamps
+  itself.
+- `instrumental` — a *successful* lookup with a definitive answer; render
+  "Instrumental", not a retry affordance.
+
+Sends a strong `ETag` and `Cache-Control: private, max-age=300`; a
+revisit with `If-None-Match` gets **304**.
+
+**503** means *the sources could not be reached*, which is deliberately
+distinct from a 200 carrying `"source": "none"`. Nothing is cached in
+that case — otherwise a thirty-second outage would blank the lyrics panel
+for every track played during it, for the whole miss TTL. If an expired
+cached hit exists, it is served (200) instead of failing.
+
+#### `POST /v1/lyrics/:track_id/refresh`
+
+Drop the cached answer and resolve again — the escape hatch for a bad
+fuzzy match. Same response shape. Requires `WriteTaste`; a guest gets
+**403**.
 
 ### Admin
 

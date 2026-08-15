@@ -38,7 +38,7 @@ export function Album({ id }: { id: string }) {
   });
   const cover = coverArtUrl(q.data?.album.coverArt, 600, q.data?.album.name);
   const palette = useCoverPalette(cover);
-  const { playSingle, playList } = usePlayback();
+  const { playList } = usePlayback();
   const sync = useSync();
   const toast = useToast();
 
@@ -194,7 +194,7 @@ export function Album({ id }: { id: string }) {
         <TrackTable
           tracks={tracks}
           showAlbum={false}
-          onPlay={(i) => playSingle(tracks[i]!)}
+          onPlay={(i) => playList(tracks, i)}
         />
       </div>
 

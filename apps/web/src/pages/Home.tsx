@@ -43,7 +43,7 @@ export function Home() {
     queryFn: () => listRecentTracks(TRACKS_N),
     staleTime: 60_000,
   });
-  const { playSingle, playAlbum } = usePlayback();
+  const { playList, playAlbum } = usePlayback();
 
   const albums = albumsQ.data ?? [];
   const recentArtists = deriveRecentArtists(albums, artistsQ.data ?? [], ARTISTS_N);
@@ -113,7 +113,7 @@ export function Home() {
           <TrackTable
             tracks={tracksQ.data}
             showAlbum
-            onPlay={(i) => playSingle(tracksQ.data![i]!)}
+            onPlay={(i) => playList(tracksQ.data!, i)}
           />
         )}
       </div>

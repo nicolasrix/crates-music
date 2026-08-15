@@ -17,8 +17,8 @@ use music_subsonic::{AlbumListType, AlbumWithSongs, SearchResult3};
 use music_sync::{ServerMessage, SyncOp};
 
 use crate::api::{
-    ClientEvent, LatentNeighbour, LatentSpace, PlaylistSummary, QueueDepth, RecentlyPlayed,
-    RecommenderPanels, WhoamiInfo,
+    ClientEvent, LatentNeighbour, LatentSpace, LyricsOutcome, PlaylistSummary, QueueDepth,
+    RecentlyPlayed, RecommenderPanels, WhoamiInfo,
 };
 use crate::config::{AutoplayConfig, PlaybackConfig, Quality};
 
@@ -191,6 +191,16 @@ pub(crate) enum Msg {
     PromptInput(InputMsg),
     PromptSubmit,
     PromptClose,
+    /// y — open/close the lyric pane for the now-playing track.
+    ToggleLyrics,
+    /// j/k inside the pane: read ahead or back, which stops it following
+    /// the playhead until you seek or the track changes.
+    LyricsMove(i32),
+    /// Enter inside the pane: seek to the line under the cursor.
+    LyricsSeek,
+    /// R inside the pane: re-resolve server-side (the wrong-song escape
+    /// hatch). Guests are refused by the gateway.
+    LyricsRefresh,
 
     // ── effect completions ────────────────────────────────────────────
     AlbumsLoaded {
@@ -295,6 +305,13 @@ pub(crate) enum Msg {
     /// `GET /v1/whoami` completed (boot-time identity fetch).
     WhoamiLoaded {
         result: Result<WhoamiInfo, String>,
+    },
+    /// Lyrics resolved. Carries the track it was asked for so a document
+    /// that lands after the track has moved on is dropped rather than
+    /// shown against the wrong song.
+    LyricsLoaded {
+        track_id: String,
+        result: Result<LyricsOutcome, String>,
     },
     /// Downloads section loaded: cache totals + the hydrated pinned table.
     /// The two halves fail independently — stats is local SQLite; hydration
@@ -506,6 +523,12 @@ pub(crate) enum Effect {
     SyncResync,
     /// `GET /v1/whoami`; completes as [`Msg::WhoamiLoaded`].
     LoadWhoami,
+    /// `GET /v1/lyrics/:id`, or `POST …/refresh` when `force`; completes as
+    /// [`Msg::LyricsLoaded`].
+    LoadLyrics {
+        track_id: String,
+        force: bool,
+    },
     /// Resolve track metadata for sync-queue items we didn't push
     /// ourselves; completes as [`Msg::TracksHydrated`].
     HydrateTracks {

@@ -19,6 +19,24 @@
 // against the local queue as a defense against WS-fanout lag (the
 // optimistic local push lands a beat before the snapshot reaches
 // other devices).
+//
+// Refill lifecycle — three pieces, and all three are load-bearing:
+//
+//   • `isRefillingRef` keeps two refills from racing. It is held for a
+//     cooldown past the request so the WS echo can land first.
+//   • `liveRef` lets the async continuation read the queue as it is when
+//     the recommendations arrive, not as it was when they were asked
+//     for. `planRefill` decides from that; see `autoplayRefill.ts` for
+//     why "did anything change?" is the wrong question.
+//   • `retryTick` re-arms the effect. Necessary because the lock means a
+//     dep change *during* a refill is swallowed — the superseding effect
+//     run returns immediately and schedules nothing. Without the re-arm,
+//     any refill that ends up placing nothing leaves the queue parked
+//     under threshold until an unrelated change wakes the effect.
+//
+// `submit()` in SyncContext has no optimistic apply, so local state only
+// moves on the server's echo. That is what makes the window wide enough
+// to matter: the queue is always a round-trip behind the ops we sent.
 
 import {
   createContext,
@@ -31,6 +49,7 @@ import {
 } from "react";
 import { startStationFromAny, startWeightedStation } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
+import { isUnderdelivery, needsRearm, planRefill } from "./autoplayRefill";
 import { buildAutoplaySeeds } from "./autoplaySeeds";
 import {
   AutoplaySettings,
@@ -70,6 +89,11 @@ interface AutoplayCtx {
    *  conflating "I added this manually" with "it came from a rec" is
    *  worse than the buttons going dim after a reload. */
   isRecommendation: (itemId: string | undefined) => boolean;
+  /** Record queue items as recommender output. Used by smart shuffle,
+   *  which mixes recommendations into a context rather than appending
+   *  them — same provenance, different placement, so the feedback
+   *  buttons must light up for both. */
+  markRecommendations: (itemIds: readonly string[]) => void;
   /** Tethered-drift tuning (leash radius/strength, frontier, MMR λ).
    *  Read by the refill effect and edited from the Settings page. */
   settings: AutoplaySettings;
@@ -113,6 +137,41 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
   // REFILL_COOLDOWN_MS.
   const isRefillingRef = useRef(false);
 
+  // Live mirror of the playback slice, read by the async refill after
+  // its await. A refill outlives the render that started it, so pushing
+  // against the values captured in that render overfills (or, as the old
+  // `cancelled` flag did, discards a perfectly good result set). See the
+  // header of `autoplayRefill.ts`. Written from an effect rather than
+  // during render so the continuation only ever sees committed state.
+  const liveRef = useRef({
+    items: queue.items,
+    nowPlayingIndex: now_playing_index,
+    sessionId: session_anchor?.session_id,
+  });
+  useEffect(() => {
+    liveRef.current = {
+      items: queue.items,
+      nowPlayingIndex: now_playing_index,
+      sessionId: session_anchor?.session_id,
+    };
+  });
+
+  // Explicit re-arm for refills that placed nothing. One that places
+  // tracks re-triggers the effect through `queue.items`; one that aborts
+  // or comes back empty changes no dep, so without this the queue sits
+  // under threshold until something unrelated wakes the effect.
+  const [retryTick, bumpRetry] = useState(0);
+
+  // Unmount guard. Deliberately *not* the old per-run `cancelled` flag:
+  // a re-render must not discard a refill, but a torn-down provider must.
+  const disposedRef = useRef(false);
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+    };
+  }, []);
+
   // Provenance set: item_ids that the refill effect has pushed. The
   // member check is the "is this a recommendation?" query.
   //
@@ -128,6 +187,9 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
       itemId !== undefined && recommendedIdsRef.current.has(itemId),
     [],
   );
+  const markRecommendations = useCallback((itemIds: readonly string[]) => {
+    for (const id of itemIds) recommendedIdsRef.current.add(id);
+  }, []);
 
   useEffect(() => {
     if (!autoplay) return;
@@ -167,14 +229,17 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
       if (fallbackCandidates.length === 0) return;
     }
 
-    const queuedIds = new Set<string>(items.map((it) => it.track_id));
     const need = MIN_UPCOMING - upcomingCount;
     const nowPlayingTrackId = items[now_playing_index]?.track_id;
+    const requestSessionId = session_anchor?.session_id;
 
     isRefillingRef.current = true;
-    let cancelled = false;
     void (async () => {
-      let added = 0;
+      // Assume the worst until the plan says otherwise: a thrown request
+      // is indistinguishable from underdelivery here, and "back off, then
+      // try again" is the right response to both.
+      let rearm = true;
+      let backOff = true;
       try {
         const queueContext = {
           queueTrackIds: items.map((it) => it.track_id),
@@ -182,63 +247,85 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
           diversityMode: DIVERSITY_MODE,
           mmrLambda: settings.mmrLambda,
         };
-        const sessionId = session_anchor?.session_id;
         const { tracks } =
           weightedSeeds.length > 0
-            ? await startWeightedStation(weightedSeeds, need, queueContext, sessionId, {
+            ? await startWeightedStation(weightedSeeds, need, queueContext, requestSessionId, {
                 anchorIds,
                 tau: settings.leashTau,
                 lambda: settings.leashLambda,
               })
             : await startStationFromAny(fallbackCandidates, need, queueContext);
-        if (cancelled) return;
-        for (const t of tracks) {
-          if (added >= need) break;
-          // Defense against WS lag: the optimistic local push has
-          // already updated `items` but the server's view (and so its
-          // exclusion set) might be one snapshot behind. A duplicate
-          // that slips through here would be a re-add of a track we
-          // just played; cheap to guard against.
-          if (queuedIds.has(t.id)) continue;
+        if (disposedRef.current) {
+          rearm = false;
+          backOff = false;
+          return;
+        }
+        // Re-decide against the queue as it is *now*, not the snapshot
+        // this request was built from — see `autoplayRefill.ts`.
+        const live = liveRef.current;
+        const plan = planRefill({
+          requestSessionId,
+          liveItems: live.items,
+          liveNowPlayingIndex: live.nowPlayingIndex,
+          liveSessionId: live.sessionId,
+          tracks,
+          minUpcoming: MIN_UPCOMING,
+        });
+        rearm = needsRearm(plan);
+        backOff = isUnderdelivery(plan);
+        // Synchronous: every push lands before React can re-render, so
+        // the batch is all-or-nothing from any observer's point of view.
+        for (const t of plan.push) {
           const newItemId = pushTrack(t);
           recommendedIdsRef.current.add(newItemId);
-          queuedIds.add(t.id);
-          added++;
         }
-      } catch {
-        // Silent — recommender unavailable, no embedded seed, etc.
-        // The user-visible effect is "the queue stays under threshold",
-        // which is the same fallback behaviour a non-autoplay queue
-        // would have anyway. Surfacing this as a toast on every miss
-        // would be noisy.
+      } catch (err) {
+        // Not fatal — recommender unavailable, no embedded seed, etc.
+        // Kept off the UI (a toast on every miss would be noise) but no
+        // longer invisible: this catch used to swallow the only evidence
+        // that autoplay had stopped refilling.
+        console.warn("[autoplay] refill failed:", err);
       } finally {
         // Cooldown to outlast the WS round-trip; see top-of-file note.
-        // Release the lock unconditionally — `cancelled` is about not
-        // pushing stale tracks, not about lock hygiene. Gating release
-        // on `cancelled` would deadlock the lock on any non-trivial
-        // refill, since cleanup fires on every queue.items broadcast
-        // (5+ times during a single refill) and `cancelled` would
-        // already be true by the time this timeout runs.
+        // Release the lock unconditionally — a lock held past its
+        // refill is exactly what turns one dropped result set into
+        // "autoplay never recovers".
         //
-        // Underdelivery → bump the cooldown. Means the server's
-        // diversity filter ate most candidates; retrying immediately
-        // with the same seeds + queue would yield the same results.
-        // Hold off until the cursor moves and the seed pool freshens.
-        const cooldown =
-          added < need ? UNDERDELIVERY_COOLDOWN_MS : REFILL_COOLDOWN_MS;
+        // Genuine underdelivery → long cooldown. The server's diversity
+        // filter ate the candidates; retrying immediately with the same
+        // seeds and queue would yield the same nothing. A *stale* result
+        // (the session moved under us) is not underdelivery and takes
+        // the short cooldown — we want to re-ask for the new session
+        // promptly, which is the whole point of the re-arm below.
+        const cooldown = backOff
+          ? UNDERDELIVERY_COOLDOWN_MS
+          : REFILL_COOLDOWN_MS;
         setTimeout(() => {
           isRefillingRef.current = false;
+          if (rearm && !disposedRef.current) bumpRetry((n) => n + 1);
         }, cooldown);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [autoplay, queue.items, now_playing_index, session_anchor, pushTrack, settings]);
+  }, [
+    autoplay,
+    queue.items,
+    now_playing_index,
+    session_anchor,
+    pushTrack,
+    settings,
+    retryTick,
+  ]);
 
   return (
     <Ctx.Provider
-      value={{ autoplay, setAutoplay, isRecommendation, settings, setSettings }}
+      value={{
+        autoplay,
+        setAutoplay,
+        isRecommendation,
+        markRecommendations,
+        settings,
+        setSettings,
+      }}
     >
       {children}
     </Ctx.Provider>

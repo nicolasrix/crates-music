@@ -3,6 +3,8 @@
 //! (a single user, but conceptually scoped) and applies ops in arrival
 //! order. Last-Writer-Wins per field falls out of linear application.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -107,6 +109,7 @@ impl SyncState {
                     started_ms: now_ms,
                 });
             }
+            SyncOp::ReplaceUpcoming { items } => self.apply_replace_upcoming(items),
             SyncOp::StopSession => {
                 self.playback.session_anchor = None;
             }
@@ -147,6 +150,32 @@ impl SyncState {
         if let Some(id) = cursor_item_id {
             self.playback.now_playing_index = self.playback.queue.position_of(&id);
         }
+    }
+
+    /// Swap the queue's tail (everything the cursor hasn't reached) for
+    /// `items`. History and the current track survive untouched, which is
+    /// what makes a live shuffle-mode flip safe: the `<audio>` element on
+    /// every client keeps playing the same track at the same position.
+    fn apply_replace_upcoming(&mut self, items: &[QueueItem]) {
+        // A valid cursor is always in bounds, so `keep` can't exceed the
+        // queue length; `truncate` is a no-op in the None case anyway.
+        let keep = self.playback.now_playing_index.map_or(0, |i| i + 1);
+        self.playback.queue.items.truncate(keep);
+        // Seeded from what survived, so `insert` rejects both a collision
+        // with history and a repeat inside `items` itself.
+        let mut seen: HashSet<QueueItemId> = self
+            .playback
+            .queue
+            .items
+            .iter()
+            .map(|i| i.item_id.clone())
+            .collect();
+        let fresh: Vec<QueueItem> = items
+            .iter()
+            .filter(|i| seen.insert(i.item_id.clone()))
+            .cloned()
+            .collect();
+        self.playback.queue.items.extend(fresh);
     }
 
     fn normalize_cursor(&mut self) {

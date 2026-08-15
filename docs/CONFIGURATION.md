@@ -120,8 +120,8 @@ override when running CLaMP 3.
 |---|---|---|---|---|
 | `embedding_dim` | usize | no | `512` | Must match the embedder backend's output dim. CLAP = 512, CLaMP 3 = 768. The ANN sidecar is not migratable across a dim change — wipe `gateway-state.ann` + `.ann.keys` when changing it. |
 | `whitening_enabled` | bool | no | `true` | All-but-the-Top whitening of the content ANN. De-cones the anisotropic CLaMP 3 vectors and enables cross-modal text-station centering. |
-| `preference_enabled` | bool | no | `false` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. |
-| `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. |
+| `preference_enabled` | bool | no | `true` | User-preference re-scoring. When on, the recommend ranking tilts each candidate's relevance by its **affinity** — likes/plays raise it, dislikes/skips lower it — on top of acoustic similarity. The affinity signal is always captured (every play/skip/vote), so enabling this later "just works" with full history; the flag only gates the read. A fresh library with no listening history is a no-op regardless. Defaulted off until the bonus was made scale-correct on the multi-seed `from-seeds` path (see `preference_weight`); set `false` for pure acoustic + explicit-likes ranking. |
+| `preference_weight` | f32 | no | `0.15` | Weight `β` on the affinity bonus: `relevance += β · affinity`, with `affinity ∈ [-1, 1]`. Kept near the artist-penalty magnitude so preference reorders near-ties without overriding a clear acoustic-relevance gap. **Expressed in cosine units**, so it is directly comparable to a similarity on `/next` and `from-any`; on `from-seeds` (score = `Σ wᵢ·simᵢ`) the gateway multiplies it by the summed seed weight to keep the same meaning — raise/lower this knob, never compensate for the scale by hand. |
 | `affinity_half_life_days` | f32 | no | `30.0` | Half-life of the per-track affinity decayed counter. Older signal fades toward zero with this half-life so taste can drift. |
 | `like_bonus` | f32 | no | `0.15` | Relevance boost added to a **liked track** (`PUT /v1/library/rating`). Distinct from `preference_*`: the like/dislike channel is durable, never decays, and is **always-on** regardless of `preference_enabled`. A dislike has no knob — it hard-excludes the entity from play entirely. |
 | `like_bonus_album` | f32 | no | `0.06` | Boost added to every track of a **liked album**. Additive with `like_bonus` and `like_bonus_artist`. |
@@ -137,7 +137,7 @@ override when running CLaMP 3.
 [recommend]
 embedding_dim          = 768   # CLaMP 3; default 512 (CLAP)
 whitening_enabled      = true
-preference_enabled     = false # tilt ranking by like/skip/play affinity
+preference_enabled     = true  # tilt ranking by like/skip/play affinity
 preference_weight      = 0.15
 affinity_half_life_days = 30.0
 recently_played_exclude_hours = 4.0  # autoplay: don't re-serve recently-heard tracks
@@ -176,6 +176,53 @@ Discovery runs whether or not the embedder is reachable — queue rows are
 durable, and the ingest worker drains them when the sidecar comes back.
 Enqueueing during an embedder outage is the point: nothing is lost, it
 just waits.
+
+### `[lyrics]` (optional)
+
+Per-track lyrics behind `GET /v1/lyrics/:track_id`. On by default; the
+whole section can be omitted.
+
+Resolution is tiered: the file's own tags/`.lrc` sidecar (via Navidrome's
+OpenSubsonic `songLyrics` extension) win outright, and an external
+community database fills the — in practice very large — remainder. On a
+library whose files carry no lyric tags, Navidrome alone returns nothing:
+it surfaces tags, it never fetches from the internet.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | bool | no | `true` | Master switch. When `false`, `/v1/lyrics/*` returns 404 and nothing is fetched or stored. |
+| `external_lookup` | bool | no | `true` | Whether to consult the external provider. `false` keeps the feature on but limits it to what Navidrome already has — **zero egress**, at the cost of near-zero coverage on an untagged library. |
+| `provider_url` | string | no | `https://lrclib.net` | Provider root. |
+| `user_agent` | string | no | `crates-music/<version> (self-hosted)` | Outbound User-Agent; the provider asks clients to identify themselves. |
+| `timeout_seconds` | u64 | no | `8` | Per-request timeout against the provider. Deliberately short — a lookup sits in front of a UI panel. |
+| `hit_ttl_days` | u32 | no | `180` | TTL for a successful answer. Long: lyrics for a released track don't change. |
+| `miss_ttl_days` | u32 | no | `7` | TTL for a confirmed miss. Short: the community database grows, so today's miss is plausibly next month's hit. |
+| `max_concurrent` | usize | no | `4` | Ceiling on simultaneous outbound provider requests — politeness as much as resources. |
+| `duration_tolerance_seconds` | u32 | no | `2` | How far a fuzzy-search candidate's duration may differ from ours before it's rejected. This is what stops a live version's lyrics landing on the studio cut. |
+
+```toml
+[lyrics]
+enabled                    = true
+external_lookup            = true
+provider_url               = "https://lrclib.net"
+timeout_seconds            = 8
+hit_ttl_days               = 180
+miss_ttl_days              = 7
+max_concurrent             = 4
+duration_tolerance_seconds = 2
+```
+
+**The privacy knob is `external_lookup`.** With it on, the first play of
+a track sends its artist and title to the provider — once per track, from
+the gateway only, never from each device. With it off, nothing leaves the
+LAN. Answers are cached in `gateway-state.recommend.sqlite`
+(`track_lyrics`), shared across every client in the household, and
+available offline.
+
+A **failure is never cached**: a provider 404 stores a miss for
+`miss_ttl_days`, but an unreachable provider stores nothing and the
+endpoint answers 503, so a brief outage can't render as "this song has no
+lyrics" for a week.
 
 ## CLI config (`~/.config/crates-music/config.toml`)
 
@@ -225,7 +272,7 @@ Cache directory follows the same XDG layout under
 | `MUSIC_GATEWAY_CONFIG` | — | Path to `gateway.toml`. Overridden by `--config` flag. |
 | `RUST_LOG` | `info` | Tracing filter. `RUST_LOG=music_gateway=debug,sqlx=warn` is a good debug starting point. |
 | `RECOMMEND_EMBEDDING_DIM` | — | Consumed by `docker/gateway/gen_config.py` to emit the `[recommend] embedding_dim` section. Unset → no section → gateway defaults to 512. Set `768` for CLaMP 3. |
-| `RECOMMEND_PREFERENCE_ENABLED` | — | `gen_config.py` → `[recommend] preference_enabled`. `true` to turn on affinity re-scoring (see the `[recommend]` table). Unset → gateway default `false`. |
+| `RECOMMEND_PREFERENCE_ENABLED` | — | `gen_config.py` → `[recommend] preference_enabled`. `false` to turn off affinity re-scoring (see the `[recommend]` table). Unset → gateway default `true`. |
 | `RECOMMEND_PREFERENCE_WEIGHT` | — | `gen_config.py` → `[recommend] preference_weight`. Unset → gateway default `0.15`. |
 | `RECOMMEND_AFFINITY_HALF_LIFE_DAYS` | — | `gen_config.py` → `[recommend] affinity_half_life_days`. Unset → gateway default `30.0`. |
 | `RECOMMEND_LIKE_BONUS` | — | `gen_config.py` → `[recommend] like_bonus`. Unset → gateway default `0.15`. |

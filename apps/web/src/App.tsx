@@ -25,6 +25,7 @@ import { SignIn } from "./pages/SignIn";
 import { Station } from "./pages/Station";
 import { Tracks } from "./pages/Tracks";
 import { AutoplayProvider } from "./player/AutoplayContext";
+import { PlayModeProvider } from "./player/PlayModeContext";
 import { PlayerBar } from "./player/PlayerBar";
 import { PlayerProvider } from "./player/PlayerContext";
 import { modeFromSlug } from "./pages/listMode";
@@ -62,10 +63,15 @@ export function App() {
         <AudioCacheProvider>
           <PlayerProvider>
             <AutoplayProvider>
-              <div className="shell">
-                <Routed path={path} />
-                <PlayerBar />
-              </div>
+              {/* PlayModeProvider is inside AutoplayProvider: smart
+                  shuffle marks its mixed-in tracks as recommendations
+                  through the same provenance set autoplay uses. */}
+              <PlayModeProvider>
+                <div className="shell">
+                  <Routed path={path} />
+                  <PlayerBar />
+                </div>
+              </PlayModeProvider>
             </AutoplayProvider>
           </PlayerProvider>
         </AudioCacheProvider>

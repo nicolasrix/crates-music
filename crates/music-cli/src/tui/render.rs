@@ -36,13 +36,21 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
         Section::Diagnostics => views::diagnostics::draw(f, main, app, theme),
     }
 
+    // Lyrics cover the main pane only — the transport bar and sidebar stay
+    // usable, because the pane is meant to be read *while* listening. Drawn
+    // here rather than in the overlay match below for that reason: it is the
+    // one overlay that takes `main`, not `f.area()`.
+    if app.overlay == Overlay::Lyrics {
+        views::lyrics::draw(f, main, app, theme);
+    }
+
     widgets::now_playing::draw(f, bar, app, theme);
 
     match app.overlay {
         Overlay::Help => views::help::draw(f, f.area(), theme),
         Overlay::PlaylistPicker => views::playlists::draw_picker(f, f.area(), app, theme),
         Overlay::TextPrompt => views::playlists::draw_text_prompt(f, f.area(), app, theme),
-        Overlay::None => {}
+        Overlay::Lyrics | Overlay::None => {}
     }
 }
 
@@ -148,6 +156,32 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app, &theme)).unwrap();
         let backend = TestBackend::new(20, 6);
         let mut tiny = Terminal::new(backend).unwrap();
+        tiny.draw(|f| draw(f, &mut app, &theme)).unwrap();
+
+        // The lyric pane, both empty and with a document longer than the
+        // pane is tall — the window arithmetic is the part that could panic
+        // on a slice, and a 6-row terminal is where it would.
+        app.overlay = Overlay::Lyrics;
+        terminal.draw(|f| draw(f, &mut app, &theme)).unwrap();
+        tiny.draw(|f| draw(f, &mut app, &theme)).unwrap();
+        app.lyrics.doc = crate::tui::state::Loadable::Ready(crate::api::LyricsOutcome::Doc(
+            Box::new(crate::api::LyricsDoc {
+                track_id: "t1".to_owned(),
+                source: "lrclib".to_owned(),
+                match_kind: Some("search".to_owned()),
+                synced: true,
+                instrumental: false,
+                lines: None,
+                plain: None,
+            }),
+        ));
+        app.lyrics.lines = (0..40)
+            .map(|i| crate::api::LyricLine {
+                start_ms: i * 1000,
+                text: format!("line {i}"),
+            })
+            .collect();
+        terminal.draw(|f| draw(f, &mut app, &theme)).unwrap();
         tiny.draw(|f| draw(f, &mut app, &theme)).unwrap();
     }
 }

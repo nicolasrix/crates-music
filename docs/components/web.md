@@ -2,7 +2,7 @@
 
 **Path:** `apps/web/`
 **Type:** Vite + React 19 single-page app, installable as a PWA
-**Test count:** 207 (Vitest, 19 files)
+**Test count:** 340 (Vitest, 35 files)
 
 The browser client — and, installed to a phone's home screen as a
 PWA, *the* mobile client (native mobile was retired; see
@@ -64,6 +64,16 @@ apps/web/
 Pages today (`apps/web/src/pages/`):
 
 - `Home`, `Albums`, `Album`, `Artists`, `Artist`, `Tracks` — catalog.
+  `Artist` carries a **"most played"** chart above the discography,
+  ranked by our own play counts and hidden entirely for an artist
+  that's never been played. It does *not* come from `getTopSongs`:
+  Navidrome backs that endpoint with Last.fm's top-tracks chart mapped
+  onto local files, and its rows mostly carry no `playCount` at all.
+  Real counts only ride `search3` song rows, so the section pulls the
+  artist's catalog via `searchArtistSongs` and ranks client-side in
+  `sync/mostPlayed.ts` — Subsonic has no "this artist's songs, by
+  plays" endpoint. The hero's play button still uses `getTopSongs`,
+  which is the right source for "start with the hits."
 - `Search`, `SearchBucket`, `searchRanking.ts`, `listMode.ts` —
   search with bucketed top-results re-ranking.
 - `Playlist` — playlist view + management.
@@ -122,9 +132,11 @@ default panel, never the reverse.
       <AudioCacheProvider>  {/* IndexedDB cache, trackId → blob: URL map */}
         <PlayerProvider>    {/* current track, audio element */}
           <AutoplayProvider>{/* tethered-drift autoplay refill */}
-            <ArtworkProvider>{/* extracted cover palette */}
-              ...
-            </ArtworkProvider>
+            <PlayModeProvider>{/* shuffle modes + context memory */}
+              <ArtworkProvider>{/* extracted cover palette */}
+                ...
+              </ArtworkProvider>
+            </PlayModeProvider>
           </AutoplayProvider>
         </PlayerProvider>
       </AudioCacheProvider>
@@ -220,6 +232,53 @@ scrobbles are batched into `/v1/events` every 5s. Media Session
 action handlers (play/pause/next/prev/seek) + `setPositionState`
 drive lock-screen / notification controls on phones.
 
+### Play modes (`player/playMode.ts`, `playModePlan.ts`, `PlayModeContext.tsx`)
+
+Clicking a track inside *any* list — album, playlist, liked songs, an
+artist's top songs, search results, downloads — queues **that whole
+list** as the current *context*, anchored on the track you clicked.
+`usePlayback.playList` is the single funnel; `playSingle` survives only
+for surfaces with no list around the track (the latent-space plots).
+
+The player bar's shuffle button is tri-state, cycling
+`in order → shuffle → shuffle + recommendations`:
+
+| Mode | Queue |
+|---|---|
+| `in_order` | the context as it stands |
+| `shuffle` | clicked track first, the rest reordered |
+| `smart_shuffle` | as `shuffle`, plus one recommendation mixed in after every 4 context tracks |
+
+Three things carry the design:
+
+- **The click never waits.** `audio.play()` only counts while the
+  gesture is live, so a context starts playing immediately, already
+  shuffled. Smart shuffle's recommendations are fetched *afterwards*
+  (`/v1/recommend/from-seeds`, seeded by the whole context) and folded
+  in with a second op. They're registered through
+  `AutoplayContext.markRecommendations`, so the player-bar thumbs treat
+  a mixed-in track exactly like an autoplay-refilled one.
+- **Only the queue tail is rewritten**, via the `replace_upcoming` sync
+  op. Flipping shuffle mid-song must not restart the song — on this
+  device or any other one watching the room.
+- **The context is remembered client-side** (`playMode.ts`'s stored
+  context: session id + the original id order, in `localStorage`). The
+  server queue is the *shuffled* result and has no memory of what it
+  was shuffled from, so without this "shuffle off" could not restore
+  anything. It survives a reload; a queue started on another device has
+  no local memory, and there `in_order` declines to re-plan rather than
+  inventing an order (it still applies to the next thing you start).
+
+The ordering maths — start order, re-plan on a flip, interleave, how
+many recommendations to ask for — is pure and lives in
+`playModePlan.ts` with unit tests. `PlayModeContext` is only the
+plumbing: state, persistence, the recommender call, and the race
+guards.
+
+Distinct from autoplay, which is about the queue running *out*:
+autoplay appends a station at the end, smart shuffle salts the list
+you're already playing. Both can be on.
+
 ### Two notions of "the current track"
 
 `PlayerContext` tracks these separately, and the distinction is
@@ -291,6 +350,83 @@ Enforcement is *also* server-side and always-on (dislikes are excluded from
 recommendations, likes boost them) — the client maps only drive the UI and
 the optimistic auto-skip.
 
+## Lyrics (`player/LyricsPanel.tsx`)
+
+A button in the player bar's right cluster opens a panel over the main
+area — the current track's lyrics, the line being sung highlighted, and
+any timed line clickable to seek there. It follows track changes, and
+closes on Escape.
+
+- **`api/lyrics.ts`** wraps `GET /v1/lyrics/:trackId` and
+  `POST /v1/lyrics/:trackId/refresh`. The gateway normalizes every
+  source, so the client never sees LRC text — only
+  `lines: [{start_ms, text}]`.
+- **`player/activeLine.ts`** is the whole highlight: a binary search for
+  the last line started by the current position. Pure, unit-tested, and
+  cheap enough to run on every animation frame.
+- **`player/useLyrics.ts`** is the TanStack Query wrapper. `staleTime` is
+  an hour — the gateway already owns the real cache policy (a hit lives
+  for months, a confirmed absence for a week), so a second client-side
+  TTL would only add round-trips.
+
+Four things are load-bearing:
+
+- **Only the index changes trigger a render.** The panel reads
+  `audio.currentTime` on `requestAnimationFrame`, like the scrubber, but
+  compares the computed line index against a ref and calls `setState`
+  only when it differs. A naive version re-renders the whole lyric list
+  60×/s for a value that changes every few seconds.
+- **The panel portals to `<body>`.** `.player` sets `backdrop-filter`,
+  which makes it a containing block for fixed-position descendants — a
+  `position: fixed` child would anchor to the 92px bar, not the viewport.
+- **Auto-scroll yields to the user on `wheel`/`touchmove`, not
+  `scroll`.** `scrollIntoView` fires `scroll` too, so a `scroll`-based
+  detector would switch following off the first time the panel scrolled
+  on the user's behalf. A pill offers the way back.
+- **"No lyrics" and "couldn't check" are different screens.** A
+  confirmed absence (`source: "none"`) offers *look again*; a 503 offers
+  *try again*; a disabled gateway says so and stops. Merging them would
+  render a transient outage as a permanent absence.
+
+The refresh button re-resolves server-side and is the escape hatch when a
+fuzzy provider match landed on the wrong song — the footer names the
+source, so a "closest match by title and length" attribution is what
+makes that button meaningful. Guests are 403'd there (it rewrites a row
+the whole household reads) and get a toast.
+
+### Offline, prefetch, and the timing nudge
+
+- **`cache/lyricsCache.ts`** is a small IndexedDB store, keyed by track,
+  in its own database. Downloading a track captures its lyrics;
+  unpinning or evicting the audio drops them. That lifetime is the whole
+  bound on the store's size — there is no eviction pass, because the
+  audio budget already caps how many rows can exist. Sign-out wipes it
+  alongside the audio cache, in its own `try` so one failure can't skip
+  the other.
+- **Only downloaded tracks persist.** Lyrics you merely looked at live in
+  the Query cache for the session. Persisting those too would grow
+  without bound and would send a whole listening history's worth of
+  titles to the provider, which is what `[lyrics] external_lookup =
+  false` exists to let you refuse.
+- **The read path is network-first, offline-fallback.** Reading local
+  first would be faster but would pin a download to whatever its lyrics
+  were the day it was saved, including a wrong fuzzy match a later
+  refresh already fixed. A successful fetch writes through to rows that
+  *already* exist, so a download stays current without every browsed
+  track creating one. When the fallback is what's on screen, the footer
+  says `saved copy` and refresh is disabled.
+- **Prefetch is gated on the panel being open**, and warms only the next
+  queue item. Firing on every track change would send the artist and
+  title of everything played to lrclib.net for tracks nobody asked to
+  read.
+- **`player/lyricsOffset.ts`** is a ±0.25 s per-track nudge for LRC files
+  that run early or late, capped at ±5 s (past that it's the wrong song,
+  and *look again* is the real fix). One localStorage key holding a
+  pruned map, not a key per track. The offset is *added to the position*
+  before a line is looked up, so seeking to a line subtracts it — get
+  that backwards and clicking a line on a nudged track lands somewhere
+  the highlight immediately corrects away from.
+
 ## Row menus (`components/RowMenu.tsx`)
 
 The "⋯" popover carried by every result surface — track rows, album rows,
@@ -314,7 +450,11 @@ lists.
   `usePlaylistAdd`, the mutation shared by all three menus. The submenu
   replaces the root body in place rather than opening a second floating
   panel — nested fixed-position elements fight both outside-click
-  detection and the viewport clamping above.
+  detection and the viewport clamping above. Its toast copy comes from
+  `utils/playlistAddMessage.ts`, shared with the sidebar drop target and
+  the playlist page's suggestions so a duplicate ("already in “X”") reads
+  the same on all three — the wording is driven by the gateway's
+  `{ added, skipped }` counts, never by how many ids we submitted.
 
 Two things that look incidental but aren't:
 
@@ -481,12 +621,13 @@ The docker gateway image bakes the built SPA in.
 
 ## Tests
 
-279 Vitest tests across 31 files at last count — pure-logic helpers
+289 Vitest tests across 32 files at last count — pure-logic helpers
 (search ranking, latent-space binning, sync reducer, recommend
 filter shape, scrobble/skip producers, autoplay seeds + settings,
 auto-skip predicates, output-device preference, install prompt,
-settings nav, row-menu placement, bulk-download outcomes) plus the
-IndexedDB audio-cache suite (fake-indexeddb).
+settings nav, row-menu placement, bulk-download outcomes,
+most-played ranking, active lyric line, lyric timing offsets) plus the
+IndexedDB audio- and lyrics-cache suites (fake-indexeddb).
 React-component tests and Playwright end-to-end suites are not yet
 in. The build still runs `tsc -b` which catches refactor breakage.
 

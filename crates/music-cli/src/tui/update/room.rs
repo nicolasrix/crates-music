@@ -91,7 +91,10 @@ fn applied(app: &mut App, op: &SyncOp, version: u64) -> Vec<Effect> {
     // A queue-growth op may reintroduce a previously-unresolvable id (or a
     // now-restored one) — clear the failed set so hydration retries it,
     // bounding retries to queue changes rather than every frame.
-    if matches!(op, SyncOp::Push { .. } | SyncOp::StartSession { .. }) {
+    if matches!(
+        op,
+        SyncOp::Push { .. } | SyncOp::StartSession { .. } | SyncOp::ReplaceUpcoming { .. }
+    ) {
         app.sync.hydrate_failed.clear();
     }
     project(app);

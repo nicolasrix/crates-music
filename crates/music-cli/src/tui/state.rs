@@ -12,7 +12,7 @@ use music_subsonic::{AlbumListType, AlbumWithSongs};
 use music_sync::SyncState;
 use ratatui::widgets::TableState;
 
-use crate::api::{PlaylistSummary, WhoamiInfo};
+use crate::api::{LyricLine, LyricsOutcome, PlaylistSummary, WhoamiInfo};
 
 use super::signal::{PendingEvent, TrackSignal};
 use super::widgets::input::InputField;
@@ -83,6 +83,12 @@ pub(crate) enum Overlay {
     /// Modal single-line text entry (create / rename a playlist). State in
     /// [`App::text_prompt`].
     TextPrompt,
+    /// The now-playing track's lyrics, over the main pane. Unlike the
+    /// others this overlay is **permeable**: it claims j/k/enter for
+    /// reading and seeking, and lets every other key (transport, volume,
+    /// rating) through to the global table — you are meant to keep
+    /// listening while you read. State in [`App::lyrics`].
+    Lyrics,
 }
 
 /// Where the queue's source of truth lives right now.
@@ -205,6 +211,28 @@ impl<T> Loadable<T> {
             _ => None,
         }
     }
+}
+
+/// Lyric-pane state. Lives on `App` rather than inside the overlay enum so
+/// a document survives closing and reopening the pane within one track.
+#[derive(Debug, Default)]
+pub(crate) struct LyricsState {
+    /// Which track `doc` describes. Compared against the playback snapshot
+    /// each tick — that difference is what triggers a reload, so there is
+    /// no separate "track changed" event to miss.
+    pub track_id: Option<String>,
+    pub doc: Loadable<LyricsOutcome>,
+    /// Timestamp-ordered copy of the document's lines, so neither the
+    /// reducer nor the renderer has to re-sort per frame.
+    pub lines: Vec<LyricLine>,
+    /// While true the pane tracks the playhead. Any manual move drops it;
+    /// seeking to a line (or a track change) restores it.
+    pub following: bool,
+    /// Manual reading position. Only consulted while `!following`.
+    pub cursor: usize,
+    /// True once a re-resolve is in flight, so the pane can say so and a
+    /// second `R` can't stack requests.
+    pub refreshing: bool,
 }
 
 /// A like/dislike verdict. `None` in an `Option<Rating>` means neutral.
@@ -596,6 +624,8 @@ pub(crate) struct App {
     /// Admin-only diagnostics section (hidden for non-admins).
     pub diagnostics: DiagnosticsState,
     pub playlists: PlaylistsState,
+    /// Lyrics for the now-playing track (the `y` pane).
+    pub lyrics: LyricsState,
     /// Active playlist picker (add-to-playlist overlay), when open.
     pub picker: Option<PickerState>,
     /// Active text-entry modal (create / rename playlist), when open.
@@ -667,6 +697,7 @@ impl App {
             downloads: DownloadsState::default(),
             diagnostics: DiagnosticsState::default(),
             playlists: PlaylistsState::default(),
+            lyrics: LyricsState::default(),
             picker: None,
             text_prompt: None,
             ratings: HashMap::new(),

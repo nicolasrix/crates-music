@@ -55,6 +55,19 @@ pub struct PlaylistDetail {
     pub track_ids: Vec<String>,
 }
 
+/// What a membership write did. In append mode the gateway skips ids the
+/// playlist already holds, so `skipped > 0` is how the UI knows to say
+/// "already in this playlist" instead of claiming an add. Both fields
+/// default so an older gateway (bare `204`, no body) parses as "added
+/// everything" rather than erroring.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct PlaylistWrite {
+    #[serde(default)]
+    pub added: usize,
+    #[serde(default)]
+    pub skipped: usize,
+}
+
 /// Send a request, mapping a 403 to [`ApiError::Forbidden`] and any other
 /// non-2xx to a `Http` error carrying the server's message text. Success
 /// returns the raw response for the caller to parse (or ignore, for 204s).
@@ -155,23 +168,30 @@ pub async fn delete_playlist(config: &Config, id: &str) -> Result<(), ApiError> 
 /// `append = true` adds after the tail (the row-menu "add to playlist");
 /// `append = false` replaces the whole membership (reorder / remove — pass
 /// the full desired id list). Owner-only (403 → Forbidden).
+/// Answers `{ added, skipped }`: append mode drops ids the playlist already
+/// holds, so the caller must report the server's counts, not the length of
+/// what it sent. A gateway old enough to answer a bodyless `204` parses as
+/// "added everything" (see [`PlaylistWrite`]).
 pub async fn put_playlist_tracks(
     config: &Config,
     id: &str,
     track_ids: &[String],
     append: bool,
-) -> Result<(), ApiError> {
+) -> Result<PlaylistWrite, ApiError> {
     let gw = require_gateway(config)?;
     let token = crate::auth::resolve_bearer(config, gw).await?;
     let url = endpoint(gw, &format!("/v1/playlists/{id}/tracks"));
     let mode = if append { "append" } else { "replace" };
     let body = serde_json::json!({ "track_ids": track_ids, "mode": mode });
-    send_checked(
+    let resp = send_checked(
         http_client(gw)?.put(&url).bearer_auth(&token).json(&body),
         "updating playlist tracks",
     )
     .await?;
-    Ok(())
+    Ok(resp.json().await.unwrap_or(PlaylistWrite {
+        added: track_ids.len(),
+        skipped: 0,
+    }))
 }
 
 /// Aggregate content recommendations from a set of seed tracks (a playlist's

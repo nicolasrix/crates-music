@@ -9,6 +9,7 @@ import {
   Pause,
   Play,
   Repeat,
+  Shuffle,
   SkipBack,
   SkipForward,
   Sparkles,
@@ -27,9 +28,21 @@ import { Link, useRoute } from "../router";
 import { fmtDuration } from "../utils/format";
 import { useSync } from "../sync/SyncContext";
 import { useAutoplay } from "./AutoplayContext";
+import { LyricsToggle } from "./LyricsPanel";
+import { nextMode, type PlayMode } from "./playMode";
+import { usePlayMode } from "./PlayModeContext";
 import { usePlayer } from "./PlayerContext";
 import { useRecommendationFeedback } from "./useRecommendationFeedback";
 import { VolumeControl } from "./VolumeControl";
+
+// Wording for the tri-state shuffle button. Kept next to the button
+// rather than in playMode.ts: these are UI copy, not part of the mode's
+// meaning, and the settings page phrases the same states differently.
+const MODE_LABEL: Record<PlayMode, string> = {
+  in_order: "in order",
+  shuffle: "shuffle",
+  smart_shuffle: "shuffle + recommendations",
+};
 
 export function PlayerBar() {
   const {
@@ -54,6 +67,7 @@ export function PlayerBar() {
   );
   const { path } = useRoute();
   const { autoplay, setAutoplay } = useAutoplay();
+  const { mode, cycleMode } = usePlayMode();
   const onQueuePage = path === "/queue";
   // Desktop-only: drag the now-playing card onto a sidebar playlist. Same
   // pointer:fine gate as the tracklist rows.
@@ -131,6 +145,20 @@ export function PlayerBar() {
       <div className="transport-col">
         <div className="transport">
           <button
+            className={`icon-btn shuffle-btn ${mode === "in_order" ? "" : "is-on"}`}
+            onClick={cycleMode}
+            aria-label={`play mode: ${MODE_LABEL[mode]}`}
+            // Tri-state, so the title has to say both what it is now and
+            // what one more click gets you — a lit-vs-unlit icon can't.
+            title={`${MODE_LABEL[mode]} — click for ${MODE_LABEL[nextMode(mode)]}`}
+            aria-pressed={mode !== "in_order"}
+          >
+            <Shuffle size={18} strokeWidth={1.5} />
+            {mode === "smart_shuffle" && (
+              <Sparkles className="shuffle-badge" size={10} strokeWidth={2} />
+            )}
+          </button>
+          <button
             className="icon-btn"
             disabled
             title="repeat (not yet wired)"
@@ -183,6 +211,10 @@ export function PlayerBar() {
       <div className="right-cluster">
         <EntityRating kind="track" id={nowPlaying.id} />
         <RecommendationFeedback trackId={nowPlaying.id} />
+        {/* Owns its own open state and the panel it opens, so the bar
+            stays a bar — see LyricsPanel for why the panel portals out
+            of here rather than rendering as a child. */}
+        <LyricsToggle />
         <button
           className={`icon-btn ${outputEnabled ? "is-on" : ""}`}
           onClick={() => setOutputEnabled(!outputEnabled)}
