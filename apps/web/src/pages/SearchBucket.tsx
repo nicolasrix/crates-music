@@ -39,7 +39,7 @@ const EXPANDED_OPTS = {
 export function SearchBucket({ bucket }: { bucket: BucketKind }) {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle, playAlbum } = usePlayback();
+  const { playList, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query, "expanded"],
@@ -134,7 +134,7 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
           <TrackTable
             tracks={[...ranked!.tracks]}
             showAlbum
-            onPlay={(i) => playSingle(ranked!.tracks[i]!)}
+            onPlay={(i) => playList(ranked!.tracks, i)}
           />
         </div>
       )}

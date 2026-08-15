@@ -51,6 +51,11 @@ export type SyncOp =
       anchor_index: number;
       session_id: string;
     }
+  // Swap everything after the cursor, leaving the current track (and its
+  // position, play state and session) alone. Backs the shuffle modes:
+  // reshuffle, restore-original-order, and mixing recommendations into a
+  // context are all "rewrite the upcoming half" and nothing else.
+  | { type: "replace_upcoming"; items: QueueItem[] }
   | { type: "stop_session" };
 
 export type ServerMessage =

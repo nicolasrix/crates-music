@@ -80,6 +80,22 @@ function applyToPlayback(p: PlaybackState, op: SyncOp): PlaybackState {
         },
       };
     }
+    case "replace_upcoming": {
+      // Mirrors `SyncState::apply_replace_upcoming`: keep history + the
+      // current track, drop the rest, append the new tail. Ids already
+      // present in the kept prefix (or repeated within `items`) are
+      // dropped — a queue holding one item_id twice makes remove/reorder
+      // ambiguous.
+      const keep = p.now_playing_index === null ? 0 : p.now_playing_index + 1;
+      const head = p.queue.items.slice(0, keep);
+      const seen = new Set(head.map((i) => i.item_id));
+      const tail = op.items.filter((i) => {
+        if (seen.has(i.item_id)) return false;
+        seen.add(i.item_id);
+        return true;
+      });
+      return { ...p, queue: { items: [...head, ...tail] } };
+    }
     case "stop_session":
       return { ...p, session_anchor: null };
   }

@@ -110,6 +110,7 @@ pub enum SyncOp {
     SetPlaying { is_playing: bool },
     Clear,                                            // also nulls the session anchor
     StartSession { items: Vec<QueueItem>, anchor_index: usize, session_id: SessionId },
+    ReplaceUpcoming { items: Vec<QueueItem> },        // swaps the queue tail only
     StopSession,
 }
 ```
@@ -127,6 +128,22 @@ pub enum SyncOp {
   session is an *intent* signal, not a playback command. It is
   idempotent (accepted and version-bumped even with no active
   session).
+
+**`ReplaceUpcoming`** swaps everything *after* the cursor for `items`
+and touches nothing else — the playing track keeps its position, play
+state and session anchor. With no cursor it replaces the whole queue.
+Ids already present in the retained prefix (or repeated inside `items`)
+are dropped, so the queue can never hold one `item_id` twice, which
+would make `Remove`/`Reorder` ambiguous.
+
+It exists for the clients' play modes: turning shuffle on, turning it
+off (restoring the context's own order), and mixing recommendations into
+a context are all "rewrite the upcoming half". As one op the rewrite is
+atomic for every observer — nobody sees a half-shuffled queue — and a
+60-track album costs one frame instead of ~120 `Remove`/`Push` pairs.
+Note that a *client* still needs to remember the pre-shuffle order
+itself; the queue has no memory of what it was shuffled from (see the
+web client's PlayModeContext).
 
 Each op is `apply`-able to a `SyncState`:
 

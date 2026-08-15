@@ -89,6 +89,11 @@ interface AutoplayCtx {
    *  conflating "I added this manually" with "it came from a rec" is
    *  worse than the buttons going dim after a reload. */
   isRecommendation: (itemId: string | undefined) => boolean;
+  /** Record queue items as recommender output. Used by smart shuffle,
+   *  which mixes recommendations into a context rather than appending
+   *  them — same provenance, different placement, so the feedback
+   *  buttons must light up for both. */
+  markRecommendations: (itemIds: readonly string[]) => void;
   /** Tethered-drift tuning (leash radius/strength, frontier, MMR λ).
    *  Read by the refill effect and edited from the Settings page. */
   settings: AutoplaySettings;
@@ -182,6 +187,9 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
       itemId !== undefined && recommendedIdsRef.current.has(itemId),
     [],
   );
+  const markRecommendations = useCallback((itemIds: readonly string[]) => {
+    for (const id of itemIds) recommendedIdsRef.current.add(id);
+  }, []);
 
   useEffect(() => {
     if (!autoplay) return;
@@ -310,7 +318,14 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ autoplay, setAutoplay, isRecommendation, settings, setSettings }}
+      value={{
+        autoplay,
+        setAutoplay,
+        isRecommendation,
+        markRecommendations,
+        settings,
+        setSettings,
+      }}
     >
       {children}
     </Ctx.Provider>

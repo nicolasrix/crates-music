@@ -20,6 +20,7 @@ function mockSync() {
       session_id: "sess-test",
     };
     submitted.push(op);
+    return "sess-test";
   });
   return { startSession, submitted };
 }

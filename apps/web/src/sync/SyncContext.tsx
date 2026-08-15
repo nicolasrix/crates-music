@@ -45,8 +45,16 @@ interface SyncCtx {
   pushTrack: (track: Track) => string;
   /** Atomically replace the queue with `tracks` and start a fresh
    *  recommend-session anchored on `tracks[anchorIndex]`. One op,
-   *  one round-trip — replaces the legacy 4-op pattern. */
-  startSession: (tracks: readonly Track[], anchorIndex: number) => void;
+   *  one round-trip — replaces the legacy 4-op pattern. Returns the
+   *  new session id so the caller can file what it started under
+   *  (see PlayModeContext's context memory). */
+  startSession: (tracks: readonly Track[], anchorIndex: number) => string;
+  /** Swap everything after the cursor for `trackIds`, leaving the
+   *  current track playing untouched. `meta` is optional metadata to
+   *  stash for ids we already have Tracks for (otherwise the queue
+   *  hydration effect fetches them). Returns the minted item ids,
+   *  positionally matching `trackIds`. */
+  replaceUpcoming: (trackIds: readonly string[], meta?: readonly Track[]) => string[];
   ready: boolean;
 }
 
@@ -249,16 +257,31 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 
   const startSession = useCallback(
     (tracks: readonly Track[], anchorIndex: number) => {
-      if (tracks.length === 0) return;
+      if (tracks.length === 0) return "";
       for (const t of tracks) trackMetaRef.current.set(t.id, t);
       forceMetaTick((n) => n + 1);
       const items = tracks.map((t) => ({ item_id: newItemId(), track_id: t.id }));
+      const sessionId = newSessionId();
       submit({
         type: "start_session",
         items,
         anchor_index: anchorIndex,
-        session_id: newSessionId(),
+        session_id: sessionId,
       });
+      return sessionId;
+    },
+    [submit],
+  );
+
+  const replaceUpcoming = useCallback(
+    (trackIds: readonly string[], meta?: readonly Track[]) => {
+      if (meta && meta.length > 0) {
+        for (const t of meta) trackMetaRef.current.set(t.id, t);
+        forceMetaTick((n) => n + 1);
+      }
+      const items = trackIds.map((id) => ({ item_id: newItemId(), track_id: id }));
+      submit({ type: "replace_upcoming", items });
+      return items.map((i) => i.item_id);
     },
     [submit],
   );
@@ -270,10 +293,11 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       submit,
       pushTrack,
       startSession,
+      replaceUpcoming,
       ready,
     }),
     // metaTick: trackMeta is a mutable ref; the tick is its change signal.
-    [state, ready, submit, pushTrack, startSession, metaTick],
+    [state, ready, submit, pushTrack, startSession, replaceUpcoming, metaTick],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
