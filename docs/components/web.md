@@ -301,6 +301,83 @@ Enforcement is *also* server-side and always-on (dislikes are excluded from
 recommendations, likes boost them) — the client maps only drive the UI and
 the optimistic auto-skip.
 
+## Lyrics (`player/LyricsPanel.tsx`)
+
+A button in the player bar's right cluster opens a panel over the main
+area — the current track's lyrics, the line being sung highlighted, and
+any timed line clickable to seek there. It follows track changes, and
+closes on Escape.
+
+- **`api/lyrics.ts`** wraps `GET /v1/lyrics/:trackId` and
+  `POST /v1/lyrics/:trackId/refresh`. The gateway normalizes every
+  source, so the client never sees LRC text — only
+  `lines: [{start_ms, text}]`.
+- **`player/activeLine.ts`** is the whole highlight: a binary search for
+  the last line started by the current position. Pure, unit-tested, and
+  cheap enough to run on every animation frame.
+- **`player/useLyrics.ts`** is the TanStack Query wrapper. `staleTime` is
+  an hour — the gateway already owns the real cache policy (a hit lives
+  for months, a confirmed absence for a week), so a second client-side
+  TTL would only add round-trips.
+
+Four things are load-bearing:
+
+- **Only the index changes trigger a render.** The panel reads
+  `audio.currentTime` on `requestAnimationFrame`, like the scrubber, but
+  compares the computed line index against a ref and calls `setState`
+  only when it differs. A naive version re-renders the whole lyric list
+  60×/s for a value that changes every few seconds.
+- **The panel portals to `<body>`.** `.player` sets `backdrop-filter`,
+  which makes it a containing block for fixed-position descendants — a
+  `position: fixed` child would anchor to the 92px bar, not the viewport.
+- **Auto-scroll yields to the user on `wheel`/`touchmove`, not
+  `scroll`.** `scrollIntoView` fires `scroll` too, so a `scroll`-based
+  detector would switch following off the first time the panel scrolled
+  on the user's behalf. A pill offers the way back.
+- **"No lyrics" and "couldn't check" are different screens.** A
+  confirmed absence (`source: "none"`) offers *look again*; a 503 offers
+  *try again*; a disabled gateway says so and stops. Merging them would
+  render a transient outage as a permanent absence.
+
+The refresh button re-resolves server-side and is the escape hatch when a
+fuzzy provider match landed on the wrong song — the footer names the
+source, so a "closest match by title and length" attribution is what
+makes that button meaningful. Guests are 403'd there (it rewrites a row
+the whole household reads) and get a toast.
+
+### Offline, prefetch, and the timing nudge
+
+- **`cache/lyricsCache.ts`** is a small IndexedDB store, keyed by track,
+  in its own database. Downloading a track captures its lyrics;
+  unpinning or evicting the audio drops them. That lifetime is the whole
+  bound on the store's size — there is no eviction pass, because the
+  audio budget already caps how many rows can exist. Sign-out wipes it
+  alongside the audio cache, in its own `try` so one failure can't skip
+  the other.
+- **Only downloaded tracks persist.** Lyrics you merely looked at live in
+  the Query cache for the session. Persisting those too would grow
+  without bound and would send a whole listening history's worth of
+  titles to the provider, which is what `[lyrics] external_lookup =
+  false` exists to let you refuse.
+- **The read path is network-first, offline-fallback.** Reading local
+  first would be faster but would pin a download to whatever its lyrics
+  were the day it was saved, including a wrong fuzzy match a later
+  refresh already fixed. A successful fetch writes through to rows that
+  *already* exist, so a download stays current without every browsed
+  track creating one. When the fallback is what's on screen, the footer
+  says `saved copy` and refresh is disabled.
+- **Prefetch is gated on the panel being open**, and warms only the next
+  queue item. Firing on every track change would send the artist and
+  title of everything played to lrclib.net for tracks nobody asked to
+  read.
+- **`player/lyricsOffset.ts`** is a ±0.25 s per-track nudge for LRC files
+  that run early or late, capped at ±5 s (past that it's the wrong song,
+  and *look again* is the real fix). One localStorage key holding a
+  pruned map, not a key per track. The offset is *added to the position*
+  before a line is looked up, so seeking to a line subtracts it — get
+  that backwards and clicking a line on a nudged track lands somewhere
+  the highlight immediately corrects away from.
+
 ## Row menus (`components/RowMenu.tsx`)
 
 The "⋯" popover carried by every result surface — track rows, album rows,
@@ -496,8 +573,8 @@ The docker gateway image bakes the built SPA in.
 filter shape, scrobble/skip producers, autoplay seeds + settings,
 auto-skip predicates, output-device preference, install prompt,
 settings nav, row-menu placement, bulk-download outcomes,
-most-played ranking) plus the IndexedDB audio-cache suite
-(fake-indexeddb).
+most-played ranking, active lyric line, lyric timing offsets) plus the
+IndexedDB audio- and lyrics-cache suites (fake-indexeddb).
 React-component tests and Playwright end-to-end suites are not yet
 in. The build still runs `tsc -b` which catches refactor breakage.
 

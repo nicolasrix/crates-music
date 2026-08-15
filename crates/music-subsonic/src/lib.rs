@@ -14,7 +14,9 @@ use reqwest::Client as Http;
 use url::Url;
 
 pub use error::{Error, Result};
-pub use wire::{AlbumWithSongs, ArtistWithAlbums, SearchResult3};
+pub use wire::{
+    AlbumWithSongs, ArtistWithAlbums, SearchResult3, StructuredLyrics, SubsonicLyricLine,
+};
 
 const CLIENT_NAME: &str = "crates-music";
 const PROTOCOL_VERSION: &str = "1.16.1";
@@ -227,6 +229,16 @@ impl Client {
         let params = vec![("id", id.as_str().to_string())];
         let body = self.fetch_text("getSong", &params).await?;
         wire::parse_get_song(&body)
+    }
+
+    /// Fetch a track's lyrics (OpenSubsonic `songLyrics` extension). An
+    /// empty vec means the server has none — which is the common case,
+    /// since Navidrome only surfaces what the file's own tags or a
+    /// sidecar `.lrc` carry.
+    pub async fn get_lyrics_by_song_id(&self, id: &TrackId) -> Result<Vec<StructuredLyrics>> {
+        let params = vec![("id", id.as_str().to_string())];
+        let body = self.fetch_text("getLyricsBySongId", &params).await?;
+        wire::parse_get_lyrics(&body)
     }
 
     /// List every artist (ID3 `getArtists`), flattened across the index

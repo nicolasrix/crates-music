@@ -9,11 +9,12 @@
 //! pick up refreshed tokens naturally.
 //!
 //! This root module holds the shared error/wire types plus ratings, events,
-//! search, whoami, sync-snapshot, and track hydration; the recommender and
-//! playlist fetchers live in the [`recommend`] and [`playlists`] submodules
-//! (glob-re-exported, so callers still use `api::<name>`).
+//! search, whoami, sync-snapshot, and track hydration; the recommender,
+//! playlist and lyrics fetchers live in the [`recommend`], [`playlists`] and
+//! [`lyrics`] submodules (re-exported, so callers still use `api::<name>`).
 
 mod diagnostics;
+mod lyrics;
 mod playlists;
 mod recommend;
 
@@ -22,6 +23,7 @@ pub use diagnostics::{
     RecentlyPlayed, RecommenderPanels, TraceEntry, client_events, histogram, latent_neighbours,
     latent_space, queue_depth, recently_played, recommender_panels, traces,
 };
+pub use lyrics::{LyricLine, LyricsDoc, LyricsOutcome, get_lyrics, refresh_lyrics};
 pub use playlists::{
     PlaylistDetail, PlaylistSummary, SuggestList, create_playlist, delete_playlist, get_playlist,
     list_playlists, put_playlist_tracks, rename_playlist, suggest_from_seeds,

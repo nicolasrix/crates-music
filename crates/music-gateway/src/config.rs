@@ -30,6 +30,9 @@ pub struct Config {
     /// tracks for embedding without a manual bulk-enqueue run.
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    /// Per-track lyrics resolution (`GET /v1/lyrics/:track_id`).
+    #[serde(default)]
+    pub lyrics: LyricsConfig,
 }
 
 /// `[discovery]` — the background catalog watcher that feeds the
@@ -83,6 +86,107 @@ fn default_discovery_full_interval_seconds() -> u64 {
 
 fn default_discovery_recent_albums() -> u32 {
     50
+}
+
+/// `[lyrics]` — per-track lyrics resolution behind `GET /v1/lyrics/:id`.
+/// See `crate::lyrics` for the tiered lookup this configures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricsConfig {
+    /// Master switch. When false the endpoint 404s and nothing is
+    /// fetched or stored.
+    #[serde(default = "default_lyrics_enabled")]
+    pub enabled: bool,
+    /// Whether to consult the external provider at all. `false` keeps the
+    /// feature on but restricts it to what Navidrome already has in the
+    /// files' own tags — **zero egress**, at the cost of near-zero
+    /// coverage on an untagged library. This is the privacy knob: the
+    /// external path sends artist + title off the LAN once per track.
+    #[serde(default = "default_lyrics_external_lookup")]
+    pub external_lookup: bool,
+    /// Provider root.
+    #[serde(default = "default_lyrics_provider_url")]
+    pub provider_url: String,
+    /// Outbound User-Agent. The provider asks clients to identify
+    /// themselves; a shared default would make our traffic
+    /// indistinguishable from every other tool's.
+    #[serde(default = "default_lyrics_user_agent")]
+    pub user_agent: String,
+    /// Per-request timeout against the provider. Short: a lyrics lookup
+    /// sits in front of a UI panel, and a slow answer is worse than a
+    /// retryable one.
+    #[serde(default = "default_lyrics_timeout_seconds")]
+    pub timeout_seconds: u64,
+    /// TTL for a successful answer. Long — lyrics for a released track do
+    /// not change.
+    #[serde(default = "default_lyrics_hit_ttl_days")]
+    pub hit_ttl_days: u32,
+    /// TTL for a miss. Much shorter than a hit's: the community database
+    /// grows, so today's miss is plausibly next month's hit.
+    #[serde(default = "default_lyrics_miss_ttl_days")]
+    pub miss_ttl_days: u32,
+    /// Ceiling on simultaneous outbound provider requests. Politeness
+    /// bound as much as a resource one — a queue prefetch could otherwise
+    /// fan out a burst.
+    #[serde(default = "default_lyrics_max_concurrent")]
+    pub max_concurrent: usize,
+    /// How far a fuzzy-search candidate's duration may differ from ours
+    /// before it is rejected. This is what stops a live version's lyrics
+    /// landing on the studio cut; widening it trades precision for
+    /// coverage.
+    #[serde(default = "default_lyrics_duration_tolerance_seconds")]
+    pub duration_tolerance_seconds: u32,
+}
+
+impl Default for LyricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_lyrics_enabled(),
+            external_lookup: default_lyrics_external_lookup(),
+            provider_url: default_lyrics_provider_url(),
+            user_agent: default_lyrics_user_agent(),
+            timeout_seconds: default_lyrics_timeout_seconds(),
+            hit_ttl_days: default_lyrics_hit_ttl_days(),
+            miss_ttl_days: default_lyrics_miss_ttl_days(),
+            max_concurrent: default_lyrics_max_concurrent(),
+            duration_tolerance_seconds: default_lyrics_duration_tolerance_seconds(),
+        }
+    }
+}
+
+fn default_lyrics_enabled() -> bool {
+    true
+}
+
+fn default_lyrics_external_lookup() -> bool {
+    true
+}
+
+fn default_lyrics_provider_url() -> String {
+    "https://lrclib.net".to_string()
+}
+
+fn default_lyrics_user_agent() -> String {
+    concat!("crates-music/", env!("CARGO_PKG_VERSION"), " (self-hosted)").to_string()
+}
+
+fn default_lyrics_timeout_seconds() -> u64 {
+    8
+}
+
+fn default_lyrics_hit_ttl_days() -> u32 {
+    180
+}
+
+fn default_lyrics_miss_ttl_days() -> u32 {
+    7
+}
+
+fn default_lyrics_max_concurrent() -> usize {
+    4
+}
+
+fn default_lyrics_duration_tolerance_seconds() -> u32 {
+    2
 }
 
 /// `[search]` — the fuzzy catalog index behind `GET /v1/search`.

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use music_cache::Cache;
 use music_gateway::Config;
 use music_gateway::config::{
-    CacheConfig, DiscoveryConfig, OauthConfig, RecommendConfig, ServerConfig, UpstreamConfig,
+    CacheConfig, DiscoveryConfig, LyricsConfig, OauthConfig, RecommendConfig, ServerConfig,
+    UpstreamConfig,
 };
 use music_gateway::diagnostics::TraceStore;
 use music_gateway::embedder::EmbedderHandle;
@@ -82,6 +83,14 @@ pub fn test_config_with_upstream(url: &str, username: &str, password: &str) -> C
         discovery: DiscoveryConfig {
             enabled: false,
             ..DiscoveryConfig::default()
+        },
+        // Lyrics resolution stays on (the routes need a resolver), but the
+        // external provider is off by default so no test can reach the
+        // real internet. Tests that exercise the external tiers point
+        // `provider_url` at their own wiremock and flip this back on.
+        lyrics: LyricsConfig {
+            external_lookup: false,
+            ..LyricsConfig::default()
         },
     }
 }

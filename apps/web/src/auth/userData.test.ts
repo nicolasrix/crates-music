@@ -5,6 +5,7 @@ import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { getAudioCache } from "../cache/audioCache";
+import { getLyricsCache } from "../cache/lyricsCache";
 import { clearUserData } from "./userData";
 
 // The vitest `node` env has no localStorage; install a minimal in-memory
@@ -65,5 +66,28 @@ describe("clearUserData", () => {
     await clearUserData();
 
     expect(await cache.getMetaByTrack("t1")).toBeNull();
+  });
+
+  it("wipes the offline lyrics of downloaded tracks", async () => {
+    // A separate database from the audio, so it needs its own assertion —
+    // otherwise the previous user's saved lyrics survive an account switch
+    // on a shared browser, which is the whole point of this module.
+    const lyrics = getLyricsCache();
+    await lyrics.put({
+      track_id: "t1",
+      source: "lrclib",
+      match_kind: "exact",
+      synced: false,
+      instrumental: false,
+      lines: null,
+      plain: "words",
+      provider_id: null,
+      fetched_at: 1,
+    });
+    expect(await lyrics.get("t1")).not.toBeNull();
+
+    await clearUserData();
+
+    expect(await lyrics.get("t1")).toBeNull();
   });
 });
