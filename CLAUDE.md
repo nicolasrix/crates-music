@@ -35,25 +35,13 @@ Navidrome speaks the **Subsonic API** (with OpenSubsonic extensions). Treat the 
 
 ## Repo layout (Cargo workspace monorepo)
 
-```
-crates/
-  music-core/        # domain types (Track, Album, Queue, PlaybackState)
-  music-subsonic/    # typed Subsonic / OpenSubsonic client (reqwest)
-  music-cache/       # SQLite metadata cache + on-disk LRU audio cache
-  music-player/      # native playback (rodio + symphonia)
-  music-sync/        # WebSocket client, optimistic state, queue merge
-  music-recommend/   # SERVER-ONLY: CLaMP 3 embedder client, ANN index, whitening
-                     #   (track2vec / behavioural index deferred — P6.8)
-  music-gateway/     # the gateway binary
-  music-cli/         # the CLI binary (`crates-cli`: subcommands + interactive TUI)
+`ls crates/` for the crate list; each crate's `lib.rs` header says what it
+does. Two things the tree does not tell you:
 
-apps/
-  web/               # TS + React SPA (also the installable PWA = mobile)
-
-services/
-  embedder/          # Python (FastAPI) inference sidecar — CLaMP 3 (live)
-                     #   or LAION CLAP (legacy); see Status for backends
-```
+- `music-recommend` is **server-only** — never link it into a client.
+- Cross-crate boundaries matter more than the layout: clients consume
+  `music-core` types and talk to the gateway; only the gateway touches
+  `music-recommend`.
 
 > **Planned but never built:** `crates/music-ffi` (UniFFI bindings) and
 > `apps/mobile` (Compose Multiplatform). Both belonged to the native-mobile
@@ -440,59 +428,34 @@ docker watchdog (`docker-compose.embedder-failover.yml` +
 `docker/embedder/watchdog.sh`) can start/stop a local CPU fallback on
 demand. See `docs/DEPLOYMENT.md` "Embedder failover".
 
-**Multi-user & roles — IN FLIGHT (authored, rolling out across PRs
-A–F).** Retires the original single-user assumption: a three-role model
-(**admin / user / guest**) with full per-user isolation of gateway-owned
-state, all piggybacked on the existing hand-rolled OAuth (opaque tokens,
-no JWT — preserves instant revocation + the device-grant CLI flow). The
-**ownership boundary**: the gateway still talks to one Navidrome account,
-so the *catalog* (albums/artists/tracks, scrobble counts) stays shared,
-while gateway-owned state (queue/playback, taste, ratings, affinity,
-recommendations, event log, **playlists**, tokens/sessions) partitions by
-user. Locked decisions + full design live in `docs/plans/user-system.md`
-(intentionally **uncommitted**). PR sequence (critical path A→C→D):
+**Multi-user & roles — DONE** (three-role model, shipped across PRs A–F,
+all merged). Retires the original single-user assumption: **admin / user /
+guest** with full per-user isolation of gateway-owned state, piggybacked on
+the existing hand-rolled OAuth (opaque tokens, no JWT — preserves instant
+revocation + the device-grant CLI flow). Locked decisions + full design live
+in `docs/plans/user-system.md`, which is deliberately **untracked** (working
+notes, not shipped).
 
-- **A — Identity foundation (MERGED to `dev`, PR #25).** Gateway
-  migrations `0004_users_roles` + `0005_token_user_id`; `Principal { user_id,
-  role, host_user_id }` + `AuthPrincipal` extractor; `require_bearer`
-  injects identity; real `GET /v1/whoami`; capability map
-  (`Role::can`); **admin-gating** layer on `/v1/admin/*`,
-  `/v1/diagnostics/*`, `refit_whitening`, `enqueue`; web hides admin
-  panels for non-admins. Still one shared room.
-- **B — Accounts + multi-user login (open, PR #26).** Admin user CRUD
-  (`/v1/admin/users` + password reset), `username` field on
-  `/oauth/login`, web Users UI + AccountPanel role display.
-- **C — Sync rooms (open, PR #27).** `SyncStore` → `HashMap<room_id,
-  RoomSync>` + per-room broadcast bus; handlers/WS resolve
-  `principal.room_id()`. Users get private cross-device queues; a WS
-  subscriber only sees its own room.
-- **D — Guest rooms (open, PR #28, stacked on C).** Gateway migration
-  `0006_guest_codes`; `POST /oauth/guest` code redemption → ephemeral
-  guest principal with `host_user_id` + expiry; guest GC sweep
-  (`guest_session_ttl_seconds` / `guest_sweep_interval_seconds` config);
-  web "Join as guest" + host guest-code UI. Guests attach to the host's
-  room (shared jukebox).
-- **E — Per-user taste isolation (open, PR #29).** Recommend migrations
-  `0017+` add a `user_id` column to the per-user signal tables
-  (`events`, `play_history`, `recommend_feedback`, `track_rating`,
-  `entity_rating`, `track_affinity`, `recommendation_log`); handlers
-  filter by the room's host user; guest signal dropped from training.
-  Content ANN/embeddings are unchanged (shared, content-addressed).
-- **F — Gateway-owned playlists (open, PR #30).** Gateway migration
-  `0007_playlists`; playlist CRUD moves off Navidrome's `/rest/*` onto
-  `/v1/playlists/*` (private-per-user; `shared` opt-in; existence-hiding
-  404 for non-owners; guests can't write). A playlist stores only
-  Navidrome track ids — clients hydrate via `/rest/getSong`. One-time
-  `scripts/import_navidrome_playlists.py` migrates existing Navidrome
-  playlists into the owner.
+The load-bearing invariant is the **ownership boundary**: the gateway talks to
+one Navidrome account, so the *catalog* (albums/artists/tracks, scrobble
+counts) is shared, while gateway-owned state — queue/playback, taste, ratings,
+affinity, recommendations, event log, playlists, tokens/sessions — partitions
+by user. Anything new that stores per-user signal belongs on the partitioned
+side.
 
-Migration-numbering caveat: gateway `0006` (D) and `0007` (F) are
-authored on parallel branches; if F deploys to a live box before D, D's
-later `0006` is out-of-order on that already-migrated DB — sequence D
-before/with F. Per-PR doc updates ride **inside each PR**
-(`docs/API.md`, `docs/components/*`, `docs/CONFIGURATION.md`,
-`docs/RUNBOOK.md`); the cross-cutting framing in `CLAUDE.md`,
-`docs/README.md`, and `docs/ARCHITECTURE.md` was swept 2026-06-10.
+Consequences worth knowing before touching this area:
+
+- Guests are ephemeral principals attached to a **host user's room** (shared
+  jukebox), are 403'd on write/admin tiers, and their taste signal is dropped
+  from training — don't let guest events reach the recommender.
+- Sync is per-room: `SyncStore` is a `HashMap<room_id, RoomSync>` and a WS
+  subscriber only ever sees its own room.
+- Playlists are gateway-owned (`/v1/playlists/*`), private per user with an
+  opt-in `shared` flag and existence-hiding 404s for non-owners. They store
+  only Navidrome track ids; clients hydrate via `/rest/getSong`.
+- Migration numbering is a real hazard when authoring on parallel branches —
+  two branches both claiming `0006` apply out-of-order on an already-migrated
+  DB. Check the highest applied number before adding one.
 
 **Diagnostics surface (M2.1 + M2.2 + M3) done.** Authenticated
 endpoints read the M0 trace store and the new client-events ring,
@@ -576,71 +539,29 @@ therefore *the* cross-platform client; "mobile parity" means making the
 web UI good on phone viewports + wiring the mobile-browser web APIs, not
 shipping a second app.
 
-**Web PWA + offline playback — DONE, merged to `dev` 2026-06-07.**
-Brings the CLI's L3 audio cache + pinning to the web client and makes the
-SPA an installable, offline-capable PWA (branch `feat/web-pwa-offline`,
-plus `feat/web-mobile-responsive`, `fix/oauth-mobile-viewport`,
-`feat/mobile-touch-polish`):
+**The PWA + offline slice is done** (merged 2026-06-07). What matters for
+future work, rather than the feature inventory (see `git log` and
+`docs/components/`):
 
-- `apps/web/src/cache/` — an IndexedDB reimplementation of the
-  `crates/music-cache` contract (content-addressed `(trackId, bitrate,
-  codec)`; two-budget LRU: a regular auto-cached budget + a separate
-  never-evicted pinned budget; `put/get/touch/pin/unpin/listPinned/stats/
-  evict`). Audio is stored as whole-file blobs and served to `<audio>` via
-  `URL.createObjectURL` — chosen over a Service-Worker + Cache-API approach
-  because the gateway stream endpoint has **no HTTP Range support**, so the
-  browser must seek locally against a stored file. 15 vitest unit tests
-  (`audioCache.test.ts`, fake-indexeddb).
-- `AudioCacheContext` bridges cache↔playback. An in-memory
-  `trackId → blob:URL` map, warmed for the queue window, lets the
-  gesture-critical `primePlayback` resolve a src **synchronously**; the
-  natural-advance effect (no live gesture) awaits the cache and prefers the
-  local blob. Played tracks are auto-cached (regular budget); "save for
-  offline" pins (pinned budget) — mirrors CLI semantics.
-- UI: per-track "save for offline" in the row menu, bulk "download
-  album/playlist" buttons, a `/downloads` page (stats + pinned list + "free
-  up space" = evict), budget sliders in Settings (lowering evicts
-  immediately), and a topbar offline indicator.
-- PWA: `vite-plugin-pwa` (`registerType:autoUpdate`) precaches the app
-  shell so it boots with no network; `/v1`, `/rest`, `/oauth` are
-  NetworkOnly and audio never touches the SW. Manifest + maskable SVG icon
-  make it installable. The gateway already serves `sw.js` /
-  `manifest.webmanifest` from the static dir root (no gateway change).
-  `autoUpdate` also fixes the stale-bundle white-screen seen on deploys.
-
-**Mobile polish shipped on top (same merge):**
-
-- **Responsive layout** — sidebar collapses to a drawer, the player bar
-  becomes a two-row phone layout, tables reflow, touch targets enlarged.
-- **OAuth pages fixed for phones** (`6190d2c`) — the four server-rendered
-  pages (login + the three RFC 8628 device pages) gained a
-  `width=device-width` viewport meta; phones had been rendering them at
-  980px / 0.37× scale. Plus `autocomplete`/`autocapitalize` hints on the
-  password + device-code inputs. These live in `oauth/handlers.rs`,
-  *outside* the SPA, which is why they needed a separate fix.
-- **Install prompt** (`apps/web/src/pwa/installPrompt.ts`) — captures
-  `beforeinstallprompt` at module load (Chromium fires it once, early) and
-  surfaces an "Install as app" button on the Settings page; iOS shows a
-  Share → Add to Home Screen hint instead (Safari never fires the event).
-- **Lock-screen controls** — Media Session `setActionHandler` for
-  play/pause/next/prev/seek + `setPositionState` for the scrubber.
-- **Queue reorder via the row menu** (move to top/up/down) so reordering
-  works on phones where the chevron buttons are hidden.
-- **Transcode-to-fit** (`downloadQuality`: original | opus128 | mp3128 in
-  `cacheSettings.ts`) — needed **no gateway work**. The planned `/v1/stream`
-  endpoint was never built; audio rides the verbatim `/rest/*` proxy, and
-  Navidrome itself honors `format`/`maxBitRate` (the same params ingest
-  uses). Verified live: opus@128 → 4.3 MB vs 10.4 MB original. Cache keys
-  now carry the real `(bitrate, codec)` instead of null.
-- **Queue metadata hydration after reload** (`SyncContext.tsx`) — an
-  installed PWA's normal lifecycle is relaunch-from-snapshot, which left
-  queue items with ids but no titles (blank player bar, Media Session, row
-  menus). A `getSong` backfill effect re-hydrates `trackMeta`; the context
-  value keys on a `metaTick` so consumers re-render when it arrives.
-
-The whole stack was rebuilt into the gateway image, shipped to the gateway host, and
-verified live (manifest 200, apple-touch-icon 200, `beforeinstallprompt`
-present in the running bundle).
+- `apps/web/src/cache/` reimplements the `music-cache` contract in IndexedDB.
+  Audio is stored as **whole-file blobs** served via `URL.createObjectURL`,
+  *not* a Service-Worker + Cache-API setup — because the stream endpoint has
+  **no HTTP Range support**, so the browser has to seek locally against a
+  stored file. Don't "modernize" this to the SW approach without fixing Range
+  first.
+- `AudioCacheContext` resolves a src **synchronously** for the
+  gesture-critical `primePlayback` path (an in-memory `trackId → blob:URL`
+  map warmed over the queue window); only the natural-advance path, which has
+  no live user gesture, is allowed to await the cache. Breaking that
+  distinction breaks playback on iOS.
+- The four OAuth pages are server-rendered **outside** the SPA
+  (`oauth/handlers.rs`), so SPA-level viewport/meta fixes never reach them —
+  they need their own.
+- An installed PWA's normal lifecycle is relaunch-from-snapshot, so queue
+  items arrive with ids but no metadata; `SyncContext` backfills via `getSong`
+  and consumers must key on its `metaTick` to re-render.
+- Transcode-to-fit needed no gateway work: the verbatim `/rest/*` proxy passes
+  `format`/`maxBitRate` straight to Navidrome.
 
 - **Open (real-device only, can't be done headless):** install to home
   screen, airplane-mode offline launch + playback, screen-off background
@@ -649,199 +570,20 @@ present in the running bundle).
   install — the earlier mkcert caveat only applies to the `gateway.local`
   dev cert.
 
-### Running the gateway locally
+### Running it locally
 
-```
-# 1. Generate TLS cert (one-time)
-./scripts/dev-certs.sh
+Setup is documented once, in `docs/`, so it can't drift from this file:
 
-# 2. Write a gateway config — see crates/music-gateway/tests for shape
+- [`docs/GETTING-STARTED.md`](./docs/GETTING-STARTED.md) — dev certs, gateway
+  config, CLI config, the `crates-cli auth login` device flow, Vite dev server.
+- [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) — every config block,
+  including `[embedder]` (backends, `fallback_urls`) and `[cache]` budgets.
+- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) — containers, reverse proxy,
+  split-host embedder, model/dim bumps.
+- Benchmarks: the `benchmarks` skill (`.claude/skills/benchmarks/`).
 
-# 3. Start the gateway
-cargo run -p music-gateway -- --config /path/to/gateway.toml
-
-# 4. Configure CLI to use it (~/.config/crates-music/config.toml):
-[server]
-url = "http://nav.lan:4533"
-username = "alice"
-password = "wonderland"
-
-[gateway]
-url = "https://gateway.local:8443"
-# ca_cert_path = "/home/alice/.local/share/mkcert/rootCA.pem"  # for gateway.local certs
-
-# 5. Authenticate (Device Authorization Grant, RFC 8628). There is no
-#    static bearer token — run this once; tokens persist to a sibling
-#    cli-tokens.json (0600) and refresh automatically:
-#    crates-cli auth login   → prints a code + URL; approve in a logged-in browser
-#    crates-cli auth status  → show token state;  crates-cli auth logout → revoke + clear
-```
-
-`[server]` creds are kept so you can flip between gateway and direct mode without rewriting them. Add a `gateway.local → <gateway-ip>` entry to `/etc/hosts` on each client device, or run mDNS.
-
-### Web client setup
-
-```toml
-# Add to gateway.toml
-[[oauth.clients]]
-client_id = "web"
-name = "Web"
-redirect_uris = [
-    "http://localhost:5173/oauth/callback",      # Vite dev
-    "https://gateway.local:8443/oauth/callback", # production same-origin
-]
-```
-
-Run the dev stack:
-
-```
-# 1. Gateway (Rust, TLS + OAuth + cache + Subsonic proxy)
-cargo run -p music-gateway -- --config /path/to/gateway.toml
-
-# 2. Web app (Vite, http://localhost:5173)
-cd apps/web && npm install && npm run dev
-```
-
-On first run, the gateway logs a one-time setup URL; visit it,
-choose a master password, then the sign-in button on the web app
-will work.
-
-### Embedder sidecar (optional, for recommendations)
-
-The recommender requires the Python sidecar. Without it, the gateway
-boots in degraded mode and `/v1/recommend/next` returns 404 for every
-seed. Stub backend works for local dev — no GPU, no PyTorch:
-
-```bash
-cd services/embedder
-uv sync                # or: pip install -e '.[dev]'
-uv run uvicorn embedder.app:app --port 9000
-```
-
-For real inference (production), the live backend is **CLaMP 3** (768-dim):
-
-```bash
-uv sync --extra clamp3   # pulls torch + transformers + MERT deps
-EMBEDDER_BACKEND=clamp3 CLAMP3_CHECKPOINT=/path/to/clamp3_saas.pth \
-  MERT_FOLDER=m-a-p/MERT-v1-95M \
-  uv run uvicorn embedder.app:app --port 9000
-```
-
-The legacy CLAP backend (512-dim) is still available via
-`uv sync --extra clap` + `EMBEDDER_BACKEND=clap CLAP_CHECKPOINT=…`, but
-the production deployment runs CLaMP 3 (see the CLaMP 3 migration notes
-in Status). Then add to `gateway.toml`:
-
-```toml
-[embedder]
-url = "http://localhost:9000"
-# fallback_urls = ["http://cpu-fallback:9000"]  # re-probed; survives a primary outage
-timeout_seconds = 30        # default; inference on CPU can take 10+ s
-```
-
-The gateway's `[recommend] embedding_dim` must match the backend's dim
-(768 for CLaMP 3, 512 for CLAP) — a dim change is non-migratable and
-requires wiping/rebuilding the ANN sidecar. Restart the gateway; you
-should see `embedder: probe ok model=… dim=768 device=cuda` in the
-logs. Unlike the original boot-only probe, the gateway now re-probes on
-an interval (`probe_interval_seconds`, default 20) and fails over to
-`fallback_urls`, so a sidecar that comes up after the gateway is picked
-up automatically.
-
-### Audio cache (`[cache]` block, optional)
-
-```
-[cache]
-# path = "/var/cache/crates-music/audio"   # default: $XDG_CACHE_HOME/crates-music/audio
-regular_budget_bytes = 10737418240          # 10 GB — LRU-evicted
-pinned_budget_bytes  = 5368709120           # 5 GB  — never LRU-evicted
-```
-
-Inspect with `crates-cli cache stats`. Force a fit-to-budget eviction with
-`crates-cli cache evict`. Pin tracks with `crates-cli pin <id>` (auto-fetches if
-not yet cached); see them with `crates-cli pinned`.
-
-### Microbenchmarks (`cargo bench`)
-
-Three Criterion bench suites cover the hot paths surfaced by the
-diagnostics work. They are *regression detectors*, not load tests —
-the goal is "did this PR make X slower than the baseline?", not "what
-is our peak QPS?". For end-to-end load, use the trace store (M0) on a
-running gateway.
-
-| Bench | Crate | Measures |
-|---|---|---|
-| `server_timing` | `music-recommend` | `parse_server_timing` per-call cost across realistic header shapes |
-| `ann` | `music-recommend` | `AnnIndex::upsert` (fresh-insert curve) and `query` (top-10 latency) at N=100/1000/5000 |
-| `embedder_client` | `music-recommend` | `EmbedderClient::embed_audio`/`embed_text` against a wiremock fake — HTTP roundtrip + JSON parse + Server-Timing extraction. *Not inference cost* — that's measured Python-side (see below) |
-| `trace_store` | `music-gateway` | `insert_batch` at batch=1/50/200 with 10k pre-existing rows; `trim_to_capacity` no-op vs over-budget |
-
-Run all benches:
-
-```bash
-cargo bench --workspace
-```
-
-Run one suite (faster feedback during work on a specific module):
-
-```bash
-cargo bench --bench ann -p music-recommend
-```
-
-Quick mode (≈10× faster, less statistical confidence — useful while
-iterating, never for "is this PR a regression?" verdicts):
-
-```bash
-cargo bench --bench server_timing -p music-recommend -- --quick
-```
-
-HTML reports land at `target/criterion/<group>/report/index.html`.
-Criterion remembers the previous run automatically and prints a
-`change: [+X% -Y%] (p = …)` line on the next run — that's the
-regression signal.
-
-Approximate baselines on a Ryzen-class dev machine (for sanity
-checks; do not commit hardware-specific numbers as gates):
-
-- `parse_server_timing` (3 stages): ~115 ns
-- `ann_query_top10` at N=5000: ~100 µs
-- `ann_upsert_from_empty` at N=5000: ~1.1 s (≈225 µs/insert at the high end)
-- `embedder_client_embed_audio` 1 KB: ~27 µs; 1 MB: ~390 µs
-- `embedder_client_embed_text` 16 chars: ~26 µs; 16 KB: ~33 µs
-- `trace_store_insert_batch` at batch=50, table=10k: ~250 µs
-- `trace_store_trim` no-op: ~7 µs
-
-### Python embedder benchmarks (`pytest -m benchmark`)
-
-Two pytest-benchmark suites in `services/embedder/tests/`:
-
-- `test_benchmarks.py` — stub backend (SHA-256 + numpy PRNG). Always runs.
-- `test_benchmarks_clap.py` — real CLAP inference. Skipped unless the
-  `clap` extra is installed *and* `CLAP_CHECKPOINT` points at an
-  on-disk checkpoint.
-
-Run only the benchmarks (regular `pytest` excludes them via the
-`benchmark` mark):
-
-```bash
-cd services/embedder
-uv run --extra dev pytest -m benchmark
-```
-
-Compare against a previous run (auto-saves to `.benchmarks/`):
-
-```bash
-uv run --extra dev pytest -m benchmark --benchmark-autosave
-uv run --extra dev pytest -m benchmark --benchmark-compare
-```
-
-Approximate stub baselines (will vary by CPU):
-
-- `test_stub_embed_text[short]`: ~10 µs (SHA-256 dominates)
-- `test_stub_embed_audio[1mb]`: ~440 µs (linear in input bytes)
-- `test_stub_embed_audio[5mb]`: ~2.1 ms
-
-CLAP baselines depend on hardware and which device is active
-(check `/healthz` `device` field). Run the suite once after a fresh
-`uv sync --extra clap` to capture a baseline before changing the
-preprocessing pipeline or upgrading torch.
+Two things worth knowing before you start: the CLI keeps `[server]` creds
+alongside `[gateway]` so you can flip between gateway and direct mode without
+rewriting config, and the gateway's `[recommend] embedding_dim` **must** match
+the embedder's dim — a mismatch is non-migratable and needs the ANN sidecar
+wiped.
