@@ -26,9 +26,12 @@ use music_recommend::types::ModelVersion;
 
 use tokio::sync::Semaphore;
 
+use music_recommend::LyricsStore;
+
 use crate::config::Config;
 use crate::diagnostics::TraceStore;
 use crate::embedder::EmbedderHandle;
+use crate::lyrics::LyricsResolver;
 use crate::oauth::{OauthStore, SetupToken};
 use crate::playlists::PlaylistStore;
 use crate::proxy::build_http_client;
@@ -63,6 +66,11 @@ struct Inner {
     /// Typo-tolerant search index (`GET /v1/search`). `None` until the
     /// boot builder fills it; queries fall back to Navidrome meanwhile.
     search: crate::search::SearchHandle,
+    /// Lyrics resolution (`GET /v1/lyrics/:track_id`). `None` when
+    /// `[lyrics] enabled = false`, or when the resolver could not be
+    /// built — a misconfigured provider URL degrades the feature rather
+    /// than blocking boot, since nothing else depends on it.
+    lyrics: Option<Arc<LyricsResolver>>,
     setup_token: SetupToken,
     sync: SyncStore,
     embedder: EmbedderHandle,
@@ -158,6 +166,7 @@ impl AppState {
         // Playlists live in the OAuth pool's DB (gateway-state.sqlite),
         // built here from the same pool so they share the migrated schema.
         let playlists = PlaylistStore::new(oauth.pool().clone());
+        let lyrics = build_lyrics_resolver(&config, &metadata_store, embedding_store.pool());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -166,6 +175,7 @@ impl AppState {
                 oauth,
                 playlists,
                 search: crate::search::new_handle(),
+                lyrics,
                 setup_token,
                 sync: SyncStore::with_sessions(sessions.clone()),
                 embedder,
@@ -238,6 +248,13 @@ impl AppState {
 
     pub fn playlists(&self) -> &PlaylistStore {
         &self.inner.playlists
+    }
+
+    /// The lyrics resolver, or `None` when the feature is off. Handlers
+    /// turn `None` into a 404 rather than a 500 — a disabled feature is
+    /// an absent route, not a broken one.
+    pub fn lyrics(&self) -> Option<&Arc<LyricsResolver>> {
+        self.inner.lyrics.as_ref()
     }
 
     pub fn setup_token(&self) -> &SetupToken {
@@ -403,6 +420,40 @@ impl AppState {
 
     pub fn placeholder_revalidations(&self) -> &Mutex<HashMap<String, Instant>> {
         &self.inner.placeholder_revalidations
+    }
+}
+
+/// Build the lyrics resolver, or `None` when disabled. A construction
+/// failure (an unparseable `provider_url`, say) is logged and degrades to
+/// `None`: lyrics are a leaf feature, and refusing to boot the whole
+/// gateway over one would be a worse trade than losing them.
+fn build_lyrics_resolver(
+    config: &Config,
+    metadata_store: &MetadataStore,
+    pool: &sqlx::SqlitePool,
+) -> Option<Arc<LyricsResolver>> {
+    if !config.lyrics.enabled {
+        tracing::info!("lyrics: disabled by config");
+        return None;
+    }
+    match LyricsResolver::new(
+        &config.lyrics,
+        &config.upstream,
+        LyricsStore::new(pool.clone()),
+        metadata_store.clone(),
+    ) {
+        Ok(resolver) => {
+            tracing::info!(
+                external = config.lyrics.external_lookup,
+                provider = %config.lyrics.provider_url,
+                "lyrics: resolver ready"
+            );
+            Some(Arc::new(resolver))
+        }
+        Err(e) => {
+            tracing::error!("lyrics: resolver unavailable ({e}); /v1/lyrics will 404");
+            None
+        }
     }
 }
 

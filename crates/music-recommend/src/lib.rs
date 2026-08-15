@@ -18,6 +18,7 @@ pub mod explore;
 pub mod feedback;
 pub mod ingest;
 pub mod leash;
+pub mod lyrics;
 pub mod metadata;
 pub mod mmr;
 pub mod play_history;
@@ -41,6 +42,7 @@ pub use leash::{
     DEFAULT_LEASH_LAMBDA, DEFAULT_LEASH_TAU, LeashAdjustment, LeashCandidate, LeashParams,
     LeashStats,
 };
+pub use lyrics::{LyricLine, LyricsRow, LyricsSource, LyricsStore, MatchKind};
 pub use metadata::{
     BackfillStats, MetadataStore, TrackMetadata, backfill_metadata, normalize_title,
 };

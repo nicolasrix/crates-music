@@ -31,6 +31,7 @@ tables.
 | `preference` | Pure compute: `preference_bonus`, affinity-event decay (`half_life_days_to_ms`) | n/a |
 | `leash` | Pure compute: anchor-leash demotion (`LeashParams`, `nearest_anchor_sim`) for travelling stations | n/a |
 | `provenance` | `recommendation` + `recommendation_item` tables — append-only log of what was served, with what scores, in what context (training substrate) | `0016` → `0022_recommendation_user_id.sql` |
+| `lyrics` | `track_lyrics` (track_id PK) — resolved per-track lyrics: source, normalized `[{start_ms, text}]`, plain text, expiry. Storage only; resolution policy lives in the gateway's `lyrics/` module | `0023_track_lyrics.sql` |
 
 This crate is **server-only**. It pulls in `usearch` (ships C++),
 `sqlx`, `reqwest`. Mobile clients won't link this.
@@ -49,7 +50,9 @@ to the owner (`DEFAULT 1`). The `user_id` is a plain integer mirroring
 `gateway-state.users.id` — **no foreign key**, since this is a separate
 SQLite file. Content tables (`track_embeddings`, `track_metadata`,
 whitening) are intentionally *not* partitioned — embeddings are
-content-addressed and shared. The gateway resolves which `user_id` to
+content-addressed and shared. `track_lyrics` sits on that same shared
+side: lyrics are a property of the catalog, so a per-user copy would
+multiply identical rows and identical outbound requests. The gateway resolves which `user_id` to
 pass (caller for writes, room host for recommendation reads); see
 [music-gateway.md](./music-gateway.md#per-user-taste-isolation-pr-e).
 
@@ -313,6 +316,7 @@ use music_recommend::{
     LeashParams, LeashCandidate, LeashStats,
     RecommendationLogStore, RecommendationRecord, RecommendationItemRecord,
     RecommendationKind, RecommendationOutcome, StoredRecommendation,
+    LyricsStore, LyricsRow, LyricsSource, LyricLine, MatchKind,
     ann::AnnIndex,
     aggregate::sample_indices,
     ingest::{IngestWorker, AudioFetcher, MetadataFetcher, MetadataIngest, rebuild_ann_from_store},

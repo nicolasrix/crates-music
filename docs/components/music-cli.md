@@ -125,6 +125,7 @@ prefetched for near-gapless handoff.
 | `Space` | play/pause · `n` / `p` next/prev · `,` / `.` seek ∓10 s · `-` / `=` volume · `M` mute |
 | `L` / `D` / `u` | like / dislike / unrate selection |
 | `r` | recommend from now playing → enqueue |
+| `y` | lyrics pane for the now-playing track (`j` `k` read · `Enter` seek to line · `R` look again) |
 | `x` / `c` | queue: remove / clear upcoming |
 | `J` / `K` / `T` | queue: move row down / up / to top |
 | `o` | toggle audio output on this device (sync rooms) |
@@ -197,6 +198,32 @@ Notes:
   A `✦` badge in the now-playing bar shows autoplay is on, and the pick's
   current vote shows next to the title. All drift params live in
   `[tui.autoplay]` and are editable in the Settings section (below).
+- **Lyrics** (`y`, gateway mode): the now-playing track's lyrics over the
+  main pane, the line being sung highlighted, `Enter` seeking to the line
+  under the cursor. No LRC parsing here — the gateway normalizes every
+  source into `{start_ms, text}` lines, so `/v1/lyrics/:id` is the whole
+  client. Three properties worth knowing:
+  - **The pane is permeable**, unlike the help and picker overlays. It
+    claims only `j`/`k`/`Enter`/`R`; everything else (transport, volume,
+    rating) falls through to the global keymap, because the pane is meant
+    to be left open while you listen.
+  - **It follows the playhead until you scroll.** `j`/`k` start from
+    whatever line is lit, and stop it following; `Enter` seeks there and
+    resumes. A track change resumes following from the top.
+  - **The highlight is derived, not stored.** It is recomputed from the
+    playback snapshot each 250 ms tick — four binary searches a second
+    over a list of at most a few hundred lines, which is cheaper than
+    keeping a cached index correct across seeks. The lead constant
+    (`HIGHLIGHT_LEAD_MS`) is half a tick, so the error is centred rather
+    than always late.
+
+  Fetching happens only while the pane is open (the web gates prefetch the
+  same way): resolving lyrics for every track played would send the whole
+  listening history's titles to lrclib.net. A confirmed absence, an
+  unreachable provider and a disabled gateway are three different screens,
+  and `R` re-resolves for the case where a fuzzy match landed on the wrong
+  song. **No timing-offset nudge here** — that one is web-only, since the
+  TUI has no per-track local store to persist it in.
 - **Sync room** (gateway mode): the TUI joins the account's `/v1/sync`
   room on start, so its queue is the *same* queue the web/PWA shows —
   reorder, skip, and play-from-here converge live across devices. Queue
@@ -317,7 +344,7 @@ crates/music-cli/
 │   ├── app.rs        # subcommand dispatcher; client/cache constructors
 │   ├── cli.rs        # clap definitions
 │   ├── api/          # typed /v1 fetchers shared by classic commands + TUI
-│   │                 #   mod (ratings/events/search/whoami/sync) · recommend · playlists · diagnostics
+│   │                 #   mod (ratings/events/search/whoami/sync) · recommend · playlists · lyrics · diagnostics
 │   ├── config.rs     # ~/.config/crates-music/config.toml loader
 │   ├── format.rs     # plain-text table formatters
 │   ├── gateway.rs    # gateway HTTP plumbing (TLS, endpoints, ws URLs)
@@ -328,14 +355,15 @@ crates/music-cli/
 │       ├── keymap.rs     # key → semantic Msg table (renders the ? overlay)
 │       ├── autoplay.rs   # pure tethered-drift seed weighting (port of autoplaySeeds.ts)
 │       ├── update/       # pure reducer: (App, Msg) → Vec<Effect>
-│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads · settings · diagnostics
+│       │                 #   mod (dispatch) · browse · library · playback · room · playlists · autoplay · downloads · settings · diagnostics · lyrics
 │       ├── effects.rs    # tokio tasks per Effect, completions come back as Msgs
 │       │   ├── refill.rs # autoplay from-seeds/from-any refill orchestration
 │       │   ├── downloads.rs # pin / unpin / bulk / warm / evict cache ops
 │       │   └── settings.rs # persist+apply config edits · sign-out · cache invalidate · LiveSettings cell
 │       ├── sync_ws.rs    # session-lived sync WebSocket task (reconnect/backoff)
+│       ├── lyrics.rs    # pure active-line search + pane window (port of activeLine.ts)
 │       ├── state.rs / msg.rs / render.rs / theme.rs / terminal.rs
-│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · settings · diagnostics · help
+│       ├── views/        # library · search · queue · playlists · stations · liked · downloads · settings · diagnostics · lyrics · help
 │       └── widgets/      # now-playing bar, sidebar (offline badge), input field
 └── tests/            # clap parsing, config, formatters
 ```
@@ -471,9 +499,11 @@ UI gating is UX, not security.
 - `tests/format.rs` — table formatter output.
 - Inline unit tests — `api/` DTO parsing, `gateway.rs` URL helpers,
   and the whole TUI core: reducer state transitions (stale-generation
-  drops, prefetch handoff, rating rollback), keymap dispatch
-  (input-focus swallowing), the input field, and a `TestBackend`
-  render smoke test.
+  drops, prefetch handoff, rating rollback, lyric follow/read/seek),
+  keymap dispatch (input-focus swallowing), the input field, the pure
+  active-line search, and a `TestBackend` render smoke test (which
+  includes the lyric pane at 20×6, where the window arithmetic would
+  panic if it could).
 
 Notable: tests don't actually play audio or open a real terminal.
 Transport-queue logic lives in `music-player::PlayQueue` (tested
@@ -498,3 +528,8 @@ there); the audio thread and real rendering stay manual.
   stays on the last track, so this doesn't arise.
 - **Autoplay drift params are config-only** until Phase 7 adds the
   Settings view; runtime `A` toggling isn't persisted back to disk.
+- **Lyrics have no offline copy and no timing nudge.** The web persists a
+  downloaded track's lyrics into IndexedDB and remembers a per-track
+  ±0.25 s offset; the TUI does neither, so its pane needs the gateway and
+  cannot correct an LRC that drifts. Both want somewhere per-track and
+  local to write, which the CLI doesn't have yet.

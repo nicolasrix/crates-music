@@ -324,6 +324,17 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             let result = api::whoami(&ctx.config).await.map_err(|e| e.to_string());
             Some(Msg::WhoamiLoaded { result })
         }
+        Effect::LoadLyrics { track_id, force } => {
+            let fetched = if force {
+                api::refresh_lyrics(&ctx.config, &track_id).await
+            } else {
+                api::get_lyrics(&ctx.config, &track_id).await
+            };
+            Some(Msg::LyricsLoaded {
+                track_id,
+                result: fetched.map_err(|e| e.to_string()),
+            })
+        }
         Effect::AutoplayRefill {
             queue_track_ids,
             now_playing_index,

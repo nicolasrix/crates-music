@@ -10,6 +10,7 @@
 mod autoplay;
 mod effects;
 mod keymap;
+mod lyrics;
 mod mpris;
 mod msg;
 mod render;
