@@ -473,3 +473,128 @@ fn stop_session_when_no_anchor_is_idempotent_no_op() {
     assert_eq!(s.version, 2);
     assert!(s.playback.session_anchor.is_none());
 }
+
+// ── ReplaceUpcoming ───────────────────────────────────────────────────
+//
+// The primitive behind the clients' shuffle modes. Its whole value is
+// what it *doesn't* disturb: the current track keeps playing, at its
+// position, inside the same session — so these tests assert the
+// preserved half as hard as the replaced half.
+
+#[test]
+fn replace_upcoming_swaps_the_tail_and_keeps_history() {
+    let mut s = SyncState::new();
+    s.apply(
+        &start(
+            vec![
+                item("qi-1", "t-1"),
+                item("qi-2", "t-2"),
+                item("qi-3", "t-3"),
+                item("qi-4", "t-4"),
+            ],
+            1,
+            "sess-1",
+        ),
+        NOW,
+    )
+    .unwrap();
+
+    s.apply(
+        &SyncOp::ReplaceUpcoming {
+            items: vec![item("qi-9", "t-9"), item("qi-8", "t-8")],
+        },
+        NOW,
+    )
+    .unwrap();
+
+    // History (qi-1) and the current track (qi-2) survive; the tail is new.
+    assert_eq!(item_ids(&s), vec!["qi-1", "qi-2", "qi-9", "qi-8"]);
+    assert_eq!(s.playback.now_playing_index, Some(1));
+}
+
+#[test]
+fn replace_upcoming_leaves_position_playing_and_anchor_untouched() {
+    let mut s = SyncState::new();
+    s.apply(
+        &start(vec![item("qi-1", "t-1"), item("qi-2", "t-2")], 0, "sess-1"),
+        NOW,
+    )
+    .unwrap();
+    s.apply(&SyncOp::SetPosition { position_ms: 42_000 }, NOW)
+        .unwrap();
+    let anchor = s.playback.session_anchor.clone().unwrap();
+
+    s.apply(
+        &SyncOp::ReplaceUpcoming {
+            items: vec![item("qi-7", "t-7")],
+        },
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(s.playback.position_ms, 42_000, "the current track keeps playing");
+    assert!(s.playback.is_playing);
+    assert_eq!(s.playback.session_anchor, Some(anchor));
+}
+
+#[test]
+fn replace_upcoming_with_no_cursor_replaces_the_whole_queue() {
+    let mut s = SyncState::new();
+    s.apply(&push("qi-1", "t-1"), NOW).unwrap();
+    s.apply(&push("qi-2", "t-2"), NOW).unwrap();
+    assert_eq!(s.playback.now_playing_index, None);
+
+    s.apply(
+        &SyncOp::ReplaceUpcoming {
+            items: vec![item("qi-5", "t-5")],
+        },
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(item_ids(&s), vec!["qi-5"]);
+    assert_eq!(s.playback.now_playing_index, None);
+}
+
+#[test]
+fn replace_upcoming_drops_ids_that_would_duplicate() {
+    let mut s = SyncState::new();
+    s.apply(
+        &start(vec![item("qi-1", "t-1"), item("qi-2", "t-2")], 0, "sess-1"),
+        NOW,
+    )
+    .unwrap();
+
+    s.apply(
+        &SyncOp::ReplaceUpcoming {
+            // qi-1 collides with the retained current track; qi-6 repeats
+            // inside the batch. Both extra copies are dropped — a queue
+            // holding one item_id twice makes Remove/Reorder ambiguous.
+            items: vec![
+                item("qi-6", "t-6"),
+                item("qi-1", "t-1"),
+                item("qi-6", "t-6"),
+            ],
+        },
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(item_ids(&s), vec!["qi-1", "qi-6"]);
+}
+
+#[test]
+fn replace_upcoming_with_empty_items_truncates_to_the_current_track() {
+    let mut s = SyncState::new();
+    s.apply(
+        &start(vec![item("qi-1", "t-1"), item("qi-2", "t-2")], 0, "sess-1"),
+        NOW,
+    )
+    .unwrap();
+
+    s.apply(&SyncOp::ReplaceUpcoming { items: vec![] }, NOW)
+        .unwrap();
+
+    assert_eq!(item_ids(&s), vec!["qi-1"]);
+    assert_eq!(s.playback.now_playing_index, Some(0));
+}

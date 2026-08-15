@@ -775,7 +775,22 @@ unchanged. Bad visibility → 400. Returns the refreshed row.
 Set membership. Body `{ "track_ids": ["t1", …], "mode"?: "replace" }`.
 `mode` is `"replace"` (default — full set / reorder) or `"append"` (add
 after the current tail, used by the row-menu "add to playlist"). Empty
-track ids → 400; more than 10 000 ids → 400. Returns **204**.
+track ids → 400; more than 10 000 ids → 400.
+
+`"append"` is **de-duplicating**: an id the playlist already holds — or
+repeated within the same batch — is skipped rather than inserted twice,
+and an append that adds nothing leaves `updated_ms` alone. `"replace"`
+is literal, since its id list comes from stored membership and must not
+silently drop existing duplicates.
+
+Returns **200**:
+
+```json
+{ "added": 2, "skipped": 1 }
+```
+
+Clients report the *server's* counts, not the length of what they sent —
+that's what drives the web toast / TUI note "already in this playlist".
 
 #### `DELETE /v1/playlists/:id`
 

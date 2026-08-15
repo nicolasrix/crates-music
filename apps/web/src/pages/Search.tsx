@@ -32,7 +32,7 @@ const REST_LIMIT = 5;
 export function Search() {
   const { search } = useRoute();
   const query = new URLSearchParams(search).get("q")?.trim() ?? "";
-  const { playSingle, playAlbum } = usePlayback();
+  const { playSingle, playList, playAlbum } = usePlayback();
 
   const q = useQuery({
     queryKey: ["search", query],
@@ -187,7 +187,7 @@ export function Search() {
               <TrackTable
                 tracks={arr}
                 showAlbum
-                onPlay={(i) => playSingle(arr[i]!)}
+                onPlay={(i) => playList(arr, i)}
               />
             );
           }}

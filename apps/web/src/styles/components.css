@@ -1177,6 +1177,16 @@ button.cover-thumb:focus-visible .thumb-play {
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 .icon-btn:disabled:hover { background: transparent; color: var(--fg-muted); }
 .icon-btn.is-on { color: var(--accent); }
+/* Tri-state shuffle: lit = shuffled, lit + sparkle = shuffled with
+   recommendations mixed in. The badge is positioned rather than a
+   second icon in flow so the button keeps the 36px transport rhythm. */
+.icon-btn.shuffle-btn { position: relative; }
+.icon-btn.shuffle-btn .shuffle-badge {
+  position: absolute;
+  top: 4px;
+  right: 3px;
+  color: var(--accent);
+}
 .icon-btn.play-bar {
   width: 40px;
   height: 40px;

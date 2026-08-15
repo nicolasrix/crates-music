@@ -11,26 +11,29 @@
 import type { Track } from "../api/types";
 
 interface SyncSubmitter {
-  startSession: (tracks: readonly Track[], anchorIndex: number) => void;
+  startSession: (tracks: readonly Track[], anchorIndex: number) => string;
 }
 
 /** Replace the queue with the given tracks and start playing at
- *  `startIndex`. Used when the user explicitly invokes "play whole
- *  album / playlist" from the hero button, or anchors a tracklist
- *  at a specific track. */
+ *  `startIndex`. The list arrives here already in play order — the play
+ *  mode does its shuffling upstream, in PlayModeContext — so this stays
+ *  the one dumb "make this exact list the queue" primitive.
+ *
+ *  Returns the new session id (empty string for a no-op), which callers
+ *  use to file the context the queue was built from. */
 export function playList(
   sync: SyncSubmitter,
   tracks: readonly Track[],
   startIndex: number,
-): void {
-  if (tracks.length === 0) return;
-  sync.startSession(tracks, startIndex);
+): string {
+  if (tracks.length === 0) return "";
+  return sync.startSession(tracks, startIndex);
 }
 
-/** Replace the queue with a single track and play it. Default for
- *  clicking a track in a list — earlier behaviour pushed the
- *  surrounding context (whole album/playlist) which surprised users
- *  who just wanted to hear one song. */
+/** Replace the queue with a single track and play it. For surfaces with
+ *  no surrounding list to queue (the latent-space scatter plots); a
+ *  track clicked inside a *list* takes that list with it — see
+ *  `usePlayback.playList`. */
 export function playSingle(sync: SyncSubmitter, track: Track): void {
   sync.startSession([track], 0);
 }

@@ -145,7 +145,7 @@ async fn create_list_get_track_roundtrip() {
     assert_eq!(items[0]["song_count"], 0);
 
     // Replace membership.
-    let (status, _) = send(
+    let (status, body) = send(
         &h.state,
         "PUT",
         &format!("/v1/playlists/{id}/tracks"),
@@ -153,10 +153,11 @@ async fn create_list_get_track_roundtrip() {
         Some(json!({ "track_ids": ["t1", "t2"] })),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "added": 2, "skipped": 0 }));
 
     // Append one.
-    let (status, _) = send(
+    let (status, body) = send(
         &h.state,
         "PUT",
         &format!("/v1/playlists/{id}/tracks"),
@@ -164,7 +165,8 @@ async fn create_list_get_track_roundtrip() {
         Some(json!({ "track_ids": ["t3"], "mode": "append" })),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "added": 1, "skipped": 0 }));
 
     let (status, body) = send(
         &h.state,
@@ -187,7 +189,7 @@ async fn create_list_get_track_roundtrip() {
         Some(json!({ "track_ids": ["t3", "t1", "t2"] })),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (_, body) = send(
         &h.state,
         "GET",
@@ -324,6 +326,79 @@ async fn shared_playlist_is_readable_not_writable_by_others() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Append is de-duplicating: an id the playlist already holds is reported
+/// back as `skipped` rather than inserted a second time. This is what the
+/// clients' "already in this playlist" notice is built on, so the counts
+/// are part of the contract, not an implementation detail.
+#[tokio::test]
+async fn append_skips_tracks_already_in_the_playlist() {
+    let h = harness().await;
+    let (_, body) = send(
+        &h.state,
+        "POST",
+        "/v1/playlists",
+        &h.owner_token,
+        Some(json!({ "name": "Dupes" })),
+    )
+    .await;
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let (_, body) = send(
+        &h.state,
+        "PUT",
+        &format!("/v1/playlists/{id}/tracks"),
+        &h.owner_token,
+        // The batch itself repeats "t1" — collapsed to one insert.
+        Some(json!({ "track_ids": ["t1", "t2", "t1"], "mode": "append" })),
+    )
+    .await;
+    assert_eq!(body, json!({ "added": 2, "skipped": 1 }));
+
+    // Re-adding an existing track adds nothing…
+    let (_, body) = send(
+        &h.state,
+        "PUT",
+        &format!("/v1/playlists/{id}/tracks"),
+        &h.owner_token,
+        Some(json!({ "track_ids": ["t1"], "mode": "append" })),
+    )
+    .await;
+    assert_eq!(body, json!({ "added": 0, "skipped": 1 }));
+
+    // …while a mixed batch adds only the new ids, keeping append order.
+    let (_, body) = send(
+        &h.state,
+        "PUT",
+        &format!("/v1/playlists/{id}/tracks"),
+        &h.owner_token,
+        Some(json!({ "track_ids": ["t2", "t3"], "mode": "append" })),
+    )
+    .await;
+    assert_eq!(body, json!({ "added": 1, "skipped": 1 }));
+
+    let (_, body) = send(
+        &h.state,
+        "GET",
+        &format!("/v1/playlists/{id}"),
+        &h.owner_token,
+        None,
+    )
+    .await;
+    assert_eq!(body["track_ids"], json!(["t1", "t2", "t3"]));
+
+    // Replace stays literal — it's the reorder/remove path and must not
+    // silently drop duplicates the user already has stored.
+    let (_, body) = send(
+        &h.state,
+        "PUT",
+        &format!("/v1/playlists/{id}/tracks"),
+        &h.owner_token,
+        Some(json!({ "track_ids": ["t1", "t1"] })),
+    )
+    .await;
+    assert_eq!(body, json!({ "added": 2, "skipped": 0 }));
 }
 
 #[tokio::test]

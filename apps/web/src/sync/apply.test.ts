@@ -148,3 +148,53 @@ describe("applyOp — mechanics ops preserve session_anchor", () => {
     expect(s.playback.session_anchor).toEqual(anchor);
   });
 });
+
+describe("applyOp — replace_upcoming", () => {
+  // The local mirror must agree with `SyncState::apply_replace_upcoming`
+  // exactly: a shuffle flip that diverges here shows a different queue on
+  // this device than every other one until the next snapshot.
+  const withQueue = (items: string[], cursor: number | null): SyncState => {
+    const s = emptyState();
+    s.playback.queue.items = items.map((id) => ({ item_id: id, track_id: `t-${id}` }));
+    s.playback.now_playing_index = cursor;
+    s.playback.position_ms = 42_000;
+    s.playback.is_playing = true;
+    s.playback.session_anchor = { session_id: "sess-1", track_id: "t-a", started_ms: 1 };
+    return s;
+  };
+  const replace = (ids: string[]): SyncOp => ({
+    type: "replace_upcoming",
+    items: ids.map((id) => ({ item_id: id, track_id: `t-${id}` })),
+  });
+
+  it("keeps history and the current track, swaps the tail", () => {
+    const after = applyOp(withQueue(["a", "b", "c", "d"], 1), replace(["x", "y"]), 7);
+    expect(after.playback.queue.items.map((i) => i.item_id)).toEqual(["a", "b", "x", "y"]);
+    expect(after.playback.now_playing_index).toBe(1);
+    expect(after.version).toBe(7);
+  });
+
+  it("leaves position, play state and session anchor alone", () => {
+    const before = withQueue(["a", "b"], 0);
+    const after = applyOp(before, replace(["z"]), 2);
+    expect(after.playback.position_ms).toBe(42_000);
+    expect(after.playback.is_playing).toBe(true);
+    expect(after.playback.session_anchor).toEqual(before.playback.session_anchor);
+  });
+
+  it("replaces the whole queue when there is no cursor", () => {
+    const after = applyOp(withQueue(["a", "b"], null), replace(["z"]), 2);
+    expect(after.playback.queue.items.map((i) => i.item_id)).toEqual(["z"]);
+    expect(after.playback.now_playing_index).toBeNull();
+  });
+
+  it("drops ids that would duplicate the kept prefix or each other", () => {
+    const after = applyOp(withQueue(["a", "b"], 0), replace(["n", "a", "n"]), 2);
+    expect(after.playback.queue.items.map((i) => i.item_id)).toEqual(["a", "n"]);
+  });
+
+  it("truncates to the current track on an empty item list", () => {
+    const after = applyOp(withQueue(["a", "b", "c"], 0), replace([]), 2);
+    expect(after.playback.queue.items.map((i) => i.item_id)).toEqual(["a"]);
+  });
+});

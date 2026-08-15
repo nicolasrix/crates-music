@@ -2,7 +2,7 @@
 
 **Path:** `apps/web/`
 **Type:** Vite + React 19 single-page app, installable as a PWA
-**Test count:** 207 (Vitest, 19 files)
+**Test count:** 340 (Vitest, 35 files)
 
 The browser client — and, installed to a phone's home screen as a
 PWA, *the* mobile client (native mobile was retired; see
@@ -132,9 +132,11 @@ default panel, never the reverse.
       <AudioCacheProvider>  {/* IndexedDB cache, trackId → blob: URL map */}
         <PlayerProvider>    {/* current track, audio element */}
           <AutoplayProvider>{/* tethered-drift autoplay refill */}
-            <ArtworkProvider>{/* extracted cover palette */}
-              ...
-            </ArtworkProvider>
+            <PlayModeProvider>{/* shuffle modes + context memory */}
+              <ArtworkProvider>{/* extracted cover palette */}
+                ...
+              </ArtworkProvider>
+            </PlayModeProvider>
           </AutoplayProvider>
         </PlayerProvider>
       </AudioCacheProvider>
@@ -229,6 +231,53 @@ Position updates fire on `timeupdate` (~4 Hz). Likes / skips /
 scrobbles are batched into `/v1/events` every 5s. Media Session
 action handlers (play/pause/next/prev/seek) + `setPositionState`
 drive lock-screen / notification controls on phones.
+
+### Play modes (`player/playMode.ts`, `playModePlan.ts`, `PlayModeContext.tsx`)
+
+Clicking a track inside *any* list — album, playlist, liked songs, an
+artist's top songs, search results, downloads — queues **that whole
+list** as the current *context*, anchored on the track you clicked.
+`usePlayback.playList` is the single funnel; `playSingle` survives only
+for surfaces with no list around the track (the latent-space plots).
+
+The player bar's shuffle button is tri-state, cycling
+`in order → shuffle → shuffle + recommendations`:
+
+| Mode | Queue |
+|---|---|
+| `in_order` | the context as it stands |
+| `shuffle` | clicked track first, the rest reordered |
+| `smart_shuffle` | as `shuffle`, plus one recommendation mixed in after every 4 context tracks |
+
+Three things carry the design:
+
+- **The click never waits.** `audio.play()` only counts while the
+  gesture is live, so a context starts playing immediately, already
+  shuffled. Smart shuffle's recommendations are fetched *afterwards*
+  (`/v1/recommend/from-seeds`, seeded by the whole context) and folded
+  in with a second op. They're registered through
+  `AutoplayContext.markRecommendations`, so the player-bar thumbs treat
+  a mixed-in track exactly like an autoplay-refilled one.
+- **Only the queue tail is rewritten**, via the `replace_upcoming` sync
+  op. Flipping shuffle mid-song must not restart the song — on this
+  device or any other one watching the room.
+- **The context is remembered client-side** (`playMode.ts`'s stored
+  context: session id + the original id order, in `localStorage`). The
+  server queue is the *shuffled* result and has no memory of what it
+  was shuffled from, so without this "shuffle off" could not restore
+  anything. It survives a reload; a queue started on another device has
+  no local memory, and there `in_order` declines to re-plan rather than
+  inventing an order (it still applies to the next thing you start).
+
+The ordering maths — start order, re-plan on a flip, interleave, how
+many recommendations to ask for — is pure and lives in
+`playModePlan.ts` with unit tests. `PlayModeContext` is only the
+plumbing: state, persistence, the recommender call, and the race
+guards.
+
+Distinct from autoplay, which is about the queue running *out*:
+autoplay appends a station at the end, smart shuffle salts the list
+you're already playing. Both can be on.
 
 ### Two notions of "the current track"
 
@@ -401,7 +450,11 @@ lists.
   `usePlaylistAdd`, the mutation shared by all three menus. The submenu
   replaces the root body in place rather than opening a second floating
   panel — nested fixed-position elements fight both outside-click
-  detection and the viewport clamping above.
+  detection and the viewport clamping above. Its toast copy comes from
+  `utils/playlistAddMessage.ts`, shared with the sidebar drop target and
+  the playlist page's suggestions so a duplicate ("already in “X”") reads
+  the same on all three — the wording is driven by the gateway's
+  `{ added, skipped }` counts, never by how many ids we submitted.
 
 Two things that look incidental but aren't:
 

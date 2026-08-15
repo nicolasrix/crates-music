@@ -326,7 +326,7 @@ crates-cli playlist show <id>                        # playlist tracks (hydrated
 crates-cli playlist create <name>                    # create empty; prints the new id
 crates-cli playlist rename <id> <name>               # rename (owner-only)
 crates-cli playlist delete <id>                      # delete (owner-only)
-crates-cli playlist add <id> <track_id>...           # append tracks
+crates-cli playlist add <id> <track_id>...           # append tracks (already-present ids are skipped, and reported)
 crates-cli playlist remove <id> <track_id>           # drop every occurrence of a track
 crates-cli playlist play <id> [--shuffle]            # stream + play locally, gaplessly
 ```

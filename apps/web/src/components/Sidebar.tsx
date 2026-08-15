@@ -15,6 +15,7 @@ import { addTrackToPlaylist, createPlaylist, listPlaylists } from "../api/playli
 import { getTrackDragData, isTrackDrag } from "../dnd/trackDrag";
 import { Link, navigate, useRoute } from "../router";
 import { useToast } from "../toast/ToastContext";
+import { playlistAddMessage } from "../utils/playlistAddMessage";
 import { BrandMark } from "./BrandMark";
 
 interface SubItem {
@@ -157,8 +158,9 @@ export function Sidebar({ open = false, onClose }: SidebarProps = {}) {
     const trackId = getTrackDragData(e.dataTransfer);
     if (!trackId) return;
     try {
-      await addTrackToPlaylist(playlistId, trackId);
-      toast(`added to ${playlistName}`);
+      const result = await addTrackToPlaylist(playlistId, trackId);
+      const { message, variant } = playlistAddMessage(playlistName, result);
+      toast(message, { variant });
       // Refresh the target playlist if it's open, plus the list (counts).
       await queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });

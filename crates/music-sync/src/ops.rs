@@ -50,6 +50,22 @@ pub enum SyncOp {
         anchor_index: usize,
         session_id: SessionId,
     },
+    /// Replace everything *after* the playback cursor with `items`,
+    /// leaving the current track, position, play state and session
+    /// anchor untouched. With no cursor there is no "current track" to
+    /// preserve, so the whole queue is replaced.
+    ///
+    /// This is the primitive behind the clients' shuffle modes: turning
+    /// shuffle on/off and mixing recommendations into a context all
+    /// rewrite the upcoming half of the queue and nothing else. Doing
+    /// that as one op (rather than N `Remove` + M `Push`) keeps the
+    /// rewrite atomic for every observer — nobody sees a half-shuffled
+    /// queue — and keeps a 60-track album to a single frame.
+    ///
+    /// Items whose `item_id` already exists in the retained prefix are
+    /// dropped, so the queue can never hold the same id twice (which
+    /// would make `Remove`/`Reorder` ambiguous).
+    ReplaceUpcoming { items: Vec<QueueItem> },
     /// End the current session: nulls `session_anchor` only. Queue,
     /// cursor, playback position, and `is_playing` are untouched —
     /// stopping a session is an *intent* signal, not a playback

@@ -105,26 +105,53 @@ export async function createPlaylist(name: string): Promise<PlaylistSummary> {
   return toSummary((await res.json()) as PlaylistWire);
 }
 
+// What an append actually did. The gateway de-duplicates in append mode,
+// so `skipped` is how many of the submitted ids were already members —
+// the number the UI turns into "already in this playlist".
+export interface PlaylistAddResult {
+  added: number;
+  skipped: number;
+}
+
 // Append songs to a playlist, in the order given. One request regardless
 // of count — the endpoint has always taken a list, so adding a whole album
-// or artist costs the same round trip as adding one track. Duplicates are
-// the server's call; we don't pre-filter against current membership.
+// or artist costs the same round trip as adding one track. De-duplication
+// against current membership is the *server's* job (it has to be: only the
+// gateway can check-and-insert atomically), and it reports back the split.
 export async function addTracksToPlaylist(
   playlistId: string,
   trackIds: readonly string[],
-): Promise<void> {
-  if (trackIds.length === 0) return;
+): Promise<PlaylistAddResult> {
+  if (trackIds.length === 0) return { added: 0, skipped: 0 };
   const res = await apiFetch(`/v1/playlists/${encodeURIComponent(playlistId)}/tracks`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ track_ids: trackIds, mode: "append" }),
   });
   if (!res.ok) throw new Error(`addTracksToPlaylist HTTP ${res.status}`);
+  return (await readAddResult(res)) ?? { added: trackIds.length, skipped: 0 };
+}
+
+// A gateway from before the counts existed answers 204 with no body. Fall
+// back to "everything was added" there rather than throwing — the write
+// itself succeeded, we just can't say whether anything was a duplicate.
+async function readAddResult(res: Response): Promise<PlaylistAddResult | null> {
+  if (res.status === 204) return null;
+  try {
+    const body = (await res.json()) as Partial<PlaylistAddResult>;
+    if (typeof body.added !== "number" || typeof body.skipped !== "number") return null;
+    return { added: body.added, skipped: body.skipped };
+  } catch {
+    return null;
+  }
 }
 
 // Append a single song to a playlist (the row-menu "add to playlist").
-export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<void> {
-  await addTracksToPlaylist(playlistId, [trackId]);
+export async function addTrackToPlaylist(
+  playlistId: string,
+  trackId: string,
+): Promise<PlaylistAddResult> {
+  return addTracksToPlaylist(playlistId, [trackId]);
 }
 
 // Replace a playlist's whole membership (reorder / remove). Positions are

@@ -8,6 +8,7 @@
 //! shared `/rest/*` catalog. That keeps the ownership boundary clean
 //! (gateway owns the *membership*, Navidrome owns the *tracks*).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,7 +35,17 @@ pub enum TrackMode {
     /// Replace the whole membership (used for reorder + full set).
     Replace,
     /// Append after the current last position (used for "add to playlist").
+    /// Ids already in the playlist are **skipped**, not duplicated.
     Append,
+}
+
+/// What a membership write actually did. `skipped` is only ever non-zero
+/// under [`TrackMode::Append`] — it's the count the client needs to tell
+/// the user "that song is already in this playlist".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackWrite {
+    pub added: usize,
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -165,23 +176,27 @@ impl PlaylistStore {
     }
 
     /// Set membership. `Replace` swaps the whole list (reorder + set);
-    /// `Append` adds after the current tail. Positions are dense 0..n.
-    /// Runs in a transaction so a half-written reorder can never persist.
+    /// `Append` adds after the current tail, skipping ids the playlist
+    /// already holds. Positions are dense 0..n. Runs in a transaction so a
+    /// half-written reorder can never persist — and so the append-mode
+    /// duplicate check can't race a concurrent add from another device.
     pub async fn set_tracks(
         &self,
         id: &str,
         track_ids: &[String],
         mode: TrackMode,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<TrackWrite, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
-        let start: i64 = match mode {
+        // Both arms hand back the start position plus exactly what to
+        // insert, so the loop below doesn't care which mode produced it.
+        let (start, to_insert): (i64, Vec<&String>) = match mode {
             TrackMode::Replace => {
                 sqlx::query("DELETE FROM playlist_tracks WHERE playlist_id = ?")
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
-                0
+                (0, track_ids.iter().collect())
             }
             TrackMode::Append => {
                 let row = sqlx::query(
@@ -191,11 +206,22 @@ impl PlaylistStore {
                 .bind(id)
                 .fetch_one(&mut *tx)
                 .await?;
-                row.get::<i64, _>("next")
+                let existing =
+                    sqlx::query("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?")
+                        .bind(id)
+                        .fetch_all(&mut *tx)
+                        .await?;
+                // Seed the seen-set from current membership; `insert`
+                // returning false then rejects repeats *within* the batch
+                // too — an album listing the same id twice is one add.
+                let mut seen: HashSet<&str> =
+                    existing.iter().map(|r| r.get::<&str, _>("track_id")).collect();
+                let fresh = track_ids.iter().filter(|t| seen.insert(t.as_str())).collect();
+                (row.get::<i64, _>("next"), fresh)
             }
         };
 
-        for (offset, track_id) in track_ids.iter().enumerate() {
+        for (offset, track_id) in to_insert.iter().enumerate() {
             let position = start + i64::try_from(offset).unwrap_or(i64::MAX);
             sqlx::query(
                 "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?, ?, ?)",
@@ -207,13 +233,20 @@ impl PlaylistStore {
             .await?;
         }
 
-        sqlx::query("UPDATE playlists SET updated_ms = ? WHERE id = ?")
-            .bind(now_ms())
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        // An append that added nothing (every id was already a member)
+        // left the playlist untouched — don't bump `updated_ms` and shuffle
+        // it to the top of the "newest first" list for a no-op.
+        let added = to_insert.len();
+        if added > 0 || mode == TrackMode::Replace {
+            sqlx::query("UPDATE playlists SET updated_ms = ? WHERE id = ?")
+                .bind(now_ms())
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
 
-        tx.commit().await
+        tx.commit().await?;
+        Ok(TrackWrite { added, skipped: track_ids.len() - added })
     }
 
     /// Delete a playlist. `playlist_tracks` rows cascade.
