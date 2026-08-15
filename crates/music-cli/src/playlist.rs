@@ -84,10 +84,13 @@ pub async fn run_delete(config: &Config, id: &str) -> Result<()> {
 }
 
 pub async fn run_add(config: &Config, id: &str, track_ids: &[String]) -> Result<()> {
-    api::put_playlist_tracks(config, id, track_ids, true)
+    let write = api::put_playlist_tracks(config, id, track_ids, true)
         .await
         .map_err(friendly)?;
-    println!("added {} track(s) to {id}", track_ids.len());
+    println!("added {} track(s) to {id}", write.added);
+    if write.skipped > 0 {
+        println!("{} already in the playlist (skipped)", write.skipped);
+    }
     Ok(())
 }
 

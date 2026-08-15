@@ -437,8 +437,16 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
             // reopens only when it's still the playlist on screen, so a
             // picker-add to some other playlist doesn't hijack the view.
             let msg = match api::put_playlist_tracks(&ctx.config, &id, &[track_id], true).await {
-                Ok(()) => Msg::PlaylistWriteDone {
-                    note: "added to playlist".to_owned(),
+                // The gateway skips a track the playlist already holds, so
+                // `added == 0` here is a duplicate, not a failure — say so
+                // rather than claim an add that didn't happen. The reopen
+                // still fires, which un-does the optimistic append.
+                Ok(write) => Msg::PlaylistWriteDone {
+                    note: if write.added == 0 {
+                        "already in that playlist".to_owned()
+                    } else {
+                        "added to playlist".to_owned()
+                    },
                     is_error: false,
                     reload_list: true,
                     reopen_id: Some(id),
@@ -454,7 +462,7 @@ async fn run(effect: Effect, ctx: &Ctx) -> Option<Msg> {
         }
         Effect::PlaylistSetTracks { id, track_ids } => {
             let msg = match api::put_playlist_tracks(&ctx.config, &id, &track_ids, false).await {
-                Ok(()) => Msg::PlaylistWriteDone {
+                Ok(_) => Msg::PlaylistWriteDone {
                     note: "playlist updated".to_owned(),
                     is_error: false,
                     reload_list: true,
@@ -740,7 +748,9 @@ async fn playlist_create(ctx: &Ctx, name: &str, then_add: Option<&str>) -> Msg {
     if let Some(track_id) = then_add {
         match api::put_playlist_tracks(&ctx.config, &created.id, &[track_id.to_owned()], true).await
         {
-            Ok(()) => {}
+            // A fresh playlist can't hold the track yet, so there's no
+            // duplicate case to report here.
+            Ok(_) => {}
             Err(e) => {
                 return Msg::PlaylistWriteDone {
                     note: format!(

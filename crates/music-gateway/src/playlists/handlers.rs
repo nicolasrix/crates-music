@@ -181,12 +181,17 @@ pub async fn patch(
 }
 
 /// `PUT /v1/playlists/:id/tracks { track_ids, mode? }` — set/append/reorder.
+///
+/// Answers `200 { added, skipped }` rather than a bare `204`: in `append`
+/// mode the store drops ids the playlist already holds, and the client
+/// needs the counts to say "already in this playlist" instead of claiming
+/// a silent success.
 pub async fn put_tracks(
     State(state): State<AppState>,
     AuthPrincipal(principal): AuthPrincipal,
     Path(id): Path<String>,
     Json(body): Json<TracksBody>,
-) -> Result<StatusCode, (StatusCode, &'static str)> {
+) -> Result<Json<Value>, (StatusCode, &'static str)> {
     require_write(&principal)?;
     load_owned(&state, &principal, &id).await?;
 
@@ -202,12 +207,12 @@ pub async fn put_tracks(
         Some(_) => return Err((StatusCode::BAD_REQUEST, "mode must be 'replace' or 'append'")),
     };
 
-    state
+    let write = state
         .playlists()
         .set_tracks(&id, &body.track_ids, mode)
         .await
         .map_err(internal)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "added": write.added, "skipped": write.skipped })))
 }
 
 /// `DELETE /v1/playlists/:id`.

@@ -14,8 +14,10 @@ import {
   addTracksToPlaylist,
   createPlaylist,
   listPlaylists,
+  type PlaylistAddResult,
 } from "../api/playlists";
 import { useToast } from "../toast/ToastContext";
+import { playlistAddMessage } from "../utils/playlistAddMessage";
 import { RowMenuItem, RowMenuSep } from "./RowMenu";
 
 /** Resolves the tracks to add, at click time. Album and artist menus only
@@ -43,12 +45,12 @@ export function usePlaylistAdd(
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
 
+  // The gateway skips ids the playlist already holds, so what the user is
+  // told comes from *its* counts, never from how many we submitted.
   const report = useCallback(
-    (name: string, count: number) => {
-      toast(
-        count === 1 ? `added to “${name}”` : `added ${count} tracks to “${name}”`,
-        { variant: "success" },
-      );
+    (name: string, result: PlaylistAddResult) => {
+      const { message, variant } = playlistAddMessage(name, result);
+      toast(message, { variant });
     },
     [toast],
   );
@@ -61,10 +63,10 @@ export function usePlaylistAdd(
           toast("nothing to add", { variant: "error" });
           return;
         }
-        await addTracksToPlaylist(playlistId, ids);
+        const result = await addTracksToPlaylist(playlistId, ids);
         await queryClient.invalidateQueries({ queryKey: ["playlists"] });
         await queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
-        report(playlistName, ids.length);
+        report(playlistName, result);
       } catch (e) {
         toast(`couldn't add to playlist: ${(e as Error).message}`, {
           variant: "error",
@@ -84,12 +86,15 @@ export function usePlaylistAdd(
     try {
       const ids = await resolveRef.current();
       const created = await createPlaylist(name);
-      if (created.id) await addTracksToPlaylist(created.id, ids);
+      const result = created.id
+        ? await addTracksToPlaylist(created.id, ids)
+        : { added: 0, skipped: 0 };
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
       // Still create the playlist the user asked for when the source
-      // turns out to be empty — just don't claim we filled it.
+      // turns out to be empty — just don't claim we filled it. (A brand
+      // new playlist can't have duplicates, so `skipped` is always 0.)
       if (ids.length === 0) toast(`created “${name}” — nothing to add`);
-      else report(name, ids.length);
+      else report(name, result);
     } catch (e) {
       toast(`couldn't create playlist: ${(e as Error).message}`, {
         variant: "error",

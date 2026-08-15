@@ -301,6 +301,10 @@ live on our side; the *catalog* (the tracks) stays shared on Navidrome.
   (built from `OauthStore::pool()` in `AppState::new`) so `owner_user_id`'s
   foreign key and `ON DELETE CASCADE` work without a cross-file reference. It
   stores Navidrome **track ids only** and never touches catalog metadata.
+  `set_tracks` in **append** mode de-duplicates against current membership
+  inside the write transaction (the only place a check-and-insert can be
+  atomic) and returns `TrackWrite { added, skipped }` — the counts clients
+  turn into "already in this playlist". **Replace** mode stays literal.
 - `handlers.rs` — the `/v1/playlists/*` CRUD. Authorization is two-layer:
   reads are any-authenticated (own + others' `shared`; a private playlist the
   caller doesn't own is **404**, not 403, so existence isn't leaked), and the

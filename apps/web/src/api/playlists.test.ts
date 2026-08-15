@@ -14,7 +14,7 @@ vi.stubGlobal("localStorage", {
   clear: () => store.clear(),
 });
 
-import { removeTrackFromPlaylist } from "./playlists";
+import { addTracksToPlaylist, removeTrackFromPlaylist } from "./playlists";
 
 const ACCESS = "tok-access";
 function seedTokens(): void {
@@ -59,5 +59,60 @@ describe("removeTrackFromPlaylist", () => {
     await removeTrackFromPlaylist("pl/weird id", "x", ["x", "y"]);
     const [url] = fetchSpy.mock.calls[0] as [string];
     expect(url).toBe("/v1/playlists/pl%2Fweird%20id/tracks");
+  });
+});
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("addTracksToPlaylist", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("appends and returns the gateway's added/skipped split", async () => {
+    seedTokens();
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ added: 2, skipped: 1 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await addTracksToPlaylist("pl1", ["a", "b", "c"]);
+
+    expect(result).toEqual({ added: 2, skipped: 1 });
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).toEqual({ track_ids: ["a", "b", "c"], mode: "append" });
+  });
+
+  it("reports a fully-duplicate add as nothing added", async () => {
+    seedTokens();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ added: 0, skipped: 1 })));
+    expect(await addTracksToPlaylist("pl1", ["a"])).toEqual({ added: 0, skipped: 1 });
+  });
+
+  // A gateway predating the counts answers 204 with no body; the write
+  // still happened, so assume nothing was a duplicate rather than throw.
+  it("falls back to added=n against a countless 204", async () => {
+    seedTokens();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    expect(await addTracksToPlaylist("pl1", ["a", "b"])).toEqual({ added: 2, skipped: 0 });
+  });
+
+  it("short-circuits an empty id list without a request", async () => {
+    seedTokens();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    expect(await addTracksToPlaylist("pl1", [])).toEqual({ added: 0, skipped: 0 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("throws on a failed write", async () => {
+    seedTokens();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
+    await expect(addTracksToPlaylist("pl1", ["a"])).rejects.toThrow("HTTP 500");
   });
 });
