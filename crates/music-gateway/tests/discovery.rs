@@ -198,3 +198,82 @@ async fn admin_scan_endpoint_reports_what_it_queued() {
     assert_eq!(json["enqueued"], 2);
     assert_eq!(store.counts(&model_version).await.unwrap().not_started, 2);
 }
+
+/// Regression: a gateway that booted while the embedder was down has no
+/// model identity, and must refuse to enqueue rather than stamp rows with
+/// a placeholder.
+///
+/// This is the 2026-08-15 incident in miniature. A restart during an
+/// embedder outage latched the literal `"default"` as the model_version;
+/// the boot sweep then saw an empty queue under that brand-new key,
+/// enqueued all ~7.8k catalog tracks, and the ingest workers re-embedded
+/// the entire library overnight into a bucket nothing else read.
+#[tokio::test]
+async fn admin_scan_refuses_when_model_version_unknown() {
+    let state = common::build_state_unknown_model(common::test_config()).await;
+    let store = state.embedding_store().clone();
+    let sentinel = state.recommend_model_version().clone();
+    assert!(
+        !state.recommend_writes_enabled(),
+        "an unreachable embedder must leave writes disabled"
+    );
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/admin/discovery/scan")
+                .header(AUTHORIZATION, format!("Bearer {}", common::TEST_BEARER))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Assert on the guard's own wording: this test runs against an
+    // unreachable upstream, so a bare 503 could come from the sweep
+    // failing rather than from the guard refusing to start it.
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("model_version unknown"),
+        "503 must come from the unknown-model guard, not an upstream failure"
+    );
+    let counts = store.counts(&sentinel).await.unwrap();
+    assert_eq!(
+        counts.not_started, 0,
+        "no rows may be queued under the unknown-model sentinel"
+    );
+}
+
+/// The manual enqueue endpoint is the other `model_version`-keyed write
+/// path, and needs the same guard.
+#[tokio::test]
+async fn enqueue_endpoint_refuses_when_model_version_unknown() {
+    let state = common::build_state_unknown_model(common::test_config()).await;
+    let store = state.embedding_store().clone();
+    let sentinel = state.recommend_model_version().clone();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/recommend/enqueue")
+                .header(AUTHORIZATION, format!("Bearer {}", common::TEST_BEARER))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"track_ids":["t1","t2"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("model_version unknown"),
+        "503 must come from the unknown-model guard"
+    );
+    assert_eq!(store.counts(&sentinel).await.unwrap().not_started, 0);
+}
