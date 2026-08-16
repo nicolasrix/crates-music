@@ -43,6 +43,11 @@ pub struct Record {
     pub album: Option<String>,
     pub album_id: Option<String>,
     pub cover_art: Option<String>,
+    /// Track length. Rides along for the same reason the ids do — the
+    /// handler renders a `search3`-shaped song row without a second
+    /// lookup, and a missing value renders as "0:00" client-side.
+    /// `None` on artist and album records.
+    pub duration_seconds: Option<u32>,
 }
 
 /// A single scored match, referencing back into the index's record table.
@@ -285,6 +290,7 @@ mod tests {
             album: None,
             album_id: None,
             cover_art: None,
+            duration_seconds: None,
         }
     }
 
@@ -298,6 +304,7 @@ mod tests {
             album: None,
             album_id: None,
             cover_art: None,
+            duration_seconds: Some(321),
         }
     }
 
