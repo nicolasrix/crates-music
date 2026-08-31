@@ -13,17 +13,19 @@ import {
   stashVerifier,
   writeTokens,
 } from "./tokens";
+import { clearLocalOwner } from "./localOwner";
 import { clearUserData } from "./userData";
 
 const CLIENT_ID = "web";
 const REDIRECT_URI = `${location.origin}/oauth/callback`;
 
 export async function startLogin(options?: { forceLogin?: boolean }) {
-  // Switching users (prompt=login) is an explicit account change: wipe the
-  // outgoing user's offline cache + prefs before redirecting so the next
-  // account doesn't inherit them on a shared device (sec review 1.6). A
-  // first-time login (forceLogin=false) has nothing to clear.
-  if (options?.forceLogin) await clearUserData();
+  // No eager wipe here. Switching users is only a *request* to change
+  // account — the user may cancel at the gateway login screen, and
+  // prompt=login is also how the same person re-authenticates (#33). We
+  // reconcile once /v1/whoami names the principal that actually signed in
+  // (see auth/localOwner.ts), so a cancelled or same-user switch keeps its
+  // downloads and a genuine switch still wipes before the new user browses.
   const verifier = await generateVerifier();
   const challenge = await deriveChallenge(verifier);
   const state = crypto.randomUUID();
@@ -99,6 +101,9 @@ export async function joinAsGuest(
   // the guest's own device this is a no-op; on a shared/host device it
   // closes the bleed.
   await clearUserData();
+  // Caches are empty now, so drop the tag too: the reconcile that follows
+  // sign-in should adopt for the guest, not wipe a second time.
+  clearLocalOwner();
   const body = new URLSearchParams({
     code: code.trim(),
     client_id: CLIENT_ID,
@@ -203,7 +208,10 @@ export async function logout(refreshToken: string | null) {
     // best-effort; clear local state regardless
   }
   clearTokens();
-  // Wipe the offline cache + prefs so the next user on this browser starts
-  // clean (sec review 1.6).
-  await clearUserData();
+  // Deliberately no clearUserData() here. Sign-out is not an identity
+  // change — on a personal phone the next person to sign in is the same
+  // person, and wiping cost them their downloaded tracks and cache budgets
+  // every time. The 1.6 guarantee is upheld at the other end instead: the
+  // local data stays tagged with its owner and is wiped at sign-in if a
+  // *different* user turns up (see auth/localOwner.ts).
 }

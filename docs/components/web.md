@@ -400,9 +400,21 @@ the whole household reads) and get a toast.
   in its own database. Downloading a track captures its lyrics;
   unpinning or evicting the audio drops them. That lifetime is the whole
   bound on the store's size — there is no eviction pass, because the
-  audio budget already caps how many rows can exist. Sign-out wipes it
-  alongside the audio cache, in its own `try` so one failure can't skip
-  the other.
+  audio budget already caps how many rows can exist. A user *switch*
+  wipes it alongside the audio cache, in its own `try` so one failure
+  can't skip the other — see "Whose cache is it" below.
+- **Whose cache is it.** The audio and lyrics databases are
+  origin-scoped, so nothing in them records who downloaded what.
+  `auth/localOwner.ts` tags them with the owning user id (`gw_local_owner`,
+  deliberately outside the `crates-music.` namespace that `clearUserData`
+  sweeps) and reconciles at sign-in: a *different* user signing in wipes
+  first, the same user signing back in keeps everything. Sign-out itself
+  no longer wipes — it is not an identity change, and on a phone the next
+  person to sign in is the same person. The cost is that the data sits on
+  disk while signed out; it stays origin-scoped and the signed-out SPA
+  holds no token to serve it, but devtools on that browser could read the
+  DB in that window. An untagged database is *adopted*, not wiped, so the
+  upgrade to tagging doesn't cost anyone their downloads once.
 - **Only downloaded tracks persist.** Lyrics you merely looked at live in
   the Query cache for the session. Persisting those too would grow
   without bound and would send a whole listening history's worth of
