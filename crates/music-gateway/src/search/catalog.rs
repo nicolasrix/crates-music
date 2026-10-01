@@ -47,6 +47,7 @@ async fn fetch_artists(client: &SubsonicClient, out: &mut Vec<Record>) -> Result
         album: None,
         album_id: None,
         cover_art: None,
+        duration_seconds: None,
     }));
     Ok(())
 }
@@ -67,6 +68,7 @@ async fn fetch_albums(client: &SubsonicClient, out: &mut Vec<Record>) -> Result<
             album: None,
             album_id: None,
             cover_art: al.cover_art_id,
+            duration_seconds: None,
         }));
         if is_last {
             break;
@@ -94,6 +96,7 @@ async fn fetch_tracks(client: &SubsonicClient, out: &mut Vec<Record>) -> Result<
             album: t.album_name,
             album_id: t.album_id.map(|id| id.as_str().to_string()),
             cover_art: None,
+            duration_seconds: t.duration_seconds,
         }));
         if is_last {
             break;

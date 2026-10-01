@@ -31,6 +31,7 @@ import { PlayerProvider } from "./player/PlayerContext";
 import { modeFromSlug } from "./pages/listMode";
 import { useRoute } from "./router";
 import { initRum } from "./rum";
+import { useLocalOwnerReconcile } from "./auth/useLocalOwnerReconcile";
 import { useIsAdmin } from "./auth/useWhoami";
 import { DEFAULT_PANEL, panelVisible } from "./settings/nav";
 import { AboutPanel } from "./settings/panels/AboutPanel";
@@ -47,6 +48,11 @@ import { ToastProvider } from "./toast/ToastContext";
 export function App() {
   const { path } = useRoute();
   const { tokens } = useAuth();
+
+  // Claims the offline cache + prefs for whoever just signed in, wiping
+  // them first if they belonged to a different user. Called before the
+  // early returns below so the hook order stays stable across routes.
+  useLocalOwnerReconcile();
 
   useEffect(() => {
     if (tokens) initRum();

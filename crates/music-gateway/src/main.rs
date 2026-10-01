@@ -199,31 +199,41 @@ async fn main() -> Result<()> {
         store: recommend.metadata_store.clone(),
         fetcher: Arc::clone(&metadata_fetcher),
     };
-    let _ingest_handles = spawn_ingest_worker(
-        recommend.embedding_store.clone(),
-        recommend.ann.clone(),
-        embedder.client().cloned(),
-        fetcher,
-        Some(metadata_ingest),
-        &recommend.model_version,
-    );
+    // Every task below stamps rows with the model identity, so none of
+    // them may run until we know it. Starting them under a placeholder is
+    // what turned a restart-during-outage into a full-catalog re-embed.
+    if let Some(model_version) = recommend.model_version.as_ref() {
+        let _ingest_handles = spawn_ingest_worker(
+            recommend.embedding_store.clone(),
+            recommend.ann.clone(),
+            embedder.client().cloned(),
+            fetcher,
+            Some(metadata_ingest),
+            model_version,
+        );
 
-    let _backfill_handle = spawn_metadata_backfill(
-        recommend.metadata_store.clone(),
-        metadata_fetcher,
-        recommend.model_version.clone(),
-    );
+        let _backfill_handle = spawn_metadata_backfill(
+            recommend.metadata_store.clone(),
+            metadata_fetcher,
+            model_version.clone(),
+        );
 
-    // Auto-recompute the latent-space projection as new tracks land.
-    // Counter + quiet-period trigger; per-run versioning with retention
-    // pruning. No-op when the embedder is unreachable at boot — the
-    // task body would have nothing to call.
-    let _auto_projection_handle = spawn_auto_projection_task(
-        embedder.client().cloned(),
-        recommend.embedding_store.clone(),
-        ProjectionStore::new(recommend.embedding_store.pool().clone()),
-        recommend.model_version.clone(),
-    );
+        // Auto-recompute the latent-space projection as new tracks land.
+        // Counter + quiet-period trigger; per-run versioning with retention
+        // pruning. No-op when the embedder is unreachable at boot — the
+        // task body would have nothing to call.
+        let _auto_projection_handle = spawn_auto_projection_task(
+            embedder.client().cloned(),
+            recommend.embedding_store.clone(),
+            ProjectionStore::new(recommend.embedding_store.pool().clone()),
+            model_version.clone(),
+        );
+    } else {
+        tracing::warn!(
+            "recommend: ingest, metadata backfill and auto-projection not \
+             started — the embedder's model_version is unknown"
+        );
+    }
 
     let state = AppState::new(
         config,
@@ -262,7 +272,19 @@ async fn main() -> Result<()> {
     // the sidecar returns.
     let _discovery_handle = {
         let discovery_cfg = state.config().discovery.clone();
-        if discovery_cfg.enabled {
+        if !state.recommend_writes_enabled() {
+            // The boot sweep offers every catalog id to the store and lets
+            // `INSERT OR IGNORE` decide what's new. Under an unknown model
+            // identity *nothing* is known, so it would enqueue the entire
+            // library — the 2026-08-15 re-embed in one line. Wait for a boot
+            // that reaches the sidecar.
+            tracing::warn!(
+                "discovery: catalog watch not started — the embedder's \
+                 model_version is unknown, so a sweep would enqueue the \
+                 whole catalog under a placeholder key"
+            );
+            None
+        } else if discovery_cfg.enabled {
             let watcher = music_gateway::discovery::CatalogWatcher::new(
                 &state.config().upstream,
                 state.embedding_store().clone(),
@@ -303,7 +325,18 @@ struct RecommenderState {
     embedding_store: EmbeddingStore,
     metadata_store: MetadataStore,
     ann: Arc<AnnIndex>,
-    model_version: ModelVersion,
+    /// The model identity every embedding row is keyed by, or `None` when
+    /// the embedder was unreachable at boot so we never learned it.
+    ///
+    /// `None` must never be papered over with a placeholder: every
+    /// embedding is content-addressed by `(track_id, model_version)`, so a
+    /// made-up key makes the whole catalog look unembedded. Discovery's
+    /// boot sweep then enqueues every track under it and the ingest
+    /// workers re-embed the entire library into a bucket nothing else
+    /// reads. That is exactly what happened on 2026-08-15, when a restart
+    /// during an embedder outage latched the literal string `"default"`
+    /// and re-embedded ~7.8k tracks overnight.
+    model_version: Option<ModelVersion>,
 }
 
 /// Boot the recommender: open the embedding DB, recover crashed
@@ -334,57 +367,69 @@ async fn boot_recommender(
     let ann_path = state_db.with_extension("ann");
     let ann =
         AnnIndex::open(&ann_path, embedding_dim, ANN_CONNECTIVITY).context("opening ANN index")?;
-    let model_version = embedder
-        .last_health()
-        .map_or_else(|| ModelVersion::from("default"), |h| h.model_version);
+    // Take the model identity from the probe, or leave it unknown. Never
+    // substitute a placeholder — see `RecommenderState::model_version`.
+    let model_version = embedder.last_health().map(|h| h.model_version);
 
-    // All-but-the-Top whitening: load the cached transform for this model,
-    // or fit one from the existing embeddings (post-hoc — no re-embedding).
-    // Installing it on the ANN means stored + queried vectors are de-coned,
-    // fixing CLaMP 3's anisotropy. Installing a transform forces a full ANN
-    // rebuild below, since any on-disk vectors predate it.
-    let mut whitening_installed = false;
-    if whitening_enabled {
-        if let Some(w) =
-            load_or_fit_whitening(&embedding_store, embedding_dim, &model_version, embedder).await?
-        {
-            ann.set_whitening(Some(Arc::new(w)))
-                .context("installing whitening transform")?;
-            whitening_installed = true;
-        } else {
+    // Everything below is keyed by that identity, so it only runs once we
+    // actually know it. On a degraded boot the on-disk ANN is left exactly
+    // as it was; the next boot that reaches the sidecar fixes it up.
+    if let Some(model_version) = model_version.as_ref() {
+        // All-but-the-Top whitening: load the cached transform for this model,
+        // or fit one from the existing embeddings (post-hoc — no re-embedding).
+        // Installing it on the ANN means stored + queried vectors are de-coned,
+        // fixing CLaMP 3's anisotropy. Installing a transform forces a full ANN
+        // rebuild below, since any on-disk vectors predate it.
+        let mut whitening_installed = false;
+        if whitening_enabled {
+            if let Some(w) =
+                load_or_fit_whitening(&embedding_store, embedding_dim, model_version, embedder)
+                    .await?
+            {
+                ann.set_whitening(Some(Arc::new(w)))
+                    .context("installing whitening transform")?;
+                whitening_installed = true;
+            } else {
+                tracing::info!(
+                    model = %model_version,
+                    "recommend: whitening enabled but no embeddings yet; deferring fit to first refit"
+                );
+            }
+        }
+
+        // Safety net for the historical persist-on-write gap: if SQLite
+        // has more `done` rows for this model than the ANN does, our
+        // on-disk index is stale (likely because the gateway crashed
+        // between an upsert and the next periodic persist). Rebuild from
+        // SQLite — it's the source of truth — and persist immediately.
+        // The "ann empty" case is the cold-start subset of this; treat
+        // both with one branch. A freshly-installed whitening transform also
+        // forces a rebuild: the on-disk vectors are raw (or whitened by an
+        // older transform) and must be re-whitened to match.
+        let ann_len = ann.len()?;
+        let sqlite_done = embedding_store.counts(model_version).await?.done;
+        let ann_len_u64 = u64::try_from(ann_len).unwrap_or(u64::MAX);
+        if whitening_installed || ann_len_u64 < sqlite_done {
             tracing::info!(
                 model = %model_version,
-                "recommend: whitening enabled but no embeddings yet; deferring fit to first refit"
+                ann_len,
+                sqlite_done,
+                whitening = whitening_installed,
+                "recommend: rebuilding ANN from SQLite"
             );
+            rebuild_ann_from_store(&embedding_store, &ann, model_version)
+                .await
+                .context("rebuilding ANN from store")?;
+            if ann.len()? > 0 {
+                ann.persist().context("persisting rebuilt ANN")?;
+            }
         }
-    }
-
-    // Safety net for the historical persist-on-write gap: if SQLite
-    // has more `done` rows for this model than the ANN does, our
-    // on-disk index is stale (likely because the gateway crashed
-    // between an upsert and the next periodic persist). Rebuild from
-    // SQLite — it's the source of truth — and persist immediately.
-    // The "ann empty" case is the cold-start subset of this; treat
-    // both with one branch. A freshly-installed whitening transform also
-    // forces a rebuild: the on-disk vectors are raw (or whitened by an
-    // older transform) and must be re-whitened to match.
-    let ann_len = ann.len()?;
-    let sqlite_done = embedding_store.counts(&model_version).await?.done;
-    let ann_len_u64 = u64::try_from(ann_len).unwrap_or(u64::MAX);
-    if whitening_installed || ann_len_u64 < sqlite_done {
-        tracing::info!(
-            model = %model_version,
-            ann_len,
-            sqlite_done,
-            whitening = whitening_installed,
-            "recommend: rebuilding ANN from SQLite"
+    } else {
+        tracing::warn!(
+            "recommend: embedder unreachable at boot — model identity unknown; \
+             skipping whitening + ANN rebuild and holding the ingest queue idle \
+             (restart once the sidecar is up to resume embedding)"
         );
-        rebuild_ann_from_store(&embedding_store, &ann, &model_version)
-            .await
-            .context("rebuilding ANN from store")?;
-        if ann.len()? > 0 {
-            ann.persist().context("persisting rebuilt ANN")?;
-        }
     }
 
     // Metadata store shares the same SQLite pool — they're sibling

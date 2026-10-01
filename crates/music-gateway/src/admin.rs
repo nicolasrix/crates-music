@@ -65,6 +65,16 @@ pub async fn invalidate_covers(State(state): State<AppState>) -> impl IntoRespon
 /// is `INSERT OR IGNORE`, so the duplicate ids are no-ops.
 #[tracing::instrument(name = "admin.discovery.scan", skip_all)]
 pub async fn discovery_scan(State(state): State<AppState>) -> impl IntoResponse {
+    // Same guard as the scheduled watch: a sweep under the unknown-model
+    // sentinel would enqueue the entire catalog into a bucket nothing reads.
+    if !state.recommend_writes_enabled() {
+        tracing::warn!("discovery: manual sweep refused — model_version unknown");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "embedder unreachable at boot; model_version unknown — retry once it is up",
+        )
+            .into_response();
+    }
     let watcher = match CatalogWatcher::new(
         &state.config().upstream,
         state.embedding_store().clone(),

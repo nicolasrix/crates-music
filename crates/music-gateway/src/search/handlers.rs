@@ -89,6 +89,11 @@ struct SongDto {
     album_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cover_art: Option<String>,
+    /// Seconds, as `search3` reports it. Subsonic names this `duration`,
+    /// and the web track table reads it straight off the song row — omit
+    /// it and every result renders "0:00".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration: Option<u32>,
 }
 
 #[derive(Serialize, Default)]
@@ -256,6 +261,7 @@ fn song_dto(rec: &Record) -> SongDto {
         // Track records carry no cover of their own; the album id resolves
         // to the album cover via the polymorphic getCoverArt.
         cover_art: rec.album_id.clone(),
+        duration: rec.duration_seconds,
     }
 }
 
@@ -310,6 +316,7 @@ async fn fallback(
                     album: t.album_name,
                     cover_art: album_id.clone(),
                     album_id,
+                    duration: t.duration_seconds,
                 }
             })
             .collect(),

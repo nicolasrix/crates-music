@@ -108,6 +108,7 @@ pub async fn build_state(config: Config) -> AppState {
         oauth,
         SetupToken::none(),
         EmbedderHandle::disabled(),
+        Some(ModelVersion::from("test-v1")),
     )
     .await
 }
@@ -121,7 +122,15 @@ pub async fn build_state_with_embedder(config: Config, embedder: EmbedderHandle)
     let oauth = OauthStore::open_in_memory()
         .await
         .expect("in-memory oauth store opens cleanly");
-    build_state_full(config, cache, oauth, SetupToken::none(), embedder).await
+    build_state_full(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        embedder,
+        Some(ModelVersion::from("test-v1")),
+    )
+    .await
 }
 
 pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
@@ -134,6 +143,7 @@ pub async fn build_state_with_cache(config: Config, cache: Cache) -> AppState {
         oauth,
         SetupToken::none(),
         EmbedderHandle::disabled(),
+        Some(ModelVersion::from("test-v1")),
     )
     .await
 }
@@ -152,6 +162,7 @@ pub async fn build_state_with_oauth(
         oauth,
         setup_token,
         EmbedderHandle::disabled(),
+        Some(ModelVersion::from("test-v1")),
     )
     .await
 }
@@ -162,6 +173,7 @@ async fn build_state_full(
     oauth: OauthStore,
     setup_token: SetupToken,
     embedder: EmbedderHandle,
+    model_version: Option<ModelVersion>,
 ) -> AppState {
     // EmbeddingStore lives in its own SQLite file in production; tests
     // use an in-memory variant so we never touch disk.
@@ -184,7 +196,28 @@ async fn build_state_full(
         embedding_store,
         metadata_store,
         ann,
-        ModelVersion::from("test-v1"),
+        model_version,
         trace_store,
     )
+}
+
+/// State as it looks after a boot that never reached the embedder: the
+/// model identity is unknown, so every `model_version`-keyed *write* path
+/// must refuse rather than stamp rows with a placeholder.
+pub async fn build_state_unknown_model(config: Config) -> AppState {
+    let cache = Cache::open_in_memory()
+        .await
+        .expect("in-memory cache opens cleanly");
+    let oauth = OauthStore::open_in_memory()
+        .await
+        .expect("in-memory oauth store opens cleanly");
+    build_state_full(
+        config,
+        cache,
+        oauth,
+        SetupToken::none(),
+        EmbedderHandle::disabled(),
+        None,
+    )
+    .await
 }

@@ -39,6 +39,7 @@ fn records() -> Vec<Record> {
             album: None,
             album_id: None,
             cover_art: None,
+            duration_seconds: None,
         },
         Record {
             kind: Kind::Track,
@@ -49,6 +50,8 @@ fn records() -> Vec<Record> {
             album: Some("Led Zeppelin IV".into()),
             album_id: Some("al-1".into()),
             cover_art: None,
+            // "Stairway to Heaven" — the value the song row must surface.
+            duration_seconds: Some(482),
         },
     ]
 }
@@ -80,6 +83,56 @@ async fn indexed_search_recovers_a_typo() {
     // an album-id-derived cover so the row isn't a bare placeholder.
     assert_eq!(result["song"][0]["id"], "tr-1");
     assert_eq!(result["song"][0]["coverArt"], "al-1");
+    // Regression: the song row carried no `duration`, so every search
+    // result rendered "0:00" in the web track table (`fmtDuration`
+    // returns "0:00" for undefined).
+    assert_eq!(
+        result["song"][0]["duration"], 482,
+        "indexed song rows must carry duration"
+    );
+}
+
+/// The fallback path builds the same `SongDto`, so it lost `duration`
+/// too — cover it separately since the two mappings are hand-written.
+#[tokio::test]
+async fn fallback_song_rows_carry_duration() {
+    let upstream = MockServer::start().await;
+    let search3_body = serde_json::json!({
+        "subsonic-response": {
+            "status": "ok",
+            "version": "1.16.1",
+            "searchResult3": {
+                "artist": [],
+                "album": [],
+                "song": [{
+                    "id": "tr-9",
+                    "title": "Weird Fishes",
+                    "artist": "Radiohead",
+                    "album": "In Rainbows",
+                    "albumId": "al-9",
+                    "duration": 321
+                }]
+            }
+        }
+    });
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/search3"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search3_body))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let state = common::build_state(cfg).await;
+    let app = build_router(state);
+
+    let resp = app.oneshot(auth("/v1/search?q=weird%20fishes")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    let song = &json["subsonic-response"]["searchResult3"]["song"][0];
+    assert_eq!(song["id"], "tr-9");
+    assert_eq!(song["duration"], 321, "fallback song rows must carry duration");
 }
 
 #[tokio::test]

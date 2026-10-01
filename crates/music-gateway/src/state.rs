@@ -38,6 +38,16 @@ use crate::proxy::build_http_client;
 use crate::ratelimit::{LoginLimiter, RateLimiter};
 use crate::sync::SyncStore;
 
+/// Sentinel `model_version` used when the embedder was unreachable at boot.
+///
+/// Deliberately not a plausible model name: it exists so read paths have
+/// *something* to query with (it matches no rows, yielding the degraded
+/// behaviour they already handle), never so rows can be written under it.
+/// The previous code used `"default"` here, which was indistinguishable
+/// from a real identity — discovery happily enqueued the whole catalog
+/// against it and the ingest workers re-embedded the library into it.
+pub const UNKNOWN_MODEL_VERSION: &str = "__unknown__";
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
@@ -97,10 +107,19 @@ struct Inner {
     /// caches the fitted (mean, components) so the refit endpoint can
     /// persist them and a restart can reload without refitting.
     whitening_store: WhiteningStore,
-    /// The model_version the recommender stamps on enqueue + ANN
-    /// queries. Sourced from the embedder's last health probe; falls
-    /// back to "default" when the embedder is disabled.
+    /// The model_version the recommender stamps on ANN queries and
+    /// embedding lookups. Sourced from the embedder's last health probe;
+    /// [`UNKNOWN_MODEL_VERSION`] when the sidecar was unreachable at boot.
+    ///
+    /// Read paths may use this freely — an unknown key simply matches no
+    /// rows, which is the degraded behaviour they already handle. **Write
+    /// paths must gate on [`AppState::recommend_writes_enabled`]**, because
+    /// stamping rows with a placeholder key silently forks the corpus.
     recommend_model_version: ModelVersion,
+    /// Whether the boot probe actually learned the embedder's model
+    /// identity. `false` disables every path that *writes* a row keyed by
+    /// `model_version`.
+    recommend_writes_enabled: bool,
     /// Read-only view of the diagnostics trace ring buffer. Handlers
     /// under `/v1/diagnostics/*` query this; the drainer task in
     /// `main.rs` is the sole writer. Cloning is cheap (wraps a sqlx
@@ -149,9 +168,15 @@ impl AppState {
         embedding_store: EmbeddingStore,
         metadata_store: MetadataStore,
         ann: Arc<AnnIndex>,
-        recommend_model_version: ModelVersion,
+        recommend_model_version: Option<ModelVersion>,
         trace_store: TraceStore,
     ) -> Self {
+        // `None` = the boot probe never reached the embedder. Reads fall
+        // back to a sentinel that matches no rows; writes are refused
+        // outright rather than stamped with it.
+        let recommend_writes_enabled = recommend_model_version.is_some();
+        let recommend_model_version =
+            recommend_model_version.unwrap_or_else(|| ModelVersion::from(UNKNOWN_MODEL_VERSION));
         // Events + play history both live in the same SQLite file as
         // the embedding store — recommender state, shared migrations.
         let event_store = EventStore::new(embedding_store.pool().clone());
@@ -192,6 +217,7 @@ impl AppState {
                 ann,
                 whitening_store,
                 recommend_model_version,
+                recommend_writes_enabled,
                 trace_store,
                 placeholder_etags: RwLock::new(HashSet::new()),
                 placeholder_revalidations: Mutex::new(HashMap::new()),
@@ -408,6 +434,14 @@ impl AppState {
 
     pub fn recommend_model_version(&self) -> &ModelVersion {
         &self.inner.recommend_model_version
+    }
+
+    /// Whether rows may be *written* under
+    /// [`Self::recommend_model_version`]. False when the embedder was
+    /// unreachable at boot, so the identity is a sentinel rather than a
+    /// real model. Every enqueue path must check this first.
+    pub fn recommend_writes_enabled(&self) -> bool {
+        self.inner.recommend_writes_enabled
     }
 
     pub fn trace_store(&self) -> &TraceStore {

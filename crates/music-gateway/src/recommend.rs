@@ -360,6 +360,16 @@ pub async fn enqueue(
     if req.track_ids.len() > MAX_ENQUEUE_IDS {
         return (StatusCode::BAD_REQUEST, "too many track_ids").into_response();
     }
+    // Without a known model identity these rows would be stamped with the
+    // unknown-model sentinel and never drain. Refuse rather than accrue
+    // junk the operator has to find and delete later.
+    if !state.recommend_writes_enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "embedder unreachable at boot; model_version unknown — retry once it is up",
+        )
+            .into_response();
+    }
     // Dedupe inside a single request. The store's INSERT OR IGNORE
     // handles cross-request idempotency on (track_id, model_version).
     let unique: HashSet<&str> = req.track_ids.iter().map(String::as_str).collect();
