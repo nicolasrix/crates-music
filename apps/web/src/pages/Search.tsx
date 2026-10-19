@@ -10,6 +10,7 @@
 // route to /search/{artists,albums,tracks}?q=… for full bucket browsing.
 
 import { useQuery } from "@tanstack/react-query";
+import type { PlaySource } from "../sync/types";
 import { useMemo } from "react";
 import { listArtists, searchAll } from "../api/client";
 import { AlbumHeroCard } from "../components/AlbumHeroCard";
@@ -21,6 +22,8 @@ import { TrackHeroCard } from "../components/TrackHeroCard";
 import { TrackTable } from "../components/TrackTable";
 import { Link, useRoute } from "../router";
 import { usePlayback } from "../sync/usePlayback";
+
+const SEARCH_SOURCE: PlaySource = { kind: "search" };
 
 const TOP_RESULTS = 3;
 // Each section shows a small table of next-best results after the
@@ -175,7 +178,7 @@ export function Search() {
             <TrackHeroCard
               key={t.id}
               track={t}
-              onPlay={() => playSingle(t)}
+              onPlay={() => playSingle(t, SEARCH_SOURCE)}
             />
           )}
           renderRest={(rest) => {
@@ -187,7 +190,7 @@ export function Search() {
               <TrackTable
                 tracks={arr}
                 showAlbum
-                onPlay={(i) => playList(arr, i)}
+                onPlay={(i) => playList(arr, i, SEARCH_SOURCE)}
               />
             );
           }}

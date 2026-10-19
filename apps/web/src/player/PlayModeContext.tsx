@@ -37,6 +37,7 @@ import {
 import { suggestForPlaylist } from "../api/recommend";
 import type { Track } from "../api/types";
 import { playList } from "../sync/playbackHelpers";
+import type { PlaySource } from "../sync/types";
 import { useSync } from "../sync/SyncContext";
 import { useToast } from "../toast/ToastContext";
 import { useAutoplay } from "./AutoplayContext";
@@ -67,6 +68,9 @@ const MAX_MIX = 10;
 // Seeds sampled server-side from the context. Matches the /v1 default.
 const SEED_SAMPLE = 8;
 
+// Logged source of a recommendation mixed into a context.
+const SMART_SHUFFLE_SOURCE: PlaySource = { kind: "smart_shuffle" };
+
 interface PlayModeCtx {
   mode: PlayMode;
   /** Step the player-bar button: in order → shuffle → smart shuffle. */
@@ -86,6 +90,7 @@ interface PlayModeCtx {
   startContext: (
     tracks: readonly Track[],
     startIndex: number,
+    source: PlaySource,
     modeOverride?: PlayMode,
   ) => void;
 }
@@ -195,17 +200,24 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
 
       const recIds = tracks.map((t) => t.id);
       const mixed = interleave(base, recIds, RECS_EVERY);
-      const itemIds = replaceUpcoming(mixed, tracks);
+      const recSet = new Set(recIds);
+      const itemIds = replaceUpcoming(mixed, tracks, (id) =>
+        recSet.has(id) ? SMART_SHUFFLE_SOURCE : undefined,
+      );
       // Provenance, so the player bar offers thumbs on a mixed-in track
       // exactly as it does on an autoplay one.
-      const recSet = new Set(recIds);
       markRecommendations(itemIds.filter((_, i) => recSet.has(mixed[i]!)));
     },
     [markRecommendations, replaceUpcoming],
   );
 
   const startContext = useCallback(
-    (tracks: readonly Track[], startIndex: number, modeOverride?: PlayMode) => {
+    (
+      tracks: readonly Track[],
+      startIndex: number,
+      source: PlaySource,
+      modeOverride?: PlayMode,
+    ) => {
       if (tracks.length === 0) return;
       const effective = modeOverride ?? mode;
       if (modeOverride !== undefined && modeOverride !== mode) {
@@ -223,7 +235,7 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
         return t ? [t] : [];
       });
 
-      const sessionId = playList({ startSession }, ordered, anchorIndex);
+      const sessionId = playList({ startSession }, ordered, anchorIndex, source);
       if (!sessionId) return;
       // What we remember is the caller's *original* order (that's the
       // whole point — `order` is the shuffled result), narrowed to the

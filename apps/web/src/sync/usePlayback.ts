@@ -27,18 +27,21 @@ import { usePlayMode } from "../player/PlayModeContext";
 import { usePlayer } from "../player/PlayerContext";
 import { playSingle as playSingleImpl } from "./playbackHelpers";
 import { useSync } from "./SyncContext";
+import type { PlaySource } from "./types";
 
 interface Playback {
   /** Queue exactly one track, with no surrounding context. */
-  playSingle: (track: Track) => void;
+  playSingle: (track: Track, source: PlaySource) => void;
   /** Queue `tracks` as the current context and start at `startIndex`.
    *  The clicked track plays first; the play mode decides the order of
    *  everything after it. `modeOverride` is for the surfaces that ask
    *  for a mode explicitly (a "shuffle playlist" button) — it also
-   *  becomes the active mode. */
+   *  becomes the active mode. `source` names the surface the list came
+   *  from; it's logged with every play of these tracks. */
   playList: (
     tracks: readonly Track[],
     startIndex: number,
+    source: PlaySource,
     modeOverride?: PlayMode,
   ) => void;
   /** Fetch an album's tracks and play them from the top. Backs the
@@ -54,22 +57,27 @@ export function usePlayback(): Playback {
   const queryClient = useQueryClient();
 
   const playSingle = useCallback(
-    (track: Track) => {
+    (track: Track, source: PlaySource) => {
       primePlayback(track);
-      playSingleImpl(sync, track);
+      playSingleImpl(sync, track, source);
     },
     [sync, primePlayback]
   );
 
   const playList = useCallback(
-    (tracks: readonly Track[], startIndex: number, modeOverride?: PlayMode) => {
+    (
+      tracks: readonly Track[],
+      startIndex: number,
+      source: PlaySource,
+      modeOverride?: PlayMode,
+    ) => {
       // Prime the *clicked* track, not `ordered[0]` — they're the same
       // by construction (startOrder puts the pick first), and reading it
       // from the caller's array keeps the gesture path free of any
       // dependency on how the mode reorders things.
       const t = tracks[startIndex];
       if (t) primePlayback(t);
-      startContext(tracks, startIndex, modeOverride);
+      startContext(tracks, startIndex, source, modeOverride);
     },
     [startContext, primePlayback]
   );
@@ -87,7 +95,7 @@ export function usePlayback(): Playback {
       });
       if (tracks.length === 0) return;
       primePlayback(tracks[0]!);
-      startContext(tracks, 0);
+      startContext(tracks, 0, { kind: "album", id: albumId });
     },
     [startContext, primePlayback, queryClient]
   );

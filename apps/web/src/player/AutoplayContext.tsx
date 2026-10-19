@@ -49,6 +49,7 @@ import {
 } from "react";
 import { startStationFromAny, startWeightedStation } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
+import type { PlaySource } from "../sync/types";
 import { isUnderdelivery, needsRearm, planRefill } from "./autoplayRefill";
 import { buildAutoplaySeeds } from "./autoplaySeeds";
 import {
@@ -101,6 +102,9 @@ interface AutoplayCtx {
 }
 
 const Ctx = createContext<AutoplayCtx | null>(null);
+
+// Logged source of every track autoplay appends.
+const AUTOPLAY_SOURCE: PlaySource = { kind: "autoplay" };
 
 export function AutoplayProvider({ children }: { children: ReactNode }) {
   const [autoplay, setAutoplayState] = useState<boolean>(() => {
@@ -276,7 +280,7 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
         // Synchronous: every push lands before React can re-render, so
         // the batch is all-or-nothing from any observer's point of view.
         for (const t of plan.push) {
-          const newItemId = pushTrack(t);
+          const newItemId = pushTrack(t, AUTOPLAY_SOURCE);
           recommendedIdsRef.current.add(newItemId);
         }
       } catch (err) {

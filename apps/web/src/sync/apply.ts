@@ -18,7 +18,16 @@ function applyToPlayback(p: PlaybackState, op: SyncOp): PlaybackState {
       if (p.queue.items.some((i) => i.item_id === op.item_id)) return p;
       return {
         ...p,
-        queue: { items: [...p.queue.items, { item_id: op.item_id, track_id: op.track_id }] },
+        queue: {
+          items: [
+            ...p.queue.items,
+            {
+              item_id: op.item_id,
+              track_id: op.track_id,
+              ...(op.source ? { source: op.source } : {}),
+            },
+          ],
+        },
       };
     }
     case "remove": {

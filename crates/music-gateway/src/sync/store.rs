@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use music_core::SessionId;
+use music_core::{PlaySource, SessionId, TrackId};
 use music_recommend::SessionStore;
 use music_sync::{ApplyError, SyncOp, SyncState};
 use tokio::sync::{RwLock, broadcast};
@@ -117,6 +117,25 @@ impl SyncStore {
             .session_anchor
             .as_ref()
             .map(|a| a.session_id.clone())
+    }
+
+    /// Where the room's now-playing item was queued from, if that item is
+    /// `track_id`. Read when logging a play: a scrobble fires while its
+    /// track is the cursor, and a mismatch (the cursor already moved on)
+    /// yields `None` rather than another item's source.
+    pub async fn now_playing_source(
+        &self,
+        room_id: i64,
+        track_id: &TrackId,
+    ) -> Option<PlaySource> {
+        let room = self.room(room_id);
+        let guard = room.inner.read().await;
+        let playback = &guard.playback;
+        let item = playback.queue.items.get(playback.now_playing_index?)?;
+        if &item.track_id != track_id {
+            return None;
+        }
+        item.source.clone()
     }
 
     pub async fn snapshot(&self, room_id: i64) -> SyncState {

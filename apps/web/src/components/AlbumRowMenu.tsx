@@ -88,7 +88,7 @@ function AlbumMenuBody({
       const tracks = await loadTracks();
       // pushTrack per track rather than a queue-replacing start_session:
       // "add to queue" must not disturb what's playing.
-      for (const t of tracks) sync.pushTrack(t);
+      for (const t of tracks) sync.pushTrack(t, { kind: "queue_add", id: album.id });
       toast(`added ${tracks.length} tracks to queue`, { variant: "success" });
     } catch (e) {
       toast(`couldn't queue album: ${(e as Error).message}`, {
@@ -116,7 +116,7 @@ function AlbumMenuBody({
         toast("station came back empty", { variant: "error" });
         return;
       }
-      playList(tracks, 0);
+      playList(tracks, 0, { kind: "album_station", id: album.id });
     } catch (e) {
       toast(
         e instanceof SeedNotEmbeddedError

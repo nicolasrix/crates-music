@@ -134,7 +134,7 @@ export function SearchBucket({ bucket }: { bucket: BucketKind }) {
           <TrackTable
             tracks={[...ranked!.tracks]}
             showAlbum
-            onPlay={(i) => playList(ranked!.tracks, i)}
+            onPlay={(i) => playList(ranked!.tracks, i, { kind: "search" })}
           />
         </div>
       )}

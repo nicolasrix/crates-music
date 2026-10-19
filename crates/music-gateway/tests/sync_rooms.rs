@@ -146,6 +146,7 @@ fn push_op(item_id: &str, track_id: &str) -> SyncOp {
     SyncOp::Push {
         item_id: music_core::QueueItemId::from(item_id),
         track_id: music_core::TrackId::from(track_id),
+        source: None,
     }
 }
 

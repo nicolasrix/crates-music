@@ -17,6 +17,7 @@ pub mod events;
 pub mod guest_codes;
 pub mod ingest;
 pub mod library_rating;
+pub mod listen_session;
 pub mod lyrics;
 pub mod oauth;
 pub mod playlists;

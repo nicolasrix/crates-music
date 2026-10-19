@@ -69,7 +69,7 @@ export function Album({ id }: { id: string }) {
         setStationStatus({ kind: "empty" });
         return;
       }
-      playList(tracks, 0);
+      playList(tracks, 0, { kind: "album_station", id });
       setStationStatus({ kind: "idle" });
     } catch (e) {
       if (e instanceof SeedNotEmbeddedError) {
@@ -153,7 +153,7 @@ export function Album({ id }: { id: string }) {
           <div className="actions">
             <button
               className="play-disc"
-              onClick={() => playList(tracks, 0)}
+              onClick={() => playList(tracks, 0, { kind: "album", id: album.id })}
               aria-label="play album"
               title="play album"
             >
@@ -171,7 +171,7 @@ export function Album({ id }: { id: string }) {
             <button
               className="icon-btn"
               onClick={() => {
-                for (const t of tracks) sync.pushTrack(t);
+                for (const t of tracks) sync.pushTrack(t, { kind: "queue_add", id: album.id });
                 toast(
                   `added ${tracks.length} track${tracks.length === 1 ? "" : "s"} to queue`,
                   { variant: "success" },
@@ -194,7 +194,7 @@ export function Album({ id }: { id: string }) {
         <TrackTable
           tracks={tracks}
           showAlbum={false}
-          onPlay={(i) => playList(tracks, i)}
+          onPlay={(i) => playList(tracks, i, { kind: "album", id: album.id })}
         />
       </div>
 

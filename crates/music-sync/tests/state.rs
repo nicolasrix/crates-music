@@ -14,6 +14,7 @@ fn push(item: &str, track: &str) -> SyncOp {
     SyncOp::Push {
         item_id: QueueItemId::from(item),
         track_id: TrackId::from(track),
+        source: None,
     }
 }
 
@@ -292,6 +293,7 @@ fn item(item_id: &str, track_id: &str) -> QueueItem {
     QueueItem {
         item_id: QueueItemId::from(item_id),
         track_id: TrackId::from(track_id),
+        source: None,
     }
 }
 

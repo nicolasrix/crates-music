@@ -11,6 +11,7 @@
 // from yesterday would silently mask newly-ingested tracks.
 
 import { Radio } from "lucide-react";
+import type { PlaySource } from "../sync/types";
 import { useState } from "react";
 
 import {
@@ -22,6 +23,8 @@ import { Layout } from "../components/Layout";
 import { TrackTable } from "../components/TrackTable";
 import type { Track } from "../api/types";
 import { usePlayback } from "../sync/usePlayback";
+
+const STATION_SOURCE: PlaySource = { kind: "station" };
 
 const DEFAULT_N = 20;
 const MIN_N = 5;
@@ -159,7 +162,7 @@ export function Station() {
           </button>
         </form>
 
-        <StatusBanner status={status} onPlayAll={(tracks) => playList(tracks, 0)} />
+        <StatusBanner status={status} onPlayAll={(tracks) => playList(tracks, 0, STATION_SOURCE)} />
       </div>
 
       {status.kind === "ready" && (
@@ -170,7 +173,7 @@ export function Station() {
           <TrackTable
             tracks={status.tracks}
             showAlbum
-            onPlay={(i) => playList(status.tracks, i)}
+            onPlay={(i) => playList(status.tracks, i, STATION_SOURCE)}
           />
         </div>
       )}

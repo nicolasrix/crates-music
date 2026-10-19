@@ -20,7 +20,8 @@ import { readTokens } from "../auth/tokens";
 import { useToast } from "../toast/ToastContext";
 import { applyOp } from "./apply";
 import { reconnectDelayMs } from "./reconnect";
-import type { ClientMessage, ServerMessage, SyncOp, SyncState } from "./types";
+import { sourcedItems } from "./queueSources";
+import type { ClientMessage, PlaySource, ServerMessage, SyncOp, SyncState } from "./types";
 
 const EMPTY: SyncState = {
   playback: {
@@ -42,19 +43,28 @@ interface SyncCtx {
   submit: (op: SyncOp) => void;
   /** Push a track and stash its metadata locally so the player bar can
    *  render it without a separate fetch. */
-  pushTrack: (track: Track) => string;
+  pushTrack: (track: Track, source?: PlaySource) => string;
   /** Atomically replace the queue with `tracks` and start a fresh
    *  recommend-session anchored on `tracks[anchorIndex]`. One op,
    *  one round-trip — replaces the legacy 4-op pattern. Returns the
    *  new session id so the caller can file what it started under
    *  (see PlayModeContext's context memory). */
-  startSession: (tracks: readonly Track[], anchorIndex: number) => string;
+  startSession: (
+    tracks: readonly Track[],
+    anchorIndex: number,
+    source?: PlaySource,
+  ) => string;
   /** Swap everything after the cursor for `trackIds`, leaving the
    *  current track playing untouched. `meta` is optional metadata to
    *  stash for ids we already have Tracks for (otherwise the queue
    *  hydration effect fetches them). Returns the minted item ids,
-   *  positionally matching `trackIds`. */
-  replaceUpcoming: (trackIds: readonly string[], meta?: readonly Track[]) => string[];
+   *  positionally matching `trackIds`. Each item keeps the source its
+   *  track already had in the queue unless `sourceFor` names one. */
+  replaceUpcoming: (
+    trackIds: readonly string[],
+    meta?: readonly Track[],
+    sourceFor?: (trackId: string) => PlaySource | undefined,
+  ) => string[];
   ready: boolean;
 }
 
@@ -232,6 +242,11 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     });
   }, [state.playback.queue.items]);
 
+  // Latest queue for `replaceUpcoming`'s source carry-over, readable from
+  // a stable callback without re-creating it on every frame.
+  const queueItemsRef = useRef(state.playback.queue.items);
+  queueItemsRef.current = state.playback.queue.items;
+
   const submit = useCallback((op: SyncOp) => {
     const ws = wsRef.current;
     // If the socket isn't open yet (race during connect/reconnect),
@@ -245,22 +260,31 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const pushTrack = useCallback(
-    (track: Track) => {
+    (track: Track, source?: PlaySource) => {
       const itemId = newItemId();
       trackMetaRef.current.set(track.id, track);
       forceMetaTick((n) => n + 1);
-      submit({ type: "push", item_id: itemId, track_id: track.id });
+      submit({
+        type: "push",
+        item_id: itemId,
+        track_id: track.id,
+        ...(source ? { source } : {}),
+      });
       return itemId;
     },
     [submit],
   );
 
   const startSession = useCallback(
-    (tracks: readonly Track[], anchorIndex: number) => {
+    (tracks: readonly Track[], anchorIndex: number, source?: PlaySource) => {
       if (tracks.length === 0) return "";
       for (const t of tracks) trackMetaRef.current.set(t.id, t);
       forceMetaTick((n) => n + 1);
-      const items = tracks.map((t) => ({ item_id: newItemId(), track_id: t.id }));
+      const items = tracks.map((t) => ({
+        item_id: newItemId(),
+        track_id: t.id,
+        ...(source ? { source } : {}),
+      }));
       const sessionId = newSessionId();
       submit({
         type: "start_session",
@@ -274,12 +298,16 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   );
 
   const replaceUpcoming = useCallback(
-    (trackIds: readonly string[], meta?: readonly Track[]) => {
+    (
+      trackIds: readonly string[],
+      meta?: readonly Track[],
+      sourceFor?: (trackId: string) => PlaySource | undefined,
+    ) => {
       if (meta && meta.length > 0) {
         for (const t of meta) trackMetaRef.current.set(t.id, t);
         forceMetaTick((n) => n + 1);
       }
-      const items = trackIds.map((id) => ({ item_id: newItemId(), track_id: id }));
+      const items = sourcedItems(trackIds, newItemId, queueItemsRef.current, sourceFor);
       submit({ type: "replace_upcoming", items });
       return items.map((i) => i.item_id);
     },

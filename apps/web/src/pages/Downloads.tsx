@@ -197,7 +197,7 @@ export function Downloads() {
           </p>
         )}
         {tracks.length > 0 && (
-          <TrackTable tracks={tracks} showAlbum onPlay={(i) => playList(tracks, i)} />
+          <TrackTable tracks={tracks} showAlbum onPlay={(i) => playList(tracks, i, { kind: "downloads" })} />
         )}
       </div>
     </Layout>

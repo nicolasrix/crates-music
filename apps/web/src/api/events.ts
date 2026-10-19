@@ -48,14 +48,21 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 }
 
 /** Snake_case to match the gateway's `EventType` serde wire format. */
-export type RecommendEventType = "scrobble" | "skip" | "like" | "unlike" | "seek";
+export type RecommendEventType =
+  | "scrobble"
+  | "skip"
+  | "complete"
+  | "like"
+  | "unlike"
+  | "seek";
 
 export interface RecommendEvent {
   event_type: RecommendEventType;
   track_id: string;
   /** Client-supplied unix milliseconds. */
   occurred_at: number;
-  /** Opaque type-specific blob, e.g. `{ played_ms }` for a skip. */
+  /** Opaque type-specific blob: `{ played_ms, heard_ms, duration_ms,
+   *  source }` on a skip / complete. The gateway adds `listen_session`. */
   metadata?: Record<string, unknown>;
   /** Active recommend-session, if any. */
   session_id?: string;

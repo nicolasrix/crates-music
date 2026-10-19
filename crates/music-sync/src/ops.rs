@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use music_core::{QueueItem, QueueItemId, SessionId, TrackId};
+use music_core::{PlaySource, QueueItem, QueueItemId, SessionId, TrackId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -18,6 +18,9 @@ pub enum SyncOp {
     Push {
         item_id: QueueItemId,
         track_id: TrackId,
+        /// Where the track was queued from; see [`PlaySource`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<PlaySource>,
     },
     /// Remove an item by id. No-op if the id is not in the queue.
     Remove { item_id: QueueItemId },

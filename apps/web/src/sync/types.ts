@@ -2,9 +2,20 @@
 // `music-core` and `music-sync`. Kept narrow: we only model what the
 // web client actually reads or writes.
 
+/// The surface a queue item was started from (`PlaySource` in
+/// music-core). Logged with each play so the listening history records
+/// *how* a track came to be playing. `kind` is an open set.
+export interface PlaySource {
+  kind: string;
+  /** The album / playlist / artist the surface was showing, if any. */
+  id?: string;
+}
+
 export interface QueueItem {
   item_id: string;
   track_id: string;
+  /** Absent on items from clients that predate it. */
+  source?: PlaySource;
 }
 
 export interface Queue {
@@ -38,7 +49,7 @@ export interface SyncState {
 }
 
 export type SyncOp =
-  | { type: "push"; item_id: string; track_id: string }
+  | { type: "push"; item_id: string; track_id: string; source?: PlaySource }
   | { type: "remove"; item_id: string }
   | { type: "reorder"; item_id: string; new_index: number }
   | { type: "set_now_playing"; index: number | null }
