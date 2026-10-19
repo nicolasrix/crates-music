@@ -256,7 +256,7 @@ export function LatentSpace3D({
     setPlayingTrackId(hover.track_id);
     try {
       const track = await getSong(hover.track_id);
-      playback.playSingle(track);
+      playback.playSingle(track, { kind: "latent_space" });
     } catch (err) {
       console.error("latent_space_3d: getSong failed", err);
     } finally {

@@ -25,6 +25,7 @@ fn server_applied_carries_op_and_version() {
     let op = SyncOp::Push {
         item_id: QueueItemId::from("qi-1"),
         track_id: TrackId::from("t-1"),
+        source: None,
     };
     let msg = ServerMessage::Applied {
         op: op.clone(),

@@ -16,6 +16,7 @@ use music_core::SessionId;
 use music_recommend::{AffinityEvent, EventInput, EventType};
 use serde::{Deserialize, Serialize};
 
+use crate::listen_session::with_fields;
 use crate::principal::{AuthPrincipal, Role};
 use crate::state::AppState;
 
@@ -101,17 +102,26 @@ pub async fn submit(
         }
     }
 
-    let events: Vec<EventInput> = req
-        .events
-        .into_iter()
-        .map(|p| EventInput {
+    let mut events: Vec<EventInput> = Vec::with_capacity(req.events.len());
+    for p in req.events {
+        // Activity spans the listening the event reports (`heard_ms` on a
+        // skip / complete), so a long track doesn't read as an idle gap.
+        let start_ms = p.occurred_at - extract_heard_ms(p.metadata.as_ref()).unwrap_or(0);
+        let listen_session = state
+            .listen_session(principal.user_id, start_ms, p.occurred_at)
+            .await;
+        let metadata = with_fields(
+            p.metadata.as_ref(),
+            [("listen_session", serde_json::Value::from(listen_session))],
+        );
+        events.push(EventInput {
             event_type: p.event_type,
             track_id: music_core::TrackId::from(p.track_id),
             occurred_at: p.occurred_at,
-            metadata: p.metadata,
+            metadata,
             session_id: p.session_id.map(SessionId::from),
-        })
-        .collect();
+        });
+    }
 
     match state
         .event_store()
@@ -138,6 +148,16 @@ pub async fn submit(
 #[allow(clippy::cast_possible_truncation)] // playback position in ms; precision loss is immaterial
 fn extract_played_ms(metadata: Option<&serde_json::Value>) -> Option<i64> {
     let v = metadata?.get("played_ms")?;
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .filter(|ms| *ms >= 0)
+}
+
+/// Pull a `heard_ms` (time actually listened, seeks excluded) out of an
+/// event's metadata. Same shape rules as [`extract_played_ms`].
+#[allow(clippy::cast_possible_truncation)] // listened time in ms; precision loss is immaterial
+fn extract_heard_ms(metadata: Option<&serde_json::Value>) -> Option<i64> {
+    let v = metadata?.get("heard_ms")?;
     v.as_i64()
         .or_else(|| v.as_f64().map(|f| f as i64))
         .filter(|ms| *ms >= 0)

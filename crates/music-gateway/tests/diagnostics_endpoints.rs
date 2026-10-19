@@ -1629,6 +1629,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s1".to_string()),
@@ -1665,6 +1666,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-2".to_string()),
                 track_id: music_core::TrackId::from("t-2".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s2".to_string()),
@@ -1677,6 +1679,7 @@ async fn recommend_sessions_returns_newest_first_with_event_counts() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-3".to_string()),
                 track_id: music_core::TrackId::from("t-3".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s3".to_string()),
@@ -1715,6 +1718,7 @@ async fn recommend_sessions_respects_limit_query() {
                 items: vec![music_core::QueueItem {
                     item_id: music_core::QueueItemId::from(format!("qi-{i}")),
                     track_id: music_core::TrackId::from(format!("t-{i}")),
+                    source: None,
                 }],
                 anchor_index: 0,
                 session_id: music_core::SessionId::from(format!("s{i}")),
@@ -1786,6 +1790,7 @@ async fn recommend_sessions_include_events_attaches_events_and_segments() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-a".to_string()),
                 track_id: music_core::TrackId::from("t-a".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s-evt".to_string()),
@@ -1859,6 +1864,7 @@ async fn recommend_sessions_omits_events_by_default() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s-bare".to_string()),
@@ -1885,6 +1891,7 @@ async fn recommend_sessions_include_events_handles_session_with_no_events() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: music_core::TrackId::from("t-1".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: music_core::SessionId::from("s-empty".to_string()),

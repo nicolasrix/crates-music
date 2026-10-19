@@ -113,7 +113,7 @@ export function Home() {
           <TrackTable
             tracks={tracksQ.data}
             showAlbum
-            onPlay={(i) => playList(tracksQ.data!, i)}
+            onPlay={(i) => playList(tracksQ.data!, i, { kind: "home" })}
           />
         )}
       </div>

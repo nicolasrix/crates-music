@@ -216,6 +216,7 @@ export function Playlist({ id }: { id: string }) {
   }
 
   const { playlist, tracks } = q.data;
+  const playlistSource = { kind: "playlist", id: playlist.id };
   const totalSeconds = tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0);
   const quiltCovers = pickQuiltCovers(tracks);
 
@@ -241,7 +242,7 @@ export function Playlist({ id }: { id: string }) {
           <div className="actions">
             <button
               className="play-disc"
-              onClick={() => playList(tracks, 0)}
+              onClick={() => playList(tracks, 0, playlistSource)}
               aria-label="play playlist"
             >
               <Play size={20} fill="currentColor" strokeWidth={0} />
@@ -254,7 +255,7 @@ export function Playlist({ id }: { id: string }) {
             <button
               className="icon-btn"
               onClick={() =>
-                playList(tracks, 0, mode === "in_order" ? "shuffle" : mode)
+                playList(tracks, 0, playlistSource, mode === "in_order" ? "shuffle" : mode)
               }
               disabled={tracks.length === 0}
               aria-label="shuffle playlist"
@@ -302,7 +303,7 @@ export function Playlist({ id }: { id: string }) {
         <TrackTable
           tracks={tracks}
           showAlbum
-          onPlay={(i) => playList(tracks, i)}
+          onPlay={(i) => playList(tracks, i, playlistSource)}
           rowMenuExtras={(track) => [
             {
               key: "remove-from-playlist",
@@ -317,7 +318,7 @@ export function Playlist({ id }: { id: string }) {
         state={suggestState}
         addingId={addingId}
         onAdd={handleAddSuggestion}
-        onPlay={(t) => playSingle(t)}
+        onPlay={(t) => playSingle(t, { kind: "playlist_suggestion", id: playlist.id })}
         onRetry={handleSuggest}
       />
     </Layout>

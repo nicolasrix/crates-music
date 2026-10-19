@@ -9,9 +9,14 @@
 // could briefly see a cleared queue with no session intent.
 
 import type { Track } from "../api/types";
+import type { PlaySource } from "./types";
 
 interface SyncSubmitter {
-  startSession: (tracks: readonly Track[], anchorIndex: number) => string;
+  startSession: (
+    tracks: readonly Track[],
+    anchorIndex: number,
+    source?: PlaySource,
+  ) => string;
 }
 
 /** Replace the queue with the given tracks and start playing at
@@ -25,15 +30,16 @@ export function playList(
   sync: SyncSubmitter,
   tracks: readonly Track[],
   startIndex: number,
+  source: PlaySource,
 ): string {
   if (tracks.length === 0) return "";
-  return sync.startSession(tracks, startIndex);
+  return sync.startSession(tracks, startIndex, source);
 }
 
 /** Replace the queue with a single track and play it. For surfaces with
  *  no surrounding list to queue (the latent-space scatter plots); a
  *  track clicked inside a *list* takes that list with it — see
  *  `usePlayback.playList`. */
-export function playSingle(sync: SyncSubmitter, track: Track): void {
-  sync.startSession([track], 0);
+export function playSingle(sync: SyncSubmitter, track: Track, source: PlaySource): void {
+  sync.startSession([track], 0, source);
 }

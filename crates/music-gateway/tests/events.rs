@@ -225,3 +225,91 @@ async fn events_rejects_body_over_size_limit() {
     );
     assert_eq!(state.event_store().count().await.unwrap(), 0);
 }
+
+const MIN: i64 = 60_000;
+
+/// The `listen_session` stamped into each stored event's metadata, oldest
+/// event first.
+async fn listen_sessions(state: &music_gateway::state::AppState) -> Vec<String> {
+    let mut events = state.event_store().recent(100).await.unwrap();
+    events.reverse();
+    events
+        .iter()
+        .map(|e| {
+            e.metadata.as_ref().unwrap()["listen_session"]
+                .as_str()
+                .expect("every event is stamped")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn events_are_stamped_with_a_listen_session_split_on_idle_gaps() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+
+    // Two plays close together, then one after a 2-hour break.
+    let body = json!({
+        "events": [
+            {"event_type": "skip", "track_id": "t1", "occurred_at": 10 * MIN, "metadata": {"played_ms": 60_000}},
+            {"event_type": "complete", "track_id": "t2", "occurred_at": 14 * MIN},
+            {"event_type": "complete", "track_id": "t3", "occurred_at": 134 * MIN}
+        ]
+    });
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sessions = listen_sessions(&state).await;
+    assert_eq!(sessions[0], sessions[1], "4 minutes apart → same session");
+    assert_ne!(sessions[1], sessions[2], "2-hour gap → new session");
+}
+
+#[tokio::test]
+async fn heard_time_counts_as_activity_for_the_session_gap() {
+    // A 40-minute track completes 40 minutes after the previous event: the
+    // gap is measured from when listening to it *started*, so it's still
+    // one session.
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+    let body = json!({
+        "events": [
+            {"event_type": "complete", "track_id": "t1", "occurred_at": 10 * MIN},
+            {"event_type": "complete", "track_id": "long", "occurred_at": 50 * MIN,
+             "metadata": {"heard_ms": 40 * MIN, "duration_ms": 40 * MIN}}
+        ]
+    });
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sessions = listen_sessions(&state).await;
+    assert_eq!(sessions[0], sessions[1]);
+}
+
+#[tokio::test]
+async fn stamping_keeps_client_metadata() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+    let body = json!({
+        "events": [{"event_type": "skip", "track_id": "t1", "occurred_at": 1000,
+                    "metadata": {"played_ms": 5000, "source": {"kind": "album", "id": "al-1"}}}]
+    });
+    app.oneshot(auth_post(&body)).await.unwrap();
+
+    let ev = &state.event_store().recent(1).await.unwrap()[0];
+    let meta = ev.metadata.as_ref().unwrap();
+    assert_eq!(meta["played_ms"], 5000);
+    assert_eq!(meta["source"]["kind"], "album");
+    assert!(meta["listen_session"].is_string());
+}
+
+#[tokio::test]
+async fn complete_is_a_first_class_event_type() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+    let body = json!({"events": [{"event_type": "complete", "track_id": "t1", "occurred_at": 1000}]});
+    app.oneshot(auth_post(&body)).await.unwrap();
+
+    let ev = &state.event_store().recent(1).await.unwrap()[0];
+    assert_eq!(ev.event_type, music_recommend::EventType::Complete);
+}

@@ -91,6 +91,7 @@ async fn ws_receives_applied_frame_when_op_posted_via_rest() {
     let op = SyncOp::Push {
         item_id: music_core::QueueItemId::from("qi-1"),
         track_id: music_core::TrackId::from("t-1"),
+        source: None,
     };
     let version = app_state.sync().apply(music_gateway::principal::OWNER_USER_ID, &op).await.unwrap();
     assert_eq!(version, 1);
@@ -115,6 +116,7 @@ async fn ws_op_from_one_client_is_seen_by_a_second() {
         op: SyncOp::Push {
             item_id: music_core::QueueItemId::from("qi-7"),
             track_id: music_core::TrackId::from("t-7"),
+            source: None,
         },
     };
     alice
@@ -187,6 +189,7 @@ async fn ws_receives_start_session_applied_frame_with_anchor_in_op() {
         items: vec![music_core::QueueItem {
             item_id: music_core::QueueItemId::from("qi-1"),
             track_id: music_core::TrackId::from("t-1"),
+            source: None,
         }],
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-1"),
@@ -215,6 +218,7 @@ async fn ws_first_frame_snapshot_includes_anchor_when_session_active() {
         items: vec![music_core::QueueItem {
             item_id: music_core::QueueItemId::from("qi-1"),
             track_id: music_core::TrackId::from("t-1"),
+            source: None,
         }],
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-pre"),

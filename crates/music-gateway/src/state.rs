@@ -87,6 +87,8 @@ struct Inner {
     embedding_store: EmbeddingStore,
     metadata_store: MetadataStore,
     event_store: EventStore,
+    /// Open listening session per user, stamped into every logged event.
+    listen_sessions: crate::listen_session::ListenSessions,
     play_history: PlayHistoryStore,
     feedback: FeedbackStore,
     /// Append-only log of what the recommender served (request context +
@@ -207,6 +209,7 @@ impl AppState {
                 embedding_store,
                 metadata_store,
                 event_store,
+                listen_sessions: crate::listen_session::ListenSessions::default(),
                 play_history,
                 feedback,
                 recommendation_log,
@@ -313,6 +316,15 @@ impl AppState {
 
     pub fn event_store(&self) -> &EventStore {
         &self.inner.event_store
+    }
+
+    /// The listening session for `user_id`'s activity spanning
+    /// `start_ms..=end_ms`; see [`crate::listen_session`].
+    pub async fn listen_session(&self, user_id: i64, start_ms: i64, end_ms: i64) -> String {
+        self.inner
+            .listen_sessions
+            .stamp(&self.inner.event_store, user_id, start_ms, end_ms)
+            .await
     }
 
     pub fn play_history(&self) -> &PlayHistoryStore {

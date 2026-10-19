@@ -27,6 +27,8 @@ use crate::{Error, Result};
 pub enum EventType {
     Scrobble,
     Skip,
+    /// The track played through to its natural end.
+    Complete,
     Like,
     Unlike,
     Seek,
@@ -40,6 +42,7 @@ impl EventType {
         match self {
             Self::Scrobble => "scrobble",
             Self::Skip => "skip",
+            Self::Complete => "complete",
             Self::Like => "like",
             Self::Unlike => "unlike",
             Self::Seek => "seek",
@@ -51,6 +54,7 @@ impl EventType {
         match s {
             "scrobble" => Self::Scrobble,
             "skip" => Self::Skip,
+            "complete" => Self::Complete,
             "like" => Self::Like,
             "unlike" => Self::Unlike,
             "seek" => Self::Seek,
@@ -134,6 +138,24 @@ impl EventStore {
         }
         tx.commit().await?;
         Ok(count)
+    }
+
+    /// The user's most recent listening session — the `listen_session`
+    /// stamped into the newest event that has one — with that event's
+    /// `occurred_at`. Lets the gateway resume a session across a restart
+    /// instead of splitting it.
+    pub async fn last_listen_session(&self, user_id: i64) -> Result<Option<(String, i64)>> {
+        let row = sqlx::query(
+            "SELECT json_extract(metadata, '$.listen_session') AS ls, occurred_at
+                 FROM events
+                 WHERE user_id = ? AND json_extract(metadata, '$.listen_session') IS NOT NULL
+                 ORDER BY occurred_at DESC, id DESC
+                 LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.get("ls"), r.get("occurred_at"))))
     }
 
     /// Total number of events persisted. Diagnostic.
