@@ -40,6 +40,14 @@ pub(crate) fn tokenize(s: &str) -> Vec<String> {
     n.split(' ').map(str::to_string).collect()
 }
 
+/// The normalized words joined with no separator: `"K.I.Z"` → `"kiz"`,
+/// `"AC/DC"` → `"acdc"`. Punctuated names are usually *typed* without the
+/// punctuation, which `tokenize` alone can't bridge — `"kiz"` is neither a
+/// prefix of nor within edit distance of the term `"k"`.
+pub(crate) fn compact(s: &str) -> String {
+    normalize(s).replace(' ', "")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +64,14 @@ mod tests {
         assert_eq!(tokenize("...The Knife..."), vec!["the", "knife"]);
         assert!(tokenize("   ").is_empty());
         assert!(tokenize("").is_empty());
+    }
+
+    #[test]
+    fn compact_joins_tokens() {
+        assert_eq!(compact("K.I.Z"), "kiz");
+        assert_eq!(compact("AC/DC"), "acdc");
+        assert_eq!(compact("Led Zeppelin"), "ledzeppelin");
+        assert_eq!(compact("..."), "");
     }
 
     #[test]

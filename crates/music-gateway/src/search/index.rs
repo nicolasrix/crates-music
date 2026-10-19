@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use fst::automaton::{Automaton, Levenshtein};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
 
-use super::normalize::{normalize, tokenize};
+use super::normalize::{compact, tokenize};
 
 /// Which catalog bucket a record belongs to. Mirrors Subsonic's
 /// `search3` split so results map cleanly onto the response shape.
@@ -82,8 +82,8 @@ struct Posting {
 /// Built, queryable index. Cheap to hold for ~10⁴ records.
 pub struct SearchIndex {
     records: Vec<Record>,
-    /// Normalized primary name per record, cached for the whole-name
-    /// exact/prefix bonus (parallel to `records`).
+    /// Compacted primary name per record (see [`compact`]), cached for the
+    /// whole-name exact/prefix bonus (parallel to `records`).
     norm_names: Vec<String>,
     /// term → postings-group id (into `postings`).
     terms: Map<Vec<u8>>,
@@ -123,22 +123,19 @@ impl SearchIndex {
         let mut term_postings: BTreeMap<String, Vec<Posting>> = BTreeMap::new();
 
         for (idx, rec) in records.iter().enumerate() {
-            let norm = normalize(&rec.name);
-            for tok in norm.split(' ').filter(|t| !t.is_empty()) {
-                term_postings
-                    .entry(tok.to_string())
-                    .or_default()
-                    .push(Posting { record_index: idx, weight: 1.0 });
-            }
-            norm_names.push(norm);
+            add_field_terms(
+                &mut term_postings,
+                &rec.name,
+                Posting { record_index: idx, weight: 1.0 },
+            );
+            norm_names.push(compact(&rec.name));
             // Secondary field (album/track artist) as a supporting signal.
             if let Some(artist) = &rec.artist {
-                for tok in tokenize(artist) {
-                    term_postings.entry(tok).or_default().push(Posting {
-                        record_index: idx,
-                        weight: SECONDARY_FIELD_WEIGHT,
-                    });
-                }
+                add_field_terms(
+                    &mut term_postings,
+                    artist,
+                    Posting { record_index: idx, weight: SECONDARY_FIELD_WEIGHT },
+                );
             }
         }
 
@@ -165,7 +162,7 @@ impl SearchIndex {
         if q_tokens.is_empty() {
             return Vec::new();
         }
-        let q_norm = normalize(query);
+        let q_norm = compact(query);
 
         // per record: best contribution seen for each query-token slot.
         // Using a slot vector (len = q_tokens) lets us both sum scores and
@@ -194,6 +191,8 @@ impl SearchIndex {
             }
             // Whole-name exact/prefix bonus — this is what floats "Led
             // Zeppelin" the artist above a track that merely mentions it.
+            // Compared in compact form so "kiz" and "k.i.z" both count as
+            // an exact hit on "K.I.Z".
             let norm = &self.norm_names[rec_idx];
             if *norm == q_norm {
                 score += WHOLE_EXACT_BONUS;
@@ -262,6 +261,25 @@ impl SearchIndex {
                 }
             }
         }
+    }
+}
+
+/// Index one field: each normalized word, plus — for a multi-word field —
+/// the words joined, so a punctuated name is reachable the way it's typed
+/// ("K.I.Z" via "kiz", "AC/DC" via "acdc"). The joined term shares the
+/// field's weight; a record hit through both keeps only its best slot, so
+/// the extra term can't double-count.
+fn add_field_terms(
+    term_postings: &mut BTreeMap<String, Vec<Posting>>,
+    field: &str,
+    posting: Posting,
+) {
+    let tokens = tokenize(field);
+    if tokens.len() > 1 {
+        term_postings.entry(tokens.concat()).or_default().push(posting);
+    }
+    for tok in tokens {
+        term_postings.entry(tok).or_default().push(posting);
     }
 }
 
@@ -369,6 +387,41 @@ mod tests {
         let idx = index();
         let hits = idx.query("led zeppelin", Kind::Track, 10);
         assert_eq!(top_id(&idx, &hits), Some("tr-1"));
+    }
+
+    fn punctuated_index() -> SearchIndex {
+        SearchIndex::build(vec![
+            artist("ar-kiz", "K.I.Z"),
+            artist("ar-acdc", "AC/DC"),
+            artist("ar-k", "Kraftwerk"),
+            track("tr-kiz", "Hurra die Welt geht unter", "K.I.Z"),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn dotted_acronym_matches_its_joined_spelling() {
+        // "K.I.Z" tokenizes to "k i z"; typing the band name the way it's
+        // said ("kiz") must still find it.
+        let idx = punctuated_index();
+        let hits = idx.query("KIZ", Kind::Artist, 10);
+        assert_eq!(top_id(&idx, &hits), Some("ar-kiz"));
+        let hits = idx.query("kiz", Kind::Track, 10);
+        assert_eq!(top_id(&idx, &hits), Some("tr-kiz"), "track via artist field");
+    }
+
+    #[test]
+    fn punctuated_name_matches_its_joined_spelling() {
+        let idx = punctuated_index();
+        let hits = idx.query("acdc", Kind::Artist, 10);
+        assert_eq!(top_id(&idx, &hits), Some("ar-acdc"));
+    }
+
+    #[test]
+    fn spelled_out_query_still_ranks_acronym_first() {
+        let idx = punctuated_index();
+        let hits = idx.query("k.i.z", Kind::Artist, 10);
+        assert_eq!(top_id(&idx, &hits), Some("ar-kiz"));
     }
 
     #[test]
