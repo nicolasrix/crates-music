@@ -313,3 +313,43 @@ async fn complete_is_a_first_class_event_type() {
     let ev = &state.event_store().recent(1).await.unwrap()[0];
     assert_eq!(ev.event_type, music_recommend::EventType::Complete);
 }
+
+#[tokio::test]
+async fn resent_client_event_id_is_not_persisted_twice() {
+    // The web client keeps undelivered events and retries them; a retry
+    // of a batch that did land (response lost) must be a no-op.
+    let state = build_state(test_config()).await;
+    let app = build_router(state.clone());
+    let body = json!({
+        "events": [
+            {"event_type": "skip", "track_id": "t1", "occurred_at": 1000,
+             "metadata": {"played_ms": 5000}, "client_event_id": "ev-1"},
+            {"event_type": "complete", "track_id": "t2", "occurred_at": 2000,
+             "client_event_id": "ev-2"}
+        ]
+    });
+
+    let resp = app.clone().oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(read_json(resp).await["accepted"], 2);
+
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(read_json(resp).await["accepted"], 0);
+
+    assert_eq!(state.event_store().count().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn events_reject_oversized_client_event_id() {
+    let state = build_state(test_config()).await;
+    let app = build_router(state);
+    let body = json!({
+        "events": [
+            {"event_type": "skip", "track_id": "t1", "occurred_at": 1000,
+             "client_event_id": "x".repeat(200)}
+        ]
+    });
+    let resp = app.oneshot(auth_post(&body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

@@ -688,14 +688,22 @@ Body:
     {
       "event_type": "skip",
       "track_id": "track_b",
-      "occurred_at": 1712345700000
+      "occurred_at": 1712345700000,
+      "client_event_id": "4f0c2b9e-6d1a-4b8e-9c3f-2a7d5e1b8c40"
     }
   ]
 }
 ```
 
-`event_type` is one of: `scrobble`, `skip`, `like`, `unlike`, `seek`.
-Unknown values are accepted and stored verbatim.
+`event_type` is one of: `scrobble`, `skip`, `complete`, `like`,
+`unlike`, `seek`. Unknown values are accepted and stored verbatim.
+
+`client_event_id` (optional, 1–64 bytes) makes delivery retry-safe: an
+event whose id this user already has is not stored again and folds no
+affinity a second time. The web client sets it on every event and keeps
+undelivered ones in a local outbox, retrying until the gateway confirms
+them (`apps/web/src/api/eventOutbox.ts`). Events without an id always
+persist.
 
 `occurred_at` is client-supplied unix milliseconds. The gateway adds
 its own `received_at` so we can detect clock skew.
@@ -704,11 +712,15 @@ Constraints:
 - Empty `events` array → 400.
 - More than 1000 events in one batch → 413. Coalesce smaller.
 - Malformed JSON → 400.
+- `client_event_id` empty or over 64 bytes → 400.
 
 Response (202):
 ```json
 {"accepted": 3}
 ```
+
+`accepted` counts events newly stored; resent ones (known
+`client_event_id`) are not counted.
 
 **Per-user partition + guest sandboxing (PR E).** Events are attributed
 to the calling `user_id` and only feed *that user's* taste/affinity. A

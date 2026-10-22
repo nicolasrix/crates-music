@@ -20,7 +20,7 @@ import {
 } from "react";
 import { coverArtUrl, scrobble, streamUrl } from "../api/client";
 import { useAudioCache } from "../cache/AudioCacheContext";
-import { postEvents } from "../api/events";
+import { enqueueEvents } from "../api/eventDelivery";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
@@ -419,7 +419,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const trackId = loadedTrackIdRef.current;
     if (!audio || !trackId) return;
     const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
-    void postEvents([
+    enqueueEvents([
       {
         event_type: "complete",
         track_id: trackId,
@@ -427,7 +427,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ...(sessionIdRef.current ? { session_id: sessionIdRef.current } : {}),
         metadata: listenFields(trackId, durationMs),
       },
-    ]).catch(() => {});
+    ]);
   }, [listenFields]);
 
   const maybeEmitSkip = useCallback((trackId: string | undefined) => {
@@ -440,7 +440,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       endedNaturally: audio.ended,
     });
     if (!decision.emit) return;
-    void postEvents([
+    enqueueEvents([
       {
         event_type: "skip",
         track_id: trackId,
@@ -452,7 +452,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           ...listenFields(trackId, durationMs),
         },
       },
-    ]).catch(() => {});
+    ]);
   }, [listenFields]);
 
   // Reflect the play/pause flag. A silent remote (outputEnabled false) stays
