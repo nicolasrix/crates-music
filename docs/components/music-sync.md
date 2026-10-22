@@ -173,14 +173,17 @@ property the "single linearizer" model relies on.
 ```rust
 // Client → Server (WS)
 pub enum ClientMessage {
-    Op { op: SyncOp },
+    Op { op: SyncOp, op_id: Option<String> }, // op_id: client-chosen, ≤ 64 bytes
+    Ping,                                     // app-level liveness probe
 }
 
-// Server → Client (WS only)
+// Server → Client (WS)
 pub enum ServerMessage {
-    Snapshot { state: SyncState },         // full state, sent on WS upgrade
-    Applied { op: SyncOp, version: u64 },  // incremental broadcast
-    OpError { message: String },           // sender-only rejection
+    Snapshot { state: SyncState },                               // sent on WS upgrade
+    Applied { op: SyncOp, version: u64, op_id: Option<String> }, // incremental broadcast
+    OpError { message: String, op_id: Option<String> },          // sender-only rejection
+    Ack { op_id: String },                                       // sender-only: already applied
+    Pong,                                                        // sender-only reply to Ping
 }
 ```
 
@@ -188,32 +191,44 @@ There is no explicit `Subscribe` — the gateway sends a `Snapshot`
 immediately after the WS upgrade, so a fresh client converges without
 first calling `/v1/sync/snapshot`. `Applied` carries the op, not the
 full state, so subscribers can apply it locally without comparing
-every field; `version` is the post-apply counter, and a client that
-sees a gap refetches the snapshot to recover. `OpError` goes only to
+every field; `version` is the post-apply counter. `OpError` goes only to
 the sender — peers see no broadcast, since no state change happened.
+
+`op_id` is optional everywhere and omitted from the wire when absent,
+so the REST path, the CLI and older web bundles see the frames they
+always did. A client that sets it gets it echoed on the `Applied` /
+`OpError` for that op. The gateway remembers the last 512 applied ids
+per room (in memory, like the rest of sync state): a resend of one is
+answered with a sender-only `Ack` instead of being applied twice.
+
+`Ping` exists because a browser cannot send protocol ping frames, and a
+socket whose network silently vanished (a phone asleep) keeps reporting
+`OPEN` with `send()` succeeding into nothing. The TUI uses protocol
+pings and needs neither `Ping` nor `op_id`.
 
 ## Optimistic updates on the client
 
-Every client applies ops locally before the gateway responds, then
-reconciles when the broadcast arrives:
+The web client applies its own ops locally the instant they are
+submitted. It keeps two things:
 
-```typescript
-// Client (web)
-function skip(index: number) {
-  // Optimistic
-  setState((s) => applyOp(s, { type: 'set_now_playing', index }));
-  // Network
-  api.submitOp({ type: 'set_now_playing', index }).catch(() => {
-    // Rollback on failure
-    refetchSnapshot();
-    toast.error('Couldn’t skip — your network may be down.');
-  });
-}
-```
+- **confirmed** — the last `Snapshot`, plus every `Applied` folded in;
+- **pending** — its own ops not yet acknowledged, each with an `op_id`.
 
-When the WS update arrives, the client compares versions. If our
-local version matches what the gateway broadcasts, no-op. If not, we
-trust the gateway and overwrite local state.
+What it renders is `confirmed` with every pending op applied over it
+(`apps/web/src/sync/pending.ts`). An op leaves `pending` when its
+`Applied`, `Ack` or `OpError` comes back; on `OpError` that is the
+rollback, with a toast. Every pending op is resent on each reconnect —
+an op sent into a dead socket is lost silently, so only an echo proves
+delivery — and the gateway's `op_id` de-duplication makes the resend
+safe. Consecutive absolute setters (`SetNowPlaying`, `SetPlaying`,
+`SetPosition`) collapse into the newest, so an hour of offline
+listening doesn't replay through every track on the other devices.
+
+This is what keeps playback going without a network: the `ended`
+handler's `SetNowPlaying` moves the cursor locally, so the next track
+loads even when the phone has no radio at the boundary. A reconnect
+`Snapshot` predates the pending ops, and they stay layered on top of it
+instead of yanking playback back a track.
 
 > "Likes, queue reorders, skips apply locally before server ack.
 > Sync layer reconciles; rollback with a toast on rejection. Never
@@ -235,7 +250,7 @@ construct-a-state-and-apply-some-ops. Coverage:
   `Clear` null the anchor while the queue-mechanics ops leave it
   alone.
 - Wire round-trips: `serde_json::to_string` / `from_str` for every
-  message variant, including a legacy-payload deserialize test that
+  message variant (including `op_id` being omitted when absent), including a legacy-payload deserialize test that
   proves snapshots without `session_anchor` still parse.
 
 ## Known gaps / future work

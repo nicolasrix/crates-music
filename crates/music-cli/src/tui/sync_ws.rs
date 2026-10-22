@@ -136,7 +136,7 @@ async fn session(
             }
             op = op_rx.recv() => match op {
                 Some(op) => {
-                    let body = match serde_json::to_string(&ClientMessage::Op { op }) {
+                    let body = match serde_json::to_string(&ClientMessage::Op { op, op_id: None }) {
                         Ok(b) => b,
                         Err(e) => {
                             tracing::debug!(error = %e, "unserializable sync op");

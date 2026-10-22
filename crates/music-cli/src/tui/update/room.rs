@@ -33,13 +33,16 @@ use super::playback::{self, Advance, MoveKind};
 pub(super) fn handle(app: &mut App, ev: SyncEvent) -> Vec<Effect> {
     match ev {
         SyncEvent::Frame(ServerMessage::Snapshot { state }) => adopt_snapshot(app, state),
-        SyncEvent::Frame(ServerMessage::Applied { op, version }) => applied(app, &op, version),
-        SyncEvent::Frame(ServerMessage::OpError { message }) => {
+        SyncEvent::Frame(ServerMessage::Applied { op, version, .. }) => applied(app, &op, version),
+        SyncEvent::Frame(ServerMessage::OpError { message, .. }) => {
             // Nothing to roll back — no state was optimistically applied.
             // The op simply didn't happen; say why.
             app.set_status(format!("sync: {message}"), true);
             vec![]
         }
+        // The TUI sends neither op ids nor app-level pings — it uses
+        // protocol ping frames — so these never arrive for it.
+        SyncEvent::Frame(ServerMessage::Ack { .. } | ServerMessage::Pong) => vec![],
         SyncEvent::Down { reason } => go_offline(app, &reason),
     }
 }

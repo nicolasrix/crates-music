@@ -13,7 +13,7 @@ use axum::{
     response::IntoResponse,
 };
 use music_core::SessionId;
-use music_recommend::{AffinityEvent, EventInput, EventType};
+use music_recommend::{AffinityEvent, EventInput, EventType, KeyedEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::listen_session::with_fields;
@@ -36,6 +36,10 @@ const MAX_TRACK_ID_LEN: usize = 256;
 /// type-specific blob (e.g. `played_ms`); 4 KiB is generous.
 const MAX_METADATA_BYTES: usize = 4096;
 
+/// Cap on a client event id. Ids are stored and uniquely indexed, so an
+/// unbounded one is a disk lever.
+const MAX_CLIENT_EVENT_ID_LEN: usize = 64;
+
 #[derive(Debug, Deserialize)]
 pub struct EventsRequest {
     pub events: Vec<EventPayload>,
@@ -53,10 +57,17 @@ pub struct EventPayload {
     /// lands with NULL session_id (out-of-session).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Client-chosen id, unique per user. A client that retries events it
+    /// could not confirm sends the same ids again; those persist once.
+    /// Optional — events without one always persist.
+    #[serde(default)]
+    pub client_event_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct EventsResponse {
+    /// Events newly persisted. Resent events already on record (same
+    /// `client_event_id`) are not counted.
     pub accepted: u64,
 }
 
@@ -100,10 +111,22 @@ pub async fn submit(
         {
             return (StatusCode::BAD_REQUEST, "metadata too large").into_response();
         }
+        if p.client_event_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.len() > MAX_CLIENT_EVENT_ID_LEN)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                "client_event_id must be 1-64 bytes",
+            )
+                .into_response();
+        }
     }
 
     let mut events: Vec<EventInput> = Vec::with_capacity(req.events.len());
+    let mut client_ids: Vec<Option<String>> = Vec::with_capacity(req.events.len());
     for p in req.events {
+        client_ids.push(p.client_event_id);
         // Activity spans the listening the event reports (`heard_ms` on a
         // skip / complete), so a long track doesn't read as an idle gap.
         let start_ms = p.occurred_at - extract_heard_ms(p.metadata.as_ref()).unwrap_or(0);
@@ -123,17 +146,32 @@ pub async fn submit(
         });
     }
 
+    let keyed: Vec<KeyedEvent<'_>> = events
+        .iter()
+        .zip(&client_ids)
+        .map(|(event, id)| KeyedEvent {
+            event,
+            client_event_id: id.as_deref(),
+        })
+        .collect();
     match state
         .event_store()
-        .append_batch(principal.user_id, &events)
+        .append_keyed(principal.user_id, &keyed)
         .await
     {
-        Ok(n) => {
+        Ok(inserted) => {
             // Durable capture done. Now fold skips into the preference
             // affinity counter (best-effort, post-persist so a failure
-            // here never costs us the logged signal).
-            fold_skip_affinity(&state, principal.user_id, &events).await;
-            (StatusCode::ACCEPTED, Json(EventsResponse { accepted: n })).into_response()
+            // here never costs us the logged signal). Only events that
+            // just landed: a resent skip already moved affinity once.
+            let fresh: Vec<EventInput> = events
+                .into_iter()
+                .zip(&inserted)
+                .filter_map(|(ev, &new)| new.then_some(ev))
+                .collect();
+            fold_skip_affinity(&state, principal.user_id, &fresh).await;
+            let accepted = fresh.len() as u64;
+            (StatusCode::ACCEPTED, Json(EventsResponse { accepted })).into_response()
         }
         Err(err) => {
             tracing::error!(error = %err, "events: batch append failed");

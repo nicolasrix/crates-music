@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { applyOp } from "./apply";
-import type { SyncOp, SyncState } from "./types";
+import type { QueueItem, SyncOp, SyncState } from "./types";
 
 const emptyState = (): SyncState => ({
   version: 0,
@@ -19,7 +19,7 @@ const emptyState = (): SyncState => ({
 });
 
 const startSession = (opts?: {
-  items?: { item_id: string; track_id: string }[];
+  items?: QueueItem[];
   anchor_index?: number;
   session_id?: string;
 }): SyncOp => ({
@@ -53,6 +53,28 @@ describe("applyOp — start_session", () => {
     expect(after.playback.now_playing_index).toBe(1);
     expect(after.playback.is_playing).toBe(true);
     expect(after.playback.position_ms).toBe(0);
+  });
+
+  it("keeps each item's play source", () => {
+    // The listening log reads the source off the queue item when a track
+    // completes or is skipped. Dropping it here meant every play started
+    // from an album or playlist was logged source-less until a snapshot
+    // replaced the queue — which, offline, is never.
+    const source = { kind: "playlist", id: "pl-1" };
+    const after = applyOp(
+      emptyState(),
+      startSession({
+        items: [
+          { item_id: "qi-1", track_id: "t-1", source },
+          { item_id: "qi-2", track_id: "t-2" },
+        ],
+        anchor_index: 0,
+        session_id: "sess-src",
+      }),
+      1,
+    );
+    expect(after.playback.queue.items[0]).toEqual({ item_id: "qi-1", track_id: "t-1", source });
+    expect(after.playback.queue.items[1]).toEqual({ item_id: "qi-2", track_id: "t-2" });
   });
 
   it("sets session_anchor with anchor track and the op's session_id", () => {

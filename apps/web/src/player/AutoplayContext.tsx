@@ -34,9 +34,10 @@
 //     any refill that ends up placing nothing leaves the queue parked
 //     under threshold until an unrelated change wakes the effect.
 //
-// `submit()` in SyncContext has no optimistic apply, so local state only
-// moves on the server's echo. That is what makes the window wide enough
-// to matter: the queue is always a round-trip behind the ops we sent.
+// `submit()` in SyncContext applies ops locally at once, so our own
+// pushes show up in `queue.items` before the next render. The window
+// that still matters is the recommender request itself — seconds during
+// which the listener, or another device, can move the queue.
 
 import {
   createContext,

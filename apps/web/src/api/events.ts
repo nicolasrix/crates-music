@@ -66,19 +66,29 @@ export interface RecommendEvent {
   metadata?: Record<string, unknown>;
   /** Active recommend-session, if any. */
   session_id?: string;
+  /** Client-chosen id; a resend with the same id persists once. Set by
+   *  the outbox (eventOutbox.ts). */
+  client_event_id?: string;
 }
 
-// Fire-and-forget at the caller — a failed event POST is not a UI-facing
-// error and playback keeps going. Throws on a non-2xx so callers that *do*
-// care (tests) can observe it; the player swallows it with `.catch`.
+// The player doesn't call this directly: it queues through eventOutbox.ts,
+// which keeps events until delivery is confirmed. Throws on a non-2xx so
+// callers that *do* care (tests) can observe it.
 export async function postEvents(events: RecommendEvent[]): Promise<void> {
   if (events.length === 0) return;
+  const status = await sendEvents(events);
+  if (status < 200 || status >= 300) throw new Error(`events HTTP ${status}`);
+}
+
+/** POST a batch and resolve to the HTTP status. Rejects only when the
+ *  request didn't complete (no network) or the session is gone. */
+export async function sendEvents(events: RecommendEvent[]): Promise<number> {
   const res = await apiFetch("/v1/events", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ events }),
   });
-  if (!res.ok) throw new Error(`events HTTP ${res.status}`);
+  return res.status;
 }
 
 export { AuthError };

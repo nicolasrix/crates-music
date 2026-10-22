@@ -503,19 +503,18 @@ page-load, persisted in `sessionStorage`.
 
 ## Sync
 
-`SyncProvider` opens a WebSocket to `/v1/sync`. It receives
-`Snapshot` and `Update` messages, applies them to local React
-state, and re-emits via context.
+`SyncProvider` opens a WebSocket to `/v1/sync`, keeps the gateway's
+confirmed state from `Snapshot` / `Applied` frames, and exposes
+`submit(op)`.
 
-Optimistic updates: when the user clicks "Like", we update local
-state immediately, then fire `POST /v1/sync/ops` to the gateway.
-When the gateway broadcasts the resulting `Update`, we reconcile
-versions:
-
-- Same version we have? No-op.
-- Higher version? Adopt.
-- Lower version? Server is behind us — should never happen, but log
-  if it does.
+Optimistic updates: `submit` applies the op locally at once and keeps it
+in a pending ledger (`sync/pending.ts`) until its `applied`, `ack` or
+`op_error` comes back carrying its `op_id`. The rendered state is the
+confirmed state with the pending ops folded over it, so nothing a user
+or the player does waits on the network — in particular, a track that
+ends while the phone has no connectivity still advances. See
+[music-sync](music-sync.md#optimistic-updates-on-the-client) for the
+protocol side.
 
 After a PWA relaunch-from-snapshot, queue items arrive as bare ids; a
 `getSong` backfill effect re-hydrates `trackMeta` so the player bar,
@@ -527,8 +526,28 @@ devices that dropped together don't return together), and `online` /
 `visibilitychange→visible` reconnect immediately rather than waiting the
 backoff out. This is not optional polish: a phone changes network
 constantly, and without it a single WiFi→cellular handover wedged the tab
-on a stale snapshot permanently. Ops submitted while the socket is down
-buffer in `outboxRef` and flush on the next `onopen`.
+on a stale snapshot permanently. Every pending op is resent on each
+`onopen`; the gateway de-duplicates by `op_id`.
+
+**Heartbeat.** A socket whose network vanished — a phone asleep on Wi-Fi
+power save — still reads `OPEN`, never fires `onclose`, and swallows
+every `send()`. `sync/heartbeat.ts` pings every 15 s and writes the
+socket off when a ping goes 10 s unanswered; returning to the foreground
+or coming `online` sends a probe with a 5 s deadline. A written-off
+socket is detached and replaced right away, without waiting for the
+browser's own `close` to finish.
+
+**Listening events.** `skip` and `complete` go through a durable outbox
+(`api/eventOutbox.ts`, wired up in `api/eventDelivery.ts`) rather than a
+one-shot POST: each event is written to localStorage with a
+`client_event_id` first, then sent in batches of up to 50, and leaves the
+outbox only on a 2xx. A failed request (no network) or a 408/429/5xx
+keeps the batch for the next attempt — `online`, back to the foreground,
+or every 30 s. Any other 4xx drops it, so one bad batch can't block the
+rest. The gateway de-duplicates by `client_event_id`, so a batch that
+landed but whose response was lost isn't counted twice. Delivery starts
+only after the sign-in owner check, and the outbox key lives under
+`crates-music.`, so a different user's leftovers are wiped, never sent.
 
 ## Offline cache + PWA (`cache/`, `pwa/`)
 

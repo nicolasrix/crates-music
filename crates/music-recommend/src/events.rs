@@ -7,9 +7,10 @@
 //! is being built.
 //!
 //! Writes are pure append: clients are expected to coalesce locally
-//! and POST in batches every few seconds. Duplicates are accepted —
-//! deduping happens at consumer time when we know which signal
-//! interpretation the consumer wants.
+//! and POST in batches every few seconds. Identical events are accepted
+//! — two skips of one track are two skips. The one exception is an event
+//! that carries a client-chosen id ([`KeyedEvent`]): a client retrying a
+//! batch it could not confirm resends the same ids, and those land once.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,6 +83,15 @@ pub struct EventInput {
     pub session_id: Option<SessionId>,
 }
 
+/// An event plus the client's id for it, if the client sent one. Events
+/// with the same `(user, client_event_id)` persist once; events without
+/// an id always persist.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyedEvent<'a> {
+    pub event: &'a EventInput,
+    pub client_event_id: Option<&'a str>,
+}
+
 /// A persisted event with the gateway-assigned id and `received_at`
 /// timestamp. Returned by `list_*` / `get` for diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,21 +119,45 @@ impl EventStore {
     /// All-or-nothing within a single transaction so partial batches
     /// don't sneak in on a SQLite hiccup.
     pub async fn append_batch(&self, user_id: i64, events: &[EventInput]) -> Result<u64> {
+        let keyed: Vec<KeyedEvent<'_>> = events
+            .iter()
+            .map(|event| KeyedEvent {
+                event,
+                client_event_id: None,
+            })
+            .collect();
+        let inserted = self.append_keyed(user_id, &keyed).await?;
+        Ok(inserted.iter().filter(|&&new| new).count() as u64)
+    }
+
+    /// [`Self::append_batch`] for events that may carry a client id.
+    /// Returns, per event and in order, whether it was newly persisted —
+    /// `false` means this user already has an event with that id. Callers
+    /// that derive state from events (skip affinity) must act only on the
+    /// `true` ones, or a retried batch would count twice.
+    pub async fn append_keyed(&self, user_id: i64, events: &[KeyedEvent<'_>]) -> Result<Vec<bool>> {
         if events.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let received_at = now_ms();
         let mut tx = self.pool.begin().await?;
-        let mut count = 0u64;
-        for ev in events {
+        let mut inserted = Vec::with_capacity(events.len());
+        for KeyedEvent {
+            event: ev,
+            client_event_id,
+        } in events
+        {
             let metadata_json = ev
                 .metadata
                 .as_ref()
                 .map(|v| serde_json::to_string(v).expect("Value serializes"));
-            sqlx::query(
+            let result = sqlx::query(
                 "INSERT INTO events
-                     (user_id, event_type, track_id, occurred_at, received_at, metadata, session_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (user_id, event_type, track_id, occurred_at, received_at, metadata,
+                      session_id, client_event_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (user_id, client_event_id) WHERE client_event_id IS NOT NULL
+                 DO NOTHING",
             )
             .bind(user_id)
             .bind(ev.event_type.as_str())
@@ -132,12 +166,13 @@ impl EventStore {
             .bind(received_at)
             .bind(metadata_json)
             .bind(ev.session_id.as_ref().map(SessionId::as_str))
+            .bind(*client_event_id)
             .execute(&mut *tx)
             .await?;
-            count += 1;
+            inserted.push(result.rows_affected() == 1);
         }
         tx.commit().await?;
-        Ok(count)
+        Ok(inserted)
     }
 
     /// The user's most recent listening session — the `listen_session`
@@ -772,6 +807,95 @@ mod tests {
             .await
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    fn skip(track: &str) -> EventInput {
+        EventInput {
+            event_type: EventType::Skip,
+            track_id: TrackId::from(track),
+            occurred_at: 1_000,
+            metadata: None,
+            session_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn append_keyed_skips_a_resent_client_event_id() {
+        // A phone retries a batch whose response it never saw. The second
+        // copy must not land — a duplicate skip would double its affinity
+        // penalty.
+        let store = EventStore::new(test_pool().await);
+        let ev = skip("t1");
+        let batch = [KeyedEvent {
+            event: &ev,
+            client_event_id: Some("ev-1"),
+        }];
+        assert_eq!(store.append_keyed(1, &batch).await.unwrap(), vec![true]);
+        assert_eq!(store.append_keyed(1, &batch).await.unwrap(), vec![false]);
+        assert_eq!(store.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn append_keyed_reports_each_event_in_a_mixed_batch() {
+        let store = EventStore::new(test_pool().await);
+        let (a, b) = (skip("t1"), skip("t2"));
+        store
+            .append_keyed(
+                1,
+                &[KeyedEvent {
+                    event: &a,
+                    client_event_id: Some("ev-a"),
+                }],
+            )
+            .await
+            .unwrap();
+        let flags = store
+            .append_keyed(
+                1,
+                &[
+                    KeyedEvent {
+                        event: &a,
+                        client_event_id: Some("ev-a"),
+                    },
+                    KeyedEvent {
+                        event: &b,
+                        client_event_id: Some("ev-b"),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(flags, vec![false, true]);
+        assert_eq!(store.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn client_event_ids_are_scoped_per_user() {
+        let store = EventStore::new(test_pool().await);
+        let ev = skip("t1");
+        let batch = [KeyedEvent {
+            event: &ev,
+            client_event_id: Some("ev-1"),
+        }];
+        assert_eq!(store.append_keyed(1, &batch).await.unwrap(), vec![true]);
+        assert_eq!(store.append_keyed(2, &batch).await.unwrap(), vec![true]);
+    }
+
+    #[tokio::test]
+    async fn events_without_a_client_id_are_never_deduplicated() {
+        // REST callers and older clients send no id; identical events from
+        // them are distinct plays and must all persist, as before.
+        let store = EventStore::new(test_pool().await);
+        let ev = skip("t1");
+        assert_eq!(
+            store
+                .append_batch(1, &[ev.clone(), ev.clone()])
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(store.append_batch(1, &[ev]).await.unwrap(), 1);
+        assert_eq!(store.count().await.unwrap(), 3);
     }
 
     #[test]

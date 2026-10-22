@@ -150,12 +150,12 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
   /** Fetch recommendations for a context and fold them into its upcoming
    *  half.
    *
-   *  `upcoming` is what we just *submitted*, not what `liveRef` holds:
-   *  `submit()` has no optimistic apply, so for one round-trip the local
-   *  mirror still describes the pre-shuffle queue. Interleaving into
-   *  that would write the old order back and undo the shuffle. The live
-   *  mirror is used for one thing only — noticing that the listener
-   *  advanced past some of those tracks while the recommender thought. */
+   *  `upcoming` is what we just *submitted*. `submit()` applies locally
+   *  at once, but another device's op can still land in between, and
+   *  interleaving into whatever the mirror holds then could write some
+   *  other order back over the shuffle. The live mirror is used for one
+   *  thing only — noticing that the listener advanced past some of those
+   *  tracks while the recommender thought. */
   const mixRecommendations = useCallback(
     async (plan: {
       sessionId: string;
@@ -187,10 +187,9 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
       if (tracks.length === 0) return;
 
       const live = liveRef.current;
-      // Same session in the mirror → it has caught up, so its history is
-      // authoritative about what's been played meanwhile. Different → the
-      // mirror is still a round-trip behind and describes a queue we've
-      // already replaced, so it knows nothing about what we submitted.
+      // Same session in the mirror → its history is authoritative about
+      // what's been played meanwhile. Different → the session was replaced
+      // under us (another device), so it knows nothing about this plan.
       const heard =
         live.sessionId === plan.sessionId
           ? new Set(live.trackIds.slice(0, (live.nowPlayingIndex ?? -1) + 1))
