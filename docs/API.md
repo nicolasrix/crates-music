@@ -263,6 +263,11 @@ subscribers.
 WebSocket for sync fan-out. Send `ClientMessage`s, receive
 `ServerMessage`s. Shapes are defined in
 [crates/music-sync/src/wire.rs](../crates/music-sync/src/wire.rs).
+An op may carry an optional `op_id` (≤ 64 bytes), echoed on its
+`applied` / `op_error`; resending an already-applied id gets a
+sender-only `ack` instead of a second apply. `{"type":"ping"}` is
+answered with `{"type":"pong"}`. See
+[music-sync](components/music-sync.md#wire-protocol).
 
 ### Recommender
 

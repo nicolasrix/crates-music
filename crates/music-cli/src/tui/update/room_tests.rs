@@ -64,7 +64,11 @@ fn snapshot(app: &mut App, state: SyncState) -> Vec<Effect> {
 }
 
 fn applied(app: &mut App, op: SyncOp, version: u64) -> Vec<Effect> {
-    update(app, Msg::Sync(SyncEvent::Frame(ServerMessage::Applied { op, version })))
+    update(app, Msg::Sync(SyncEvent::Frame(ServerMessage::Applied {
+        op,
+        version,
+        op_id: None,
+    })))
 }
 
 /// Online app with output enabled and a hydrated queue — the common

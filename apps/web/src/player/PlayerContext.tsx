@@ -4,8 +4,9 @@
 // the browser's audio API.
 //
 // On track end we submit a SetNowPlaying op for the next index (or
-// SetPlaying(false) at the end of the queue). The eventual broadcast
-// flips local state and this effect picks up the change.
+// SetPlaying(false) at the end of the queue). SyncContext applies it
+// locally at once — no gateway round trip — so the next track loads
+// even when the phone has no network at the boundary.
 
 import {
   createContext,
@@ -276,7 +277,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.pause();
       return;
     }
-    // This effect fires from *applied sync state*, not a live click, so no
+    // This effect fires from *sync state*, not a live click, so no
     // autoplay gesture is at stake — we can await the cache and prefer a
     // local blob (the offline-playback path). primePlayback handles the
     // gesture-critical direct-click case synchronously instead.
@@ -286,8 +287,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       const a = audioRef.current;
       if (!a) return;
-      a.src = cachedUrl ?? streamUrl(currentTrackId);
-      startTsRef.current = performance.now();
+      const url = cachedUrl ?? streamUrl(currentTrackId);
+      // A click reaches here a few ms after primePlayback already pointed
+      // the element at this very URL; assigning it again would restart
+      // the load and drop the first moments of the track.
+      if (a.src !== new URL(url, window.location.href).href) {
+        a.src = url;
+        startTsRef.current = performance.now();
+      }
       if (is_playing) void a.play().catch(() => {});
       // Touch (hit) or fetch-and-cache (miss) for next time.
       notePlayed(currentTrackId);

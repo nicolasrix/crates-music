@@ -69,9 +69,15 @@ export type SyncOp =
   | { type: "replace_upcoming"; items: QueueItem[] }
   | { type: "stop_session" };
 
+// `op_id` is this client's id for one of its ops, echoed back so the
+// pending ledger (pending.ts) can match each ack to its op. Absent on
+// frames for other devices' ops and from gateways that predate it.
 export type ServerMessage =
   | { type: "snapshot"; state: SyncState }
-  | { type: "applied"; op: SyncOp; version: number }
-  | { type: "op_error"; message: string };
+  | { type: "applied"; op: SyncOp; version: number; op_id?: string }
+  | { type: "op_error"; message: string; op_id?: string }
+  // A resent op the gateway had already applied: nothing changed.
+  | { type: "ack"; op_id: string }
+  | { type: "pong" };
 
-export type ClientMessage = { type: "op"; op: SyncOp };
+export type ClientMessage = { type: "op"; op: SyncOp; op_id?: string } | { type: "ping" };
