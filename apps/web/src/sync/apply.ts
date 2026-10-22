@@ -78,7 +78,8 @@ function applyToPlayback(p: PlaybackState, op: SyncOp): PlaybackState {
       const anchor_track = op.items[op.anchor_index]?.track_id;
       if (anchor_track === undefined) return p;
       return {
-        queue: { items: op.items.map((i) => ({ item_id: i.item_id, track_id: i.track_id })) },
+        // Items keep their `source`, matching the server's apply.
+        queue: { items: [...op.items] },
         now_playing_index: op.anchor_index,
         position_ms: 0,
         is_playing: true,
