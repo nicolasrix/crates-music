@@ -144,7 +144,7 @@ function TrackMenuBody({
     //     the cursor between our push and reorder, putting the track one
     //     slot too far. Single-user reality means this is unobservable,
     //     but worth noting if we ever go multi-client.
-    const itemId = sync.pushTrack(track);
+    const itemId = sync.pushTrack(track, { kind: "play_next" });
     const { now_playing_index: i, queue } = sync.state.playback;
     if (i === null) {
       // The pushed item lands at the current end of the gateway queue.
@@ -162,7 +162,7 @@ function TrackMenuBody({
   }
 
   function addToQueue() {
-    sync.pushTrack(track);
+    sync.pushTrack(track, { kind: "queue_add" });
     toast("added to queue", { variant: "success" });
     onClose();
   }

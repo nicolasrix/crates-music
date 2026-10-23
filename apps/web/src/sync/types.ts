@@ -2,9 +2,20 @@
 // `music-core` and `music-sync`. Kept narrow: we only model what the
 // web client actually reads or writes.
 
+/// The surface a queue item was started from (`PlaySource` in
+/// music-core). Logged with each play so the listening history records
+/// *how* a track came to be playing. `kind` is an open set.
+export interface PlaySource {
+  kind: string;
+  /** The album / playlist / artist the surface was showing, if any. */
+  id?: string;
+}
+
 export interface QueueItem {
   item_id: string;
   track_id: string;
+  /** Absent on items from clients that predate it. */
+  source?: PlaySource;
 }
 
 export interface Queue {
@@ -38,7 +49,7 @@ export interface SyncState {
 }
 
 export type SyncOp =
-  | { type: "push"; item_id: string; track_id: string }
+  | { type: "push"; item_id: string; track_id: string; source?: PlaySource }
   | { type: "remove"; item_id: string }
   | { type: "reorder"; item_id: string; new_index: number }
   | { type: "set_now_playing"; index: number | null }
@@ -58,9 +69,15 @@ export type SyncOp =
   | { type: "replace_upcoming"; items: QueueItem[] }
   | { type: "stop_session" };
 
+// `op_id` is this client's id for one of its ops, echoed back so the
+// pending ledger (pending.ts) can match each ack to its op. Absent on
+// frames for other devices' ops and from gateways that predate it.
 export type ServerMessage =
   | { type: "snapshot"; state: SyncState }
-  | { type: "applied"; op: SyncOp; version: number }
-  | { type: "op_error"; message: string };
+  | { type: "applied"; op: SyncOp; version: number; op_id?: string }
+  | { type: "op_error"; message: string; op_id?: string }
+  // A resent op the gateway had already applied: nothing changed.
+  | { type: "ack"; op_id: string }
+  | { type: "pong" };
 
-export type ClientMessage = { type: "op"; op: SyncOp };
+export type ClientMessage = { type: "op"; op: SyncOp; op_id?: string } | { type: "ping" };

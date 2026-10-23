@@ -99,11 +99,28 @@ pub async fn scrobble(
         // session from the caller's room (a guest scrobbles into their
         // host's room session).
         let session_id = state.sync().active_session_id(principal.room_id()).await;
+        // Where the play came from (the now-playing queue item's source)
+        // and which listening session it belongs to — the context a
+        // behavioural model needs; see `listen_session`.
+        let source = state
+            .sync()
+            .now_playing_source(principal.room_id(), &track_id)
+            .await;
+        let listen_session = state
+            .listen_session(principal.user_id, occurred_at, occurred_at)
+            .await;
+        let mut fields = vec![("listen_session", serde_json::Value::from(listen_session))];
+        if let Some(source) = source {
+            fields.push((
+                "source",
+                serde_json::to_value(source).expect("PlaySource serializes"),
+            ));
+        }
         let event = EventInput {
             event_type: EventType::Scrobble,
             track_id: track_id.clone(),
             occurred_at,
-            metadata: None,
+            metadata: crate::listen_session::with_fields(None, fields),
             session_id,
         };
         if let Err(err) = state

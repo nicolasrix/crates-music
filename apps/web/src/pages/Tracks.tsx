@@ -99,7 +99,7 @@ function TracksAll() {
           <VirtualTrackTable
             tracks={tracks}
             showAlbum
-            onPlay={(i) => playList(tracks, i)}
+            onPlay={(i) => playList(tracks, i, { kind: "tracks", id: "all" })}
           />
         )}
         {q.hasNextPage && (
@@ -162,7 +162,7 @@ function TracksHighlight({ mode }: { mode: Exclude<ListMode, "all"> }) {
           <TrackTable
             tracks={q.data}
             showAlbum
-            onPlay={(i) => playList(q.data!, i)}
+            onPlay={(i) => playList(q.data!, i, { kind: "tracks", id: mode })}
           />
         )}
       </div>

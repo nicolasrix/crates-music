@@ -232,6 +232,7 @@ fn go_online(a: &mut App, ids: &[&str], cursor: usize) {
                     .map(|id| QueueItem {
                         item_id: QueueItemId::from(format!("it-{id}")),
                         track_id: TrackId::from((*id).to_owned()),
+                        source: None,
                     })
                     .collect(),
             },

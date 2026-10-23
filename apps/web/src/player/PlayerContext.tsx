@@ -4,8 +4,9 @@
 // the browser's audio API.
 //
 // On track end we submit a SetNowPlaying op for the next index (or
-// SetPlaying(false) at the end of the queue). The eventual broadcast
-// flips local state and this effect picks up the change.
+// SetPlaying(false) at the end of the queue). SyncContext applies it
+// locally at once — no gateway round trip — so the next track loads
+// even when the phone has no network at the boundary.
 
 import {
   createContext,
@@ -19,13 +20,15 @@ import {
 } from "react";
 import { coverArtUrl, scrobble, streamUrl } from "../api/client";
 import { useAudioCache } from "../cache/AudioCacheContext";
-import { postEvents } from "../api/events";
+import { enqueueEvents } from "../api/eventDelivery";
 import { markEvent } from "../rum";
 import { useSync } from "../sync/SyncContext";
 import type { Track } from "../api/types";
 import { evaluateScrobble, type ScrobbleState } from "./scrobble";
+import { FRESH_CLOCK, sourceAtCursor, tick, type ListenClock } from "./listenTime";
 import { evaluateSkip } from "./skip";
 import { isDislikedEntity, nextPlayableIndex } from "./autoSkip";
+import { externalPlayingChange } from "./elementToggle";
 import { useRatingsMaps } from "./useRatings";
 import { loadOutputEnabled, saveOutputEnabled } from "./outputDevice";
 
@@ -99,6 +102,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     sessionIdRef.current = session_anchor?.session_id;
   }, [session_anchor]);
+  // Same reason: the skip / complete emitters read the outgoing item's
+  // source from the queue as it is at the gesture.
+  const queueRef = useRef({ items: queue.items, nowPlayingIndex: now_playing_index });
+  useEffect(() => {
+    queueRef.current = { items: queue.items, nowPlayingIndex: now_playing_index };
+  }, [queue.items, now_playing_index]);
 
   const currentItem = now_playing_index !== null ? queue.items[now_playing_index] : undefined;
   const currentTrackId = currentItem?.track_id;
@@ -223,6 +232,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     hasEmittedNowPlaying: false,
     hasEmittedSubmission: false,
   });
+  // Time actually heard of the loaded track (seeks excluded) — logged with
+  // its skip / complete so the history knows how much of a play was
+  // listened to, not just that it crossed the scrobble threshold.
+  const listenClockRef = useRef<ListenClock>(FRESH_CLOCK);
 
   // Claim the element for `trackId`: publish the id every "what's playing"
   // consumer reads, and reset the per-track scrobble state so the flags
@@ -243,6 +256,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       hasEmittedNowPlaying: false,
       hasEmittedSubmission: false,
     };
+    listenClockRef.current = FRESH_CLOCK;
   }, []);
 
   useEffect(() => {
@@ -264,7 +278,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.pause();
       return;
     }
-    // This effect fires from *applied sync state*, not a live click, so no
+    // This effect fires from *sync state*, not a live click, so no
     // autoplay gesture is at stake — we can await the cache and prefer a
     // local blob (the offline-playback path). primePlayback handles the
     // gesture-critical direct-click case synchronously instead.
@@ -274,8 +288,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       const a = audioRef.current;
       if (!a) return;
-      a.src = cachedUrl ?? streamUrl(currentTrackId);
-      startTsRef.current = performance.now();
+      const url = cachedUrl ?? streamUrl(currentTrackId);
+      // A click reaches here a few ms after primePlayback already pointed
+      // the element at this very URL; assigning it again would restart
+      // the load and drop the first moments of the track.
+      if (a.src !== new URL(url, window.location.href).href) {
+        a.src = url;
+        startTsRef.current = performance.now();
+      }
       if (is_playing) void a.play().catch(() => {});
       // Touch (hit) or fetch-and-cache (miss) for next time.
       notePlayed(currentTrackId);
@@ -339,6 +359,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const audio = audioRef.current;
     if (!audio || !currentTrackId) return;
     const onTimeUpdate = () => {
+      listenClockRef.current = tick(listenClockRef.current, audio.currentTime * 1000);
       const playingId = loadedTrackIdRef.current ?? currentTrackId;
       const durMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
       const next: ScrobbleState = {
@@ -374,26 +395,66 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // would see the new track instead. The natural end-of-track auto-advance
   // does not route through these gestures, so it's correctly excluded.
   // evaluateSkip (skip.ts) is the pure gate; fire-and-forget on the POST.
+  // Listening context shared by the skip and complete events: time heard
+  // (seeks excluded), track length, and the surface the play came from.
+  // Ticks the clock to the current position first — the last stretch
+  // before a gesture or the end may not have produced a timeupdate yet.
+  const listenFields = useCallback((trackId: string, durationMs: number) => {
+    const audio = audioRef.current;
+    if (audio) listenClockRef.current = tick(listenClockRef.current, audio.currentTime * 1000);
+    const { items, nowPlayingIndex } = queueRef.current;
+    const source = sourceAtCursor(items, nowPlayingIndex, trackId);
+    return {
+      heard_ms: Math.round(listenClockRef.current.heardMs),
+      ...(durationMs > 0 ? { duration_ms: Math.round(durationMs) } : {}),
+      ...(source ? { source } : {}),
+    };
+  }, []);
+
+  // A track that played through to its natural end. Logged only — the
+  // gateway already credits the play via the scrobble, so this carries no
+  // affinity; it tells "finished" apart from "barely crossed the scrobble
+  // threshold", which the scrobble alone can't.
+  const emitComplete = useCallback(() => {
+    const audio = audioRef.current;
+    const trackId = loadedTrackIdRef.current;
+    if (!audio || !trackId) return;
+    const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+    enqueueEvents([
+      {
+        event_type: "complete",
+        track_id: trackId,
+        occurred_at: Date.now(),
+        ...(sessionIdRef.current ? { session_id: sessionIdRef.current } : {}),
+        metadata: listenFields(trackId, durationMs),
+      },
+    ]);
+  }, [listenFields]);
+
   const maybeEmitSkip = useCallback((trackId: string | undefined) => {
     const audio = audioRef.current;
     if (!audio || !trackId) return;
+    const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
     const decision = evaluateSkip({
-      trackDurationMs: Number.isFinite(audio.duration) ? audio.duration * 1000 : 0,
+      trackDurationMs: durationMs,
       playedMs: audio.currentTime * 1000,
       endedNaturally: audio.ended,
     });
     if (!decision.emit) return;
-    void postEvents([
+    enqueueEvents([
       {
         event_type: "skip",
         track_id: trackId,
         occurred_at: Date.now(),
         // Omit (don't send `undefined`) when there's no active session.
         ...(sessionIdRef.current ? { session_id: sessionIdRef.current } : {}),
-        metadata: { played_ms: decision.playedMs },
+        metadata: {
+          played_ms: decision.playedMs,
+          ...listenFields(trackId, durationMs),
+        },
       },
-    ]).catch(() => {});
-  }, []);
+    ]);
+  }, [listenFields]);
 
   // Reflect the play/pause flag. A silent remote (outputEnabled false) stays
   // paused regardless of shared intent — it never makes sound.
@@ -445,9 +506,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // the element pauses but `is_playing` in sync state stays true, leaving
   // the play/pause icon and UI lying to the user.
   //
-  // Submit only when the audio state diverges from the sync state, so the
-  // *internal* play/pause we trigger from `is_playing` doesn't bounce back
-  // into a duplicate op (would still be a no-op via dedup, but cleaner).
+  // Submit only when the element's state *at fire time* diverges from the
+  // sync state (elementToggle.ts), so the internal play/pause we trigger
+  // from `is_playing` never bounces back — a stale event bouncing back is
+  // a self-sustaining play/pause oscillation now that ops apply locally.
   // We read the latest is_playing through a ref so the listener doesn't
   // need to re-bind on every flip.
   const isPlayingRef = useRef(is_playing);
@@ -457,27 +519,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const onPlay = () => {
-      // A silent remote's element is decoupled from shared intent; don't let
-      // its (suppressed) transitions write back into the room.
+    const onToggle = () => {
+      // A silent remote's element is decoupled from shared intent: the
+      // pauses we trigger to keep it quiet must not broadcast — that would
+      // pause the actual speaker too.
       if (!outputEnabledRef.current) return;
-      if (!isPlayingRef.current) submit({ type: "set_playing", is_playing: true });
+      const next = externalPlayingChange(audio, isPlayingRef.current);
+      if (next !== null) submit({ type: "set_playing", is_playing: next });
     };
-    const onPause = () => {
-      // When this device is a silent remote, the pauses we trigger to keep it
-      // quiet must not broadcast — that would pause the actual speaker too.
-      if (!outputEnabledRef.current) return;
-      // Ignore pauses that fire as a side-effect of `ended` — the auto-
-      // advance handler will flip is_playing if we hit the queue tail, and
-      // we don't want to race it here.
-      if (audio.ended) return;
-      if (isPlayingRef.current) submit({ type: "set_playing", is_playing: false });
-    };
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
+    audio.addEventListener("play", onToggle);
+    audio.addEventListener("pause", onToggle);
     return () => {
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("play", onToggle);
+      audio.removeEventListener("pause", onToggle);
     };
   }, [submit]);
 
@@ -617,6 +671,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handler = () => {
       const i = now_playing_index;
       if (i === null) return;
+      emitComplete();
       advanceDirRef.current = 1;
       const nextIndex = i + 1;
       if (nextIndex < queue.items.length) {
@@ -627,7 +682,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     audio.addEventListener("ended", handler);
     return () => audio.removeEventListener("ended", handler);
-  }, [now_playing_index, queue.items.length, submit]);
+  }, [now_playing_index, queue.items.length, submit, emitComplete]);
 
   const value = useMemo<PlayerCtx>(() => {
     const i = now_playing_index;

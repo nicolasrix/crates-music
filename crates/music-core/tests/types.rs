@@ -103,10 +103,12 @@ fn queue_with_items_roundtrips() {
             QueueItem {
                 item_id: QueueItemId::from("qi-1"),
                 track_id: TrackId::from("t-1"),
+                source: None,
             },
             QueueItem {
                 item_id: QueueItemId::from("qi-2"),
                 track_id: TrackId::from("t-2"),
+                source: None,
             },
         ],
     };
@@ -139,6 +141,7 @@ fn playback_state_roundtrips() {
             items: vec![QueueItem {
                 item_id: QueueItemId::from("qi-1"),
                 track_id: TrackId::from("t-1"),
+                source: None,
             }],
         },
         now_playing_index: Some(0),
@@ -158,6 +161,7 @@ fn playback_state_with_session_anchor_roundtrips() {
             items: vec![QueueItem {
                 item_id: QueueItemId::from("qi-1"),
                 track_id: TrackId::from("t-1"),
+                source: None,
             }],
         },
         now_playing_index: Some(0),
@@ -222,10 +226,12 @@ fn playback_state_now_playing_helper_returns_track_or_none() {
                 QueueItem {
                     item_id: QueueItemId::from("qi-1"),
                     track_id: TrackId::from("t-1"),
+                    source: None,
                 },
                 QueueItem {
                     item_id: QueueItemId::from("qi-2"),
                     track_id: TrackId::from("t-2"),
+                    source: None,
                 },
             ],
         },

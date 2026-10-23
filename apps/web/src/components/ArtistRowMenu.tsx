@@ -62,7 +62,7 @@ function ArtistMenuBody({
         toast("no playable tracks for this artist", { variant: "error" });
         return;
       }
-      playList(tracks, 0);
+      playList(tracks, 0, { kind: "artist", id: artist.id });
     } catch (e) {
       toast(`couldn't play artist: ${(e as Error).message}`, {
         variant: "error",
@@ -77,7 +77,7 @@ function ArtistMenuBody({
     setBusy(true);
     try {
       const tracks = await loadTracks();
-      for (const t of tracks) sync.pushTrack(t);
+      for (const t of tracks) sync.pushTrack(t, { kind: "queue_add", id: artist.id });
       toast(`added ${tracks.length} tracks to queue`, { variant: "success" });
     } catch (e) {
       toast(`couldn't queue artist: ${(e as Error).message}`, {
@@ -101,7 +101,7 @@ function ArtistMenuBody({
         toast("station came back empty", { variant: "error" });
         return;
       }
-      playList(tracks, 0);
+      playList(tracks, 0, { kind: "artist_station", id: artist.id });
     } catch (e) {
       toast(
         e instanceof SeedNotEmbeddedError

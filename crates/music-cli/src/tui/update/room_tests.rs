@@ -39,6 +39,7 @@ fn item(id: &str) -> QueueItem {
     QueueItem {
         item_id: QueueItemId::from(format!("it-{id}")),
         track_id: TrackId::from(id.to_owned()),
+        source: None,
     }
 }
 
@@ -63,7 +64,11 @@ fn snapshot(app: &mut App, state: SyncState) -> Vec<Effect> {
 }
 
 fn applied(app: &mut App, op: SyncOp, version: u64) -> Vec<Effect> {
-    update(app, Msg::Sync(SyncEvent::Frame(ServerMessage::Applied { op, version })))
+    update(app, Msg::Sync(SyncEvent::Frame(ServerMessage::Applied {
+        op,
+        version,
+        op_id: None,
+    })))
 }
 
 /// Online app with output enabled and a hydrated queue — the common
@@ -113,7 +118,7 @@ fn hydration_fills_titles_and_reprojects() {
 #[test]
 fn applied_advances_replica_and_projection() {
     let mut a = online_playing(&["t1", "t2"], 0);
-    applied(&mut a, SyncOp::Push { item_id: QueueItemId::from("it-t3".to_owned()), track_id: TrackId::from("t3".to_owned()) }, 2);
+    applied(&mut a, SyncOp::Push { item_id: QueueItemId::from("it-t3".to_owned()), track_id: TrackId::from("t3".to_owned()), source: None }, 2);
     assert_eq!(a.sync.room.version, 2);
     assert_eq!(a.queue.len(), 3);
 }
@@ -394,6 +399,7 @@ fn failed_hydration_is_not_re_requested_every_frame() {
         SyncOp::Push {
             item_id: QueueItemId::from("it-new".to_owned()),
             track_id: TrackId::from("new".to_owned()),
+            source: None,
         },
         3,
     );

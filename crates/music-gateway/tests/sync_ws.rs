@@ -91,6 +91,7 @@ async fn ws_receives_applied_frame_when_op_posted_via_rest() {
     let op = SyncOp::Push {
         item_id: music_core::QueueItemId::from("qi-1"),
         track_id: music_core::TrackId::from("t-1"),
+        source: None,
     };
     let version = app_state.sync().apply(music_gateway::principal::OWNER_USER_ID, &op).await.unwrap();
     assert_eq!(version, 1);
@@ -115,7 +116,9 @@ async fn ws_op_from_one_client_is_seen_by_a_second() {
         op: SyncOp::Push {
             item_id: music_core::QueueItemId::from("qi-7"),
             track_id: music_core::TrackId::from("t-7"),
+            source: None,
         },
+        op_id: None,
     };
     alice
         .send(Message::Text(serde_json::to_string(&client_msg).unwrap()))
@@ -144,6 +147,7 @@ async fn ws_invalid_op_returns_op_error_only_to_sender_no_broadcast() {
     // Out-of-bounds SetNowPlaying — queue is empty.
     let bad = ClientMessage::Op {
         op: SyncOp::SetNowPlaying { index: Some(99) },
+        op_id: None,
     };
     alice
         .send(Message::Text(serde_json::to_string(&bad).unwrap()))
@@ -187,6 +191,7 @@ async fn ws_receives_start_session_applied_frame_with_anchor_in_op() {
         items: vec![music_core::QueueItem {
             item_id: music_core::QueueItemId::from("qi-1"),
             track_id: music_core::TrackId::from("t-1"),
+            source: None,
         }],
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-1"),
@@ -215,6 +220,7 @@ async fn ws_first_frame_snapshot_includes_anchor_when_session_active() {
         items: vec![music_core::QueueItem {
             item_id: music_core::QueueItemId::from("qi-1"),
             track_id: music_core::TrackId::from("t-1"),
+            source: None,
         }],
         anchor_index: 0,
         session_id: music_core::SessionId::from("sess-pre"),
@@ -243,5 +249,108 @@ async fn ws_malformed_client_message_returns_op_error() {
         .await
         .unwrap();
     let frame = next_text_message(&mut ws).await;
+    assert_eq!(frame["type"], "op_error");
+}
+
+#[tokio::test]
+async fn ws_ping_is_answered_with_pong_only_to_the_pinger() {
+    let addr = spawn_app().await;
+    let (mut alice, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let (mut bob, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let _ = next_text_message(&mut alice).await;
+    let _ = next_text_message(&mut bob).await;
+
+    alice
+        .send(Message::Text(json!({"type": "ping"}).to_string()))
+        .await
+        .unwrap();
+    let frame = next_text_message(&mut alice).await;
+    assert_eq!(frame, json!({"type": "pong"}));
+
+    let nothing = tokio::time::timeout(Duration::from_millis(200), bob.next()).await;
+    assert!(
+        nothing.is_err(),
+        "pong must not fan out: bob received {nothing:?}"
+    );
+}
+
+#[tokio::test]
+async fn ws_applied_and_op_error_echo_the_senders_op_id() {
+    let addr = spawn_app().await;
+    let (mut alice, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let _ = next_text_message(&mut alice).await;
+
+    let push = json!({
+        "type": "op",
+        "op_id": "op-a",
+        "op": {"type": "push", "item_id": "qi-1", "track_id": "t-1"},
+    });
+    alice.send(Message::Text(push.to_string())).await.unwrap();
+    let frame = next_text_message(&mut alice).await;
+    assert_eq!(frame["type"], "applied");
+    assert_eq!(frame["op_id"], "op-a");
+
+    let bad = json!({
+        "type": "op",
+        "op_id": "op-b",
+        "op": {"type": "set_now_playing", "index": 99},
+    });
+    alice.send(Message::Text(bad.to_string())).await.unwrap();
+    let frame = next_text_message(&mut alice).await;
+    assert_eq!(frame["type"], "op_error");
+    assert_eq!(frame["op_id"], "op-b");
+}
+
+#[tokio::test]
+async fn ws_resent_op_id_is_acked_not_reapplied() {
+    // A phone's socket dies after its op reached the gateway but before
+    // the echo got back; on reconnect it resends the op. Re-applying a
+    // stale absolute op would clobber anything another device did in
+    // between, so the gateway must recognise the id and only ack it.
+    let addr = spawn_app().await;
+    let (mut alice, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let (mut bob, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let _ = next_text_message(&mut alice).await;
+    let _ = next_text_message(&mut bob).await;
+
+    let op = json!({
+        "type": "op",
+        "op_id": "op-once",
+        "op": {"type": "set_playing", "is_playing": true},
+    });
+    alice.send(Message::Text(op.to_string())).await.unwrap();
+    let first = next_text_message(&mut alice).await;
+    assert_eq!(first["type"], "applied");
+    let version = first["version"].clone();
+    let _ = next_text_message(&mut bob).await;
+
+    // Resend on a fresh connection, as a reconnecting client would.
+    let (mut alice2, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let snap = next_text_message(&mut alice2).await;
+    assert_eq!(snap["state"]["version"], version);
+    alice2.send(Message::Text(op.to_string())).await.unwrap();
+    let frame = next_text_message(&mut alice2).await;
+    assert_eq!(frame, json!({"type": "ack", "op_id": "op-once"}));
+
+    let nothing = tokio::time::timeout(Duration::from_millis(200), bob.next()).await;
+    assert!(
+        nothing.is_err(),
+        "duplicate must not broadcast: bob received {nothing:?}"
+    );
+}
+
+#[tokio::test]
+async fn ws_overlong_op_id_is_rejected() {
+    let addr = spawn_app().await;
+    let (mut alice, _) = connect_async(ws_url_with_token(addr)).await.unwrap();
+    let _ = next_text_message(&mut alice).await;
+
+    let op = json!({
+        "type": "op",
+        "op_id": "x".repeat(200),
+        "op": {"type": "set_playing", "is_playing": true},
+    });
+    alice.send(Message::Text(op.to_string())).await.unwrap();
+    let frame = next_text_message(&mut alice).await;
     assert_eq!(frame["type"], "op_error");
 }

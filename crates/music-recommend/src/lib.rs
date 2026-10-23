@@ -35,7 +35,7 @@ pub mod whitening;
 pub mod whitening_store;
 
 pub use embedder::{EmbedResult, EmbedderClient, EmbedderConfig, EmbedderError, EmbedderHealth};
-pub use events::{EventInput, EventStore, EventType, StoredEvent};
+pub use events::{EventInput, EventStore, EventType, KeyedEvent, StoredEvent};
 pub use feedback::{FeedbackAggregate, FeedbackCounts, FeedbackStore};
 pub use ingest::{MetadataFetcher, MetadataIngest};
 pub use leash::{

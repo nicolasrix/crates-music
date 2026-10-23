@@ -49,11 +49,16 @@ impl SyncState {
     /// tests replay history with synthetic time.
     pub fn apply(&mut self, op: &SyncOp, now_ms: i64) -> Result<(), ApplyError> {
         match op {
-            SyncOp::Push { item_id, track_id } => {
+            SyncOp::Push {
+                item_id,
+                track_id,
+                source,
+            } => {
                 if self.playback.queue.position_of(item_id).is_none() {
                     self.playback.queue.items.push(QueueItem {
                         item_id: item_id.clone(),
                         track_id: track_id.clone(),
+                        source: source.clone(),
                     });
                 }
                 // If item_id was already present, this is a retried op:

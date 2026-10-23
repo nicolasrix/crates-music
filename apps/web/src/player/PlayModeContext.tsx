@@ -37,6 +37,7 @@ import {
 import { suggestForPlaylist } from "../api/recommend";
 import type { Track } from "../api/types";
 import { playList } from "../sync/playbackHelpers";
+import type { PlaySource } from "../sync/types";
 import { useSync } from "../sync/SyncContext";
 import { useToast } from "../toast/ToastContext";
 import { useAutoplay } from "./AutoplayContext";
@@ -67,6 +68,9 @@ const MAX_MIX = 10;
 // Seeds sampled server-side from the context. Matches the /v1 default.
 const SEED_SAMPLE = 8;
 
+// Logged source of a recommendation mixed into a context.
+const SMART_SHUFFLE_SOURCE: PlaySource = { kind: "smart_shuffle" };
+
 interface PlayModeCtx {
   mode: PlayMode;
   /** Step the player-bar button: in order → shuffle → smart shuffle. */
@@ -86,6 +90,7 @@ interface PlayModeCtx {
   startContext: (
     tracks: readonly Track[],
     startIndex: number,
+    source: PlaySource,
     modeOverride?: PlayMode,
   ) => void;
 }
@@ -145,12 +150,12 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
   /** Fetch recommendations for a context and fold them into its upcoming
    *  half.
    *
-   *  `upcoming` is what we just *submitted*, not what `liveRef` holds:
-   *  `submit()` has no optimistic apply, so for one round-trip the local
-   *  mirror still describes the pre-shuffle queue. Interleaving into
-   *  that would write the old order back and undo the shuffle. The live
-   *  mirror is used for one thing only — noticing that the listener
-   *  advanced past some of those tracks while the recommender thought. */
+   *  `upcoming` is what we just *submitted*. `submit()` applies locally
+   *  at once, but another device's op can still land in between, and
+   *  interleaving into whatever the mirror holds then could write some
+   *  other order back over the shuffle. The live mirror is used for one
+   *  thing only — noticing that the listener advanced past some of those
+   *  tracks while the recommender thought. */
   const mixRecommendations = useCallback(
     async (plan: {
       sessionId: string;
@@ -182,10 +187,9 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
       if (tracks.length === 0) return;
 
       const live = liveRef.current;
-      // Same session in the mirror → it has caught up, so its history is
-      // authoritative about what's been played meanwhile. Different → the
-      // mirror is still a round-trip behind and describes a queue we've
-      // already replaced, so it knows nothing about what we submitted.
+      // Same session in the mirror → its history is authoritative about
+      // what's been played meanwhile. Different → the session was replaced
+      // under us (another device), so it knows nothing about this plan.
       const heard =
         live.sessionId === plan.sessionId
           ? new Set(live.trackIds.slice(0, (live.nowPlayingIndex ?? -1) + 1))
@@ -195,17 +199,24 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
 
       const recIds = tracks.map((t) => t.id);
       const mixed = interleave(base, recIds, RECS_EVERY);
-      const itemIds = replaceUpcoming(mixed, tracks);
+      const recSet = new Set(recIds);
+      const itemIds = replaceUpcoming(mixed, tracks, (id) =>
+        recSet.has(id) ? SMART_SHUFFLE_SOURCE : undefined,
+      );
       // Provenance, so the player bar offers thumbs on a mixed-in track
       // exactly as it does on an autoplay one.
-      const recSet = new Set(recIds);
       markRecommendations(itemIds.filter((_, i) => recSet.has(mixed[i]!)));
     },
     [markRecommendations, replaceUpcoming],
   );
 
   const startContext = useCallback(
-    (tracks: readonly Track[], startIndex: number, modeOverride?: PlayMode) => {
+    (
+      tracks: readonly Track[],
+      startIndex: number,
+      source: PlaySource,
+      modeOverride?: PlayMode,
+    ) => {
       if (tracks.length === 0) return;
       const effective = modeOverride ?? mode;
       if (modeOverride !== undefined && modeOverride !== mode) {
@@ -223,7 +234,7 @@ export function PlayModeProvider({ children }: { children: ReactNode }) {
         return t ? [t] : [];
       });
 
-      const sessionId = playList({ startSession }, ordered, anchorIndex);
+      const sessionId = playList({ startSession }, ordered, anchorIndex, source);
       if (!sessionId) return;
       // What we remember is the caller's *original* order (that's the
       // whole point — `order` is the shuffled result), narrowed to the

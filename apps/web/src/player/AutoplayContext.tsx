@@ -34,9 +34,10 @@
 //     any refill that ends up placing nothing leaves the queue parked
 //     under threshold until an unrelated change wakes the effect.
 //
-// `submit()` in SyncContext has no optimistic apply, so local state only
-// moves on the server's echo. That is what makes the window wide enough
-// to matter: the queue is always a round-trip behind the ops we sent.
+// `submit()` in SyncContext applies ops locally at once, so our own
+// pushes show up in `queue.items` before the next render. The window
+// that still matters is the recommender request itself — seconds during
+// which the listener, or another device, can move the queue.
 
 import {
   createContext,
@@ -49,6 +50,7 @@ import {
 } from "react";
 import { startStationFromAny, startWeightedStation } from "../api/recommend";
 import { useSync } from "../sync/SyncContext";
+import type { PlaySource } from "../sync/types";
 import { isUnderdelivery, needsRearm, planRefill } from "./autoplayRefill";
 import { buildAutoplaySeeds } from "./autoplaySeeds";
 import {
@@ -101,6 +103,9 @@ interface AutoplayCtx {
 }
 
 const Ctx = createContext<AutoplayCtx | null>(null);
+
+// Logged source of every track autoplay appends.
+const AUTOPLAY_SOURCE: PlaySource = { kind: "autoplay" };
 
 export function AutoplayProvider({ children }: { children: ReactNode }) {
   const [autoplay, setAutoplayState] = useState<boolean>(() => {
@@ -276,7 +281,7 @@ export function AutoplayProvider({ children }: { children: ReactNode }) {
         // Synchronous: every push lands before React can re-render, so
         // the batch is all-or-nothing from any observer's point of view.
         for (const t of plan.push) {
-          const newItemId = pushTrack(t);
+          const newItemId = pushTrack(t, AUTOPLAY_SOURCE);
           recommendedIdsRef.current.add(newItemId);
         }
       } catch (err) {

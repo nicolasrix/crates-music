@@ -7,7 +7,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Track } from "../api/types";
 import { playList, playSingle } from "./playbackHelpers";
-import type { SyncOp } from "./types";
+import type { PlaySource, SyncOp } from "./types";
+
+const ALBUM: PlaySource = { kind: "album", id: "al-1" };
 
 function mockSync() {
   const submitted: SyncOp[] = [];
@@ -36,7 +38,7 @@ function track(id: string): Track {
 describe("playSingle", () => {
   it("emits one start_session op, not the 4-op pattern", () => {
     const sync = mockSync();
-    playSingle(sync, track("t-1"));
+    playSingle(sync, track("t-1"), ALBUM);
 
     expect(sync.startSession).toHaveBeenCalledOnce();
     expect(sync.submitted).toHaveLength(1);
@@ -45,7 +47,7 @@ describe("playSingle", () => {
 
   it("anchor_index is 0 for a single track", () => {
     const sync = mockSync();
-    playSingle(sync, track("t-1"));
+    playSingle(sync, track("t-1"), ALBUM);
     const op = sync.submitted[0]! as Extract<SyncOp, { type: "start_session" }>;
     expect(op.anchor_index).toBe(0);
     expect(op.items).toHaveLength(1);
@@ -57,7 +59,7 @@ describe("playList", () => {
   it("emits one start_session op carrying every track", () => {
     const sync = mockSync();
     const tracks = [track("t-1"), track("t-2"), track("t-3")];
-    playList(sync, tracks, 0);
+    playList(sync, tracks, 0, ALBUM);
 
     expect(sync.startSession).toHaveBeenCalledOnce();
     expect(sync.submitted).toHaveLength(1);
@@ -69,15 +71,21 @@ describe("playList", () => {
   it("anchors at startIndex 5, not 0, when user picks a mid-list track", () => {
     const sync = mockSync();
     const tracks = Array.from({ length: 8 }, (_, i) => track(`t-${i}`));
-    playList(sync, tracks, 5);
+    playList(sync, tracks, 5, ALBUM);
     const op = sync.submitted[0]! as Extract<SyncOp, { type: "start_session" }>;
     expect(op.anchor_index).toBe(5);
   });
 
   it("empty tracks array is a no-op (no session started)", () => {
     const sync = mockSync();
-    playList(sync, [], 0);
+    playList(sync, [], 0, ALBUM);
     expect(sync.startSession).not.toHaveBeenCalled();
     expect(sync.submitted).toHaveLength(0);
+  });
+
+  it("hands the source to startSession so every item is tagged with it", () => {
+    const sync = mockSync();
+    playList(sync, [track("t-1")], 0, ALBUM);
+    expect(sync.startSession).toHaveBeenCalledWith([track("t-1")], 0, ALBUM);
   });
 });

@@ -73,7 +73,7 @@ export function LikedSongs() {
           </p>
         )}
         {tracks.length > 0 && (
-          <TrackTable tracks={tracks} showAlbum onPlay={(i) => playList(tracks, i)} />
+          <TrackTable tracks={tracks} showAlbum onPlay={(i) => playList(tracks, i, { kind: "liked" })} />
         )}
       </div>
 

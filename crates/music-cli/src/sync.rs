@@ -56,6 +56,7 @@ pub async fn run_push(config: &Config, track_ids: &[String]) -> Result<()> {
         let op = SyncOp::Push {
             item_id: QueueItemId::from(item_id.clone()),
             track_id: TrackId::from(track_id.clone()),
+            source: None,
         };
         let version = submit_op(gw, &client, &token, &op)
             .await
@@ -226,6 +227,7 @@ pub async fn run_watch(config: &Config) -> Result<()> {
                 // faithful tee of the server's output.
                 let _: ServerMessage = serde_json::from_str(&t).unwrap_or(ServerMessage::OpError {
                     message: "unknown frame".into(),
+                    op_id: None,
                 });
                 println!("{t}");
             }

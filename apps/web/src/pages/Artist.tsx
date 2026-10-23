@@ -65,7 +65,7 @@ export function Artist({ id }: { id: string }) {
       // lives in sync/artistTracks so the artist ⋯ menus play the same
       // thing this button does.
       const tracks = await artistTracksFrom(queryClient, artist.name, albums);
-      if (tracks.length > 0) playList(tracks, 0);
+      if (tracks.length > 0) playList(tracks, 0, { kind: "artist", id: artist.id });
     } finally {
       setPlayPending(false);
     }
@@ -198,7 +198,7 @@ function MostPlayedSection({ artist }: { artist: ArtistType }) {
         tracks={shown}
         showAlbum
         showPlayCount
-        onPlay={(i) => playList(shown, i)}
+        onPlay={(i) => playList(shown, i, { kind: "artist", id: artist.id })}
       />
     </div>
   );

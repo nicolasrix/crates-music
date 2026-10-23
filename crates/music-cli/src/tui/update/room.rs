@@ -33,13 +33,16 @@ use super::playback::{self, Advance, MoveKind};
 pub(super) fn handle(app: &mut App, ev: SyncEvent) -> Vec<Effect> {
     match ev {
         SyncEvent::Frame(ServerMessage::Snapshot { state }) => adopt_snapshot(app, state),
-        SyncEvent::Frame(ServerMessage::Applied { op, version }) => applied(app, &op, version),
-        SyncEvent::Frame(ServerMessage::OpError { message }) => {
+        SyncEvent::Frame(ServerMessage::Applied { op, version, .. }) => applied(app, &op, version),
+        SyncEvent::Frame(ServerMessage::OpError { message, .. }) => {
             // Nothing to roll back — no state was optimistically applied.
             // The op simply didn't happen; say why.
             app.set_status(format!("sync: {message}"), true);
             vec![]
         }
+        // The TUI sends neither op ids nor app-level pings — it uses
+        // protocol ping frames — so these never arrive for it.
+        SyncEvent::Frame(ServerMessage::Ack { .. } | ServerMessage::Pong) => vec![],
         SyncEvent::Down { reason } => go_offline(app, &reason),
     }
 }
@@ -323,6 +326,7 @@ pub(super) fn start_session(
         .map(|t| QueueItem {
             item_id: QueueItemId::from(crate::sync::new_item_id()),
             track_id: TrackId::from(t.id.clone()),
+            source: None,
         })
         .collect();
     vec![Effect::SyncSubmit {
@@ -350,6 +354,7 @@ pub(super) fn push_tracks(
             op: SyncOp::Push {
                 item_id: QueueItemId::from(item_id.clone()),
                 track_id: TrackId::from(t.id.clone()),
+                source: None,
             },
         });
         if play_next {

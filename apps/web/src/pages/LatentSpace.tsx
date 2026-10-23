@@ -20,6 +20,7 @@
 // no projection work itself.
 
 import { useQuery } from "@tanstack/react-query";
+import type { PlaySource } from "../sync/types";
 import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { getSong } from "../api/client";
@@ -62,6 +63,9 @@ import {
   type SessionTrackRow,
   type TrackMetadata,
 } from "./latentSpace";
+
+// Logged source of a play started from the scatter.
+const LATENT_SPACE_SOURCE: PlaySource = { kind: "latent_space" };
 
 /// Color-by selector states. "genre" keeps the legacy bucketed palette;
 /// the rest are continuous channels driven through the viridis
@@ -1006,7 +1010,7 @@ function ScatterCanvas({
     setPlayingTrackId(hover.track_id);
     try {
       const track = await getSong(hover.track_id);
-      playback.playSingle(track);
+      playback.playSingle(track, LATENT_SPACE_SOURCE);
     } catch (err) {
       console.error("latent_space: getSong failed", err);
     } finally {
@@ -1397,7 +1401,7 @@ function SessionTrackRowView({ row }: { row: SessionTrackRow }) {
     setBusy(true);
     try {
       const track = await getSong(row.track_id);
-      playback.playSingle(track);
+      playback.playSingle(track, LATENT_SPACE_SOURCE);
     } catch (err) {
       console.error("session_panel: getSong failed", err);
     } finally {

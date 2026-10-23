@@ -303,6 +303,7 @@ async fn submission_scrobble_during_active_session_stamps_session_id() {
             items: vec![music_core::QueueItem {
                 item_id: music_core::QueueItemId::from("qi-1".to_string()),
                 track_id: TrackId::from("track-in-session".to_string()),
+                source: None,
             }],
             anchor_index: 0,
             session_id: sid.clone(),
@@ -366,4 +367,52 @@ async fn submission_scrobble_without_active_session_stamps_null() {
         recent[0].session_id.is_none(),
         "no active session ⇒ session_id must be NULL"
     );
+}
+
+#[tokio::test]
+async fn submission_scrobble_records_queue_source_and_listen_session() {
+    let upstream = MockServer::start().await;
+    Mock::given(m_method("GET"))
+        .and(m_path("/rest/scrobble"))
+        .respond_with(ok_subsonic_response())
+        .mount(&upstream)
+        .await;
+    let cfg = common::test_config_with_upstream(&upstream.uri(), "alice", "sesame");
+    let state = common::build_state(cfg).await;
+    let app = build_router(state.clone());
+
+    state
+        .sync()
+        .apply(music_gateway::principal::OWNER_USER_ID, &music_sync::SyncOp::StartSession {
+            items: vec![music_core::QueueItem {
+                item_id: music_core::QueueItemId::from("qi-1".to_string()),
+                track_id: TrackId::from("track-from-album".to_string()),
+                source: Some(music_core::PlaySource {
+                    kind: "album".to_string(),
+                    id: Some("al-7".to_string()),
+                }),
+            }],
+            anchor_index: 0,
+            session_id: music_core::SessionId::from("sess-src".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/rest/scrobble?id=track-from-album&submission=true&time=1700000001000")
+                .header("authorization", format!("Bearer {}", common::TEST_BEARER))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let recent = state.event_store().recently_played(1, None).await.unwrap();
+    let meta = recent[0].metadata.as_ref().expect("scrobble carries metadata");
+    assert_eq!(meta["source"]["kind"], "album");
+    assert_eq!(meta["source"]["id"], "al-7");
+    assert!(meta["listen_session"].is_string());
 }
