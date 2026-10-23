@@ -28,6 +28,7 @@ import { evaluateScrobble, type ScrobbleState } from "./scrobble";
 import { FRESH_CLOCK, sourceAtCursor, tick, type ListenClock } from "./listenTime";
 import { evaluateSkip } from "./skip";
 import { isDislikedEntity, nextPlayableIndex } from "./autoSkip";
+import { externalPlayingChange } from "./elementToggle";
 import { useRatingsMaps } from "./useRatings";
 import { loadOutputEnabled, saveOutputEnabled } from "./outputDevice";
 
@@ -505,9 +506,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // the element pauses but `is_playing` in sync state stays true, leaving
   // the play/pause icon and UI lying to the user.
   //
-  // Submit only when the audio state diverges from the sync state, so the
-  // *internal* play/pause we trigger from `is_playing` doesn't bounce back
-  // into a duplicate op (would still be a no-op via dedup, but cleaner).
+  // Submit only when the element's state *at fire time* diverges from the
+  // sync state (elementToggle.ts), so the internal play/pause we trigger
+  // from `is_playing` never bounces back — a stale event bouncing back is
+  // a self-sustaining play/pause oscillation now that ops apply locally.
   // We read the latest is_playing through a ref so the listener doesn't
   // need to re-bind on every flip.
   const isPlayingRef = useRef(is_playing);
@@ -517,27 +519,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const onPlay = () => {
-      // A silent remote's element is decoupled from shared intent; don't let
-      // its (suppressed) transitions write back into the room.
+    const onToggle = () => {
+      // A silent remote's element is decoupled from shared intent: the
+      // pauses we trigger to keep it quiet must not broadcast — that would
+      // pause the actual speaker too.
       if (!outputEnabledRef.current) return;
-      if (!isPlayingRef.current) submit({ type: "set_playing", is_playing: true });
+      const next = externalPlayingChange(audio, isPlayingRef.current);
+      if (next !== null) submit({ type: "set_playing", is_playing: next });
     };
-    const onPause = () => {
-      // When this device is a silent remote, the pauses we trigger to keep it
-      // quiet must not broadcast — that would pause the actual speaker too.
-      if (!outputEnabledRef.current) return;
-      // Ignore pauses that fire as a side-effect of `ended` — the auto-
-      // advance handler will flip is_playing if we hit the queue tail, and
-      // we don't want to race it here.
-      if (audio.ended) return;
-      if (isPlayingRef.current) submit({ type: "set_playing", is_playing: false });
-    };
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
+    audio.addEventListener("play", onToggle);
+    audio.addEventListener("pause", onToggle);
     return () => {
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("play", onToggle);
+      audio.removeEventListener("pause", onToggle);
     };
   }, [submit]);
 
